@@ -59,6 +59,7 @@ export type UpdateCommandOptions = {
   tag?: string;
   timeout?: string;
   yes?: boolean;
+  allowDirty?: boolean;
 };
 export type UpdateStatusOptions = {
   json?: boolean;
@@ -775,6 +776,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
       progress,
       channel,
       tag,
+      allowDirty: opts.allowDirty,
     });
     const steps = [...(cloneStep ? [cloneStep] : []), ...updateResult.steps];
     if (switchToGit && updateResult.status === "ok") {
@@ -1122,6 +1124,7 @@ export function registerUpdateCli(program: Command) {
     .option("--tag <dist-tag|version>", "Override npm dist-tag or version for this update")
     .option("--timeout <seconds>", "Timeout for each update step in seconds (default: 1200)")
     .option("--yes", "Skip confirmation prompts (non-interactive)", false)
+    .option("--allow-dirty", "Allow update even when working directory has uncommitted changes", false)
     .addHelpText("after", () => {
       const examples = [
         ["openclaw update", "Update a source checkout (git)"],
@@ -1158,7 +1161,7 @@ ${theme.heading("Notes:")}
   - Switch channels with --channel stable|beta|dev
   - For global installs: auto-updates via detected package manager when possible (see docs/install/updating.md)
   - Downgrades require confirmation (can break configuration)
-  - Skips update if the working directory has uncommitted changes
+  - Skips update if the working directory has uncommitted changes (use --allow-dirty to override)
 
 ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.openclaw.ai/cli/update")}`;
     })
@@ -1171,6 +1174,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.openclaw.ai/cli/up
           tag: opts.tag as string | undefined,
           timeout: opts.timeout as string | undefined,
           yes: Boolean(opts.yes),
+          allowDirty: Boolean(opts.allowDirty),
         });
       } catch (err) {
         defaultRuntime.error(String(err));

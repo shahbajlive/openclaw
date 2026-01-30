@@ -60,6 +60,7 @@ type UpdateRunnerOptions = {
   timeoutMs?: number;
   runCommand?: CommandRunner;
   progress?: UpdateStepProgress;
+  allowDirty?: boolean;
 };
 
 const DEFAULT_TIMEOUT_MS = 20 * 60_000;
@@ -376,7 +377,7 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
     steps.push(statusCheck);
     const hasUncommittedChanges =
       statusCheck.stdoutTail && statusCheck.stdoutTail.trim().length > 0;
-    if (hasUncommittedChanges) {
+    if (hasUncommittedChanges && !opts.allowDirty) {
       return {
         status: "skipped",
         mode: "git",
@@ -588,11 +589,30 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
         };
       }
 
+      // Stash changes if allowDirty is true and there are uncommitted changes
+      let stashCreated = false;
+      if (opts.allowDirty && hasUncommittedChanges) {
+        const stashStep = await runStep(
+          step("git stash", ["git", "-C", gitRoot, "stash", "push", "-m", "openclaw-update-auto-stash"], gitRoot),
+        );
+        steps.push(stashStep);
+        if (stashStep.exitCode === 0) {
+          stashCreated = true;
+        }
+      }
+
       const rebaseStep = await runStep(
         step("git rebase", ["git", "-C", gitRoot, "rebase", selectedSha], gitRoot),
       );
       steps.push(rebaseStep);
       if (rebaseStep.exitCode !== 0) {
+        // Restore stash if we created one
+        if (stashCreated) {
+          const stashPopStep = await runStep(
+            step("git stash pop", ["git", "-C", gitRoot, "stash", "pop"], gitRoot),
+          );
+          steps.push(stashPopStep);
+        }
         const abortResult = await runCommand(["git", "-C", gitRoot, "rebase", "--abort"], {
           cwd: gitRoot,
           timeoutMs,
@@ -615,6 +635,15 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
           steps,
           durationMs: Date.now() - startedAt,
         };
+      }
+
+      // Restore stash if we created one
+      if (stashCreated) {
+        const stashPopStep = await runStep(
+          step("git stash pop", ["git", "-C", gitRoot, "stash", "pop"], gitRoot),
+        );
+        steps.push(stashPopStep);
+        // Note: stash pop can fail if there are conflicts, but we continue anyway
       }
     } else {
       const fetchStep = await runStep(
@@ -678,6 +707,7 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
 
     // Restore dist/control-ui/ to committed state to prevent dirty repo after update
     // (ui:build regenerates assets with new hashes, which would block future updates)
+    // This step is non-fatal - if the path doesn't exist in git, we just skip it
     const restoreUiStep = await runStep(
       step(
         "restore control-ui",
@@ -686,6 +716,10 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
       ),
     );
     steps.push(restoreUiStep);
+    // Don't fail the update if restore fails (e.g., if dist/control-ui/ is not tracked)
+    if (restoreUiStep.exitCode !== 0) {
+      restoreUiStep.exitCode = 0; // Mark as non-fatal
+    }
 
     const doctorStep = await runStep(
       step(

@@ -58,15 +58,13 @@ function filterOutPartialTargets(targets, partialTargets) {
 }
 
 function resolveOxfmtCommand(repoRoot) {
-  const binName = process.platform === "win32" ? "oxfmt.cmd" : "oxfmt";
-  const local = path.join(repoRoot, "node_modules", ".bin", binName);
-  if (fs.existsSync(local)) {
-    return { command: local, args: [] };
-  }
-
-  const result = spawnSync("oxfmt", ["--version"], { stdio: "ignore" });
+  // Use pnpm exec to avoid ESM module loading issues with extensionless binaries
+  const result = spawnSync("pnpm", ["exec", "oxfmt", "--version"], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
   if (result.status === 0) {
-    return { command: "oxfmt", args: [] };
+    return { command: "pnpm", args: ["exec", "oxfmt"] };
   }
 
   return null;
@@ -79,7 +77,11 @@ function getGitPaths(args, repoRoot) {
 }
 
 function formatFiles(repoRoot, oxfmt, files) {
-  const result = spawnSync(oxfmt.command, ["--write", ...oxfmt.args, ...files], {
+  // When using pnpm exec, arguments go after the command name
+  const args = oxfmt.command === "pnpm"
+    ? ["exec", "oxfmt", "--write", ...files]
+    : ["--write", ...oxfmt.args, ...files];
+  const result = spawnSync(oxfmt.command, args, {
     cwd: repoRoot,
     stdio: "inherit",
   });

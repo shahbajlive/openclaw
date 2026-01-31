@@ -1,11 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { isSubagentSessionKey } from "../routing/session-key.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { resolveUserPath } from "../utils.js";
+import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
 
 export function resolveDefaultAgentWorkspaceDir(
   env: NodeJS.ProcessEnv = process.env,
@@ -30,11 +29,6 @@ export const DEFAULT_SECURITY_FILENAME = "SECURITY.md";
 export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
 export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
 
-const TEMPLATE_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../docs/reference/templates",
-);
-
 function stripFrontMatter(content: string): string {
   if (!content.startsWith("---")) {
     return content;
@@ -50,7 +44,8 @@ function stripFrontMatter(content: string): string {
 }
 
 async function loadTemplate(name: string): Promise<string> {
-  const templatePath = path.join(TEMPLATE_DIR, name);
+  const templateDir = await resolveWorkspaceTemplateDir();
+  const templatePath = path.join(templateDir, name);
   try {
     const content = await fs.readFile(templatePath, "utf-8");
     return stripFrontMatter(content);

@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { isSubagentSessionKey } from "../routing/session-key.js";
 import { runCommandWithTimeout } from "../process/exec.js";
@@ -292,23 +291,6 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
         missing: false,
       });
     } catch {
-      // For SECURITY.md, try src/agents/ directory as fallback
-      if (entry.name === DEFAULT_SECURITY_FILENAME) {
-        const agentsDir = path.dirname(fileURLToPath(import.meta.url));
-        const repoSecurityPath = path.join(agentsDir, DEFAULT_SECURITY_FILENAME);
-        try {
-          const content = await fs.readFile(repoSecurityPath, "utf-8");
-          result.push({
-            name: entry.name,
-            path: repoSecurityPath,
-            content,
-            missing: false,
-          });
-          continue;
-        } catch {
-          // Repo file also not found, fall through to missing
-        }
-      }
       result.push({ name: entry.name, path: entry.filePath, missing: true });
     }
   }

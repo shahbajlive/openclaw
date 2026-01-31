@@ -149,7 +149,7 @@ async function callBrowserProxy(params: {
     (typeof payload?.payloadJSON === "string" && payload.payloadJSON
       ? (JSON.parse(payload.payloadJSON) as BrowserProxyResult)
       : null);
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || !("result" in parsed)) {
     throw new Error("browser proxy failed");
   }
   return parsed;

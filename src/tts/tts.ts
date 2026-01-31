@@ -108,6 +108,7 @@ export type ResolvedTtsConfig = {
   };
   openai: {
     apiKey?: string;
+    baseUrl: string;
     model: string;
     voice: string;
   };
@@ -280,6 +281,9 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
     },
     openai: {
       apiKey: raw.openai?.apiKey,
+      baseUrl: normalizeOpenAITtsBaseUrl(
+        raw.openai?.baseUrl?.trim() || process.env.OPENAI_TTS_BASE_URL?.trim() || "https://api.openai.com/v1",
+      ),
       model: raw.openai?.model ?? DEFAULT_OPENAI_MODEL,
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
     },
@@ -495,6 +499,12 @@ function isValidVoiceId(voiceId: string): boolean {
 function normalizeElevenLabsBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
   if (!trimmed) return DEFAULT_ELEVENLABS_BASE_URL;
+  return trimmed.replace(/\/+$/, "");
+}
+
+function normalizeOpenAITtsBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return "https://api.openai.com/v1";
   return trimmed.replace(/\/+$/, "");
 }
 
@@ -756,19 +766,18 @@ export const OPENAI_TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as con
 /**
  * Custom OpenAI-compatible TTS endpoint.
  * When set, model/voice validation is relaxed to allow non-OpenAI models.
- * Example: OPENAI_TTS_BASE_URL=http://localhost:8880/v1
+ * Example: messages.tts.openai.baseUrl=http://localhost:8880/v1
+ * Or via env: OPENAI_TTS_BASE_URL=http://localhost:8880/v1
  *
- * Note: Read at runtime (not module load) to support config.env loading.
+ * Priority: config > env var > default
  */
-function getOpenAITtsBaseUrl(): string {
-  return (process.env.OPENAI_TTS_BASE_URL?.trim() || "https://api.openai.com/v1").replace(
-    /\/+$/,
-    "",
-  );
+function getOpenAITtsBaseUrl(config?: ResolvedTtsConfig["openai"]): string {
+  const baseUrl = config?.baseUrl || process.env.OPENAI_TTS_BASE_URL?.trim() || "https://api.openai.com/v1";
+  return normalizeOpenAITtsBaseUrl(baseUrl);
 }
 
-function isCustomOpenAIEndpoint(): boolean {
-  return getOpenAITtsBaseUrl() !== "https://api.openai.com/v1";
+function isCustomOpenAIEndpoint(config?: ResolvedTtsConfig["openai"]): boolean {
+  return getOpenAITtsBaseUrl(config) !== "https://api.openai.com/v1";
 }
 export const OPENAI_TTS_VOICES = [
   "alloy",
@@ -784,15 +793,15 @@ export const OPENAI_TTS_VOICES = [
 
 type OpenAiTtsVoice = (typeof OPENAI_TTS_VOICES)[number];
 
-function isValidOpenAIModel(model: string): boolean {
-  // Allow any model when using custom endpoint (e.g., Kokoro, LocalAI)
-  if (isCustomOpenAIEndpoint()) return true;
+function isValidOpenAIModel(model: string, openaiConfig?: ResolvedTtsConfig["openai"]): boolean {
+  // Allow any model when using custom endpoint (e.g., Kokoro, LocalAI, Qwen3-TTS)
+  if (isCustomOpenAIEndpoint(openaiConfig)) return true;
   return OPENAI_TTS_MODELS.includes(model as (typeof OPENAI_TTS_MODELS)[number]);
 }
 
-function isValidOpenAIVoice(voice: string): voice is OpenAiTtsVoice {
-  // Allow any voice when using custom endpoint (e.g., Kokoro Chinese voices)
-  if (isCustomOpenAIEndpoint()) return true;
+function isValidOpenAIVoice(voice: string, openaiConfig?: ResolvedTtsConfig["openai"]): voice is OpenAiTtsVoice {
+  // Allow any voice when using custom endpoint (e.g., Kokoro Chinese voices, Qwen3-TTS)
+  if (isCustomOpenAIEndpoint(openaiConfig)) return true;
   return OPENAI_TTS_VOICES.includes(voice as OpenAiTtsVoice);
 }
 
@@ -1005,13 +1014,14 @@ async function openaiTTS(params: {
   voice: string;
   responseFormat: "mp3" | "opus" | "pcm";
   timeoutMs: number;
+  openaiConfig?: ResolvedTtsConfig["openai"];
 }): Promise<Buffer> {
-  const { text, apiKey, model, voice, responseFormat, timeoutMs } = params;
+  const { text, apiKey, model, voice, responseFormat, timeoutMs, openaiConfig } = params;
 
-  if (!isValidOpenAIModel(model)) {
+  if (!isValidOpenAIModel(model, openaiConfig)) {
     throw new Error(`Invalid model: ${model}`);
   }
-  if (!isValidOpenAIVoice(voice)) {
+  if (!isValidOpenAIVoice(voice, openaiConfig)) {
     throw new Error(`Invalid voice: ${voice}`);
   }
 
@@ -1019,7 +1029,17 @@ async function openaiTTS(params: {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${getOpenAITtsBaseUrl()}/audio/speech`, {
+    // Use streaming for custom endpoints (e.g., Qwen3-TTS) for all text lengths
+    // Standard HTTP chunked transfer encoding
+    const baseUrl = getOpenAITtsBaseUrl(openaiConfig);
+    const useStreaming = isCustomOpenAIEndpoint(openaiConfig);
+    const url = `${baseUrl}/audio/speech${useStreaming ? "?stream=true" : ""}`;
+
+    if (useStreaming) {
+      logVerbose(`TTS: Using streaming mode for custom endpoint (${baseUrl})`);
+    }
+
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -1038,6 +1058,48 @@ async function openaiTTS(params: {
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
 
+    // Handle streaming response (chunked transfer encoding)
+    if (useStreaming && response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let firstChunkTime: number | null = null;
+      const streamStart = Date.now();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            if (firstChunkTime === null) {
+              firstChunkTime = Date.now();
+              const latency = firstChunkTime - streamStart;
+              logVerbose(`TTS: First chunk received via streaming (${latency}ms latency)`);
+            }
+            chunks.push(value);
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      // Concatenate all chunks
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const result = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      const totalTime = Date.now() - streamStart;
+      logVerbose(
+        `TTS: Streaming complete (${chunks.length} chunks, ${totalLength} bytes, ${totalTime}ms total)`,
+      );
+
+      return Buffer.from(result);
+    }
+
+    // Non-streaming response
     return Buffer.from(await response.arrayBuffer());
   } finally {
     clearTimeout(timeout);
@@ -1213,6 +1275,7 @@ export async function textToSpeech(params: {
           voice: openaiVoiceOverride ?? config.openai.voice,
           responseFormat: output.openai,
           timeoutMs: config.timeoutMs,
+          openaiConfig: config.openai,
         });
       }
 
@@ -1314,6 +1377,7 @@ export async function textToSpeechTelephony(params: {
         model: config.openai.model,
         voice: config.openai.voice,
         responseFormat: output.format,
+        openaiConfig: config.openai,
         timeoutMs: config.timeoutMs,
       });
 

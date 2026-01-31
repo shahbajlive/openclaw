@@ -708,17 +708,33 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
     // Restore dist/control-ui/ to committed state to prevent dirty repo after update
     // (ui:build regenerates assets with new hashes, which would block future updates)
     // This step is non-fatal - if the path doesn't exist in git, we just skip it
-    const restoreUiStep = await runStep(
-      step(
-        "restore control-ui",
-        ["git", "-C", gitRoot, "checkout", "--", "dist/control-ui/"],
-        gitRoot,
-      ),
+    // Check if the path is tracked in git first
+    const checkTrackedResult = await runCommand(
+      ["git", "-C", gitRoot, "ls-files", "--error-unmatch", "dist/control-ui/"],
+      { cwd: gitRoot, timeoutMs },
     );
-    steps.push(restoreUiStep);
-    // Don't fail the update if restore fails (e.g., if dist/control-ui/ is not tracked)
-    if (restoreUiStep.exitCode !== 0) {
-      restoreUiStep.exitCode = 0; // Mark as non-fatal
+    const isTracked = checkTrackedResult.code === 0;
+    
+    if (isTracked) {
+      const restoreUiStep = await runStep(
+        step(
+          "restore control-ui",
+          ["git", "-C", gitRoot, "checkout", "--", "dist/control-ui/"],
+          gitRoot,
+        ),
+      );
+      steps.push(restoreUiStep);
+    } else {
+      // Path is not tracked, skip silently
+      steps.push({
+        name: "restore control-ui",
+        command: "git checkout -- dist/control-ui/",
+        cwd: gitRoot,
+        durationMs: 0,
+        exitCode: 0,
+        stdoutTail: null,
+        stderrTail: null,
+      });
     }
 
     const doctorStep = await runStep(

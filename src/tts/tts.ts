@@ -1103,15 +1103,8 @@ async function openaiTTS(params: {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Use streaming for custom endpoints (e.g., Qwen3-TTS) for all text lengths
-    // Standard HTTP chunked transfer encoding
     const baseUrl = getOpenAITtsBaseUrl(openaiConfig);
-    const useStreaming = isCustomOpenAIEndpoint(openaiConfig);
-    const url = `${baseUrl}/audio/speech${useStreaming ? "?stream=true" : ""}`;
-
-    if (useStreaming) {
-      logVerbose(`TTS: Using streaming mode for custom endpoint (${baseUrl})`);
-    }
+    const url = `${baseUrl}/audio/speech`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -1132,48 +1125,6 @@ async function openaiTTS(params: {
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
 
-    // Handle streaming response (chunked transfer encoding)
-    if (useStreaming && response.body) {
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let firstChunkTime: number | null = null;
-      const streamStart = Date.now();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            if (firstChunkTime === null) {
-              firstChunkTime = Date.now();
-              const latency = firstChunkTime - streamStart;
-              logVerbose(`TTS: First chunk received via streaming (${latency}ms latency)`);
-            }
-            chunks.push(value);
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
-
-      // Concatenate all chunks
-      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const result = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      const totalTime = Date.now() - streamStart;
-      logVerbose(
-        `TTS: Streaming complete (${chunks.length} chunks, ${totalLength} bytes, ${totalTime}ms total)`,
-      );
-
-      return Buffer.from(result);
-    }
-
-    // Non-streaming response
     return Buffer.from(await response.arrayBuffer());
   } finally {
     clearTimeout(timeout);

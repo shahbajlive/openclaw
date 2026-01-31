@@ -250,7 +250,9 @@ export async function compactEmbeddedPiSessionDirect(
         accountId: params.agentAccountId ?? undefined,
       });
       if (inlineButtonsScope !== "off") {
-        if (!runtimeCapabilities) runtimeCapabilities = [];
+        if (!runtimeCapabilities) {
+          runtimeCapabilities = [];
+        }
         if (
           !runtimeCapabilities.some((cap) => String(cap).trim().toLowerCase() === "inlinebuttons")
         ) {
@@ -390,13 +392,12 @@ export async function compactEmbeddedPiSessionDirect(
         settingsManager,
         additionalExtensionPaths,
         noSkills: true,
-        systemPromptOverride: () => systemPrompt(""),
+        systemPromptOverride: systemPrompt,
         agentsFilesOverride: () => ({ agentsFiles: [] }),
       });
       await resourceLoader.reload();
 
-      let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
-      ({ session } = await createAgentSession({
+      const { session } = await createAgentSession({
         cwd: resolvedWorkspace,
         agentDir,
         authStorage,
@@ -408,7 +409,7 @@ export async function compactEmbeddedPiSessionDirect(
         sessionManager,
         settingsManager,
         resourceLoader,
-      }));
+      });
 
       try {
         const prior = await sanitizeSessionHistory({

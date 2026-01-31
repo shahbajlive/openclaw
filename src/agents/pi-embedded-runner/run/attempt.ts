@@ -95,12 +95,16 @@ export function injectHistoryImagesIntoMessages(
   messages: AgentMessage[],
   historyImagesByIndex: Map<number, ImageContent[]>,
 ): boolean {
-  if (historyImagesByIndex.size === 0) return false;
+  if (historyImagesByIndex.size === 0) {
+    return false;
+  }
   let didMutate = false;
 
   for (const [msgIndex, images] of historyImagesByIndex) {
     // Bounds check: ensure index is valid before accessing
-    if (msgIndex < 0 || msgIndex >= messages.length) continue;
+    if (msgIndex < 0 || msgIndex >= messages.length) {
+      continue;
+    }
     const msg = messages[msgIndex];
     if (msg && msg.role === "user") {
       // Convert string content to array format if needed
@@ -256,7 +260,9 @@ export async function runEmbeddedAttempt(
         accountId: params.agentAccountId ?? undefined,
       });
       if (inlineButtonsScope !== "off") {
-        if (!runtimeCapabilities) runtimeCapabilities = [];
+        if (!runtimeCapabilities) {
+          runtimeCapabilities = [];
+        }
         if (
           !runtimeCapabilities.some((cap) => String(cap).trim().toLowerCase() === "inlinebuttons")
         ) {
@@ -458,7 +464,7 @@ export async function runEmbeddedAttempt(
         settingsManager,
         additionalExtensionPaths,
         noSkills: true,
-        systemPromptOverride: () => systemPrompt(""),
+        systemPromptOverride: systemPrompt,
         agentsFilesOverride: () => ({ agentsFiles: [] }),
       });
       await resourceLoader.reload();
@@ -575,7 +581,9 @@ export async function runEmbeddedAttempt(
       };
       const abortRun = (isTimeout = false, reason?: unknown) => {
         aborted = true;
-        if (isTimeout) timedOut = true;
+        if (isTimeout) {
+          timedOut = true;
+        }
         if (isTimeout) {
           runAbortController.abort(reason ?? makeTimeoutAbortReason());
         } else {
@@ -660,7 +668,9 @@ export async function runEmbeddedAttempt(
           abortRun(true);
           if (!abortWarnTimer) {
             abortWarnTimer = setTimeout(() => {
-              if (!activeSession.isStreaming) return;
+              if (!activeSession.isStreaming) {
+                return;
+              }
               if (!isProbeSession) {
                 log.warn(
                   `embedded run abort still streaming: runId=${params.runId} sessionId=${params.sessionId}`,
@@ -808,7 +818,9 @@ export async function runEmbeddedAttempt(
           await waitForCompactionRetry();
         } catch (err) {
           if (isAbortError(err)) {
-            if (!promptError) promptError = err;
+            if (!promptError) {
+              promptError = err;
+            }
           } else {
             throw err;
           }
@@ -846,7 +858,9 @@ export async function runEmbeddedAttempt(
         }
       } finally {
         clearTimeout(abortTimer);
-        if (abortWarnTimer) clearTimeout(abortWarnTimer);
+        if (abortWarnTimer) {
+          clearTimeout(abortWarnTimer);
+        }
         unsubscribe();
         clearActiveEmbeddedRun(params.sessionId, queueHandle);
         params.abortSignal?.removeEventListener?.("abort", onAbort);
@@ -854,7 +868,7 @@ export async function runEmbeddedAttempt(
 
       const lastAssistant = messagesSnapshot
         .slice()
-        .reverse()
+        .toReversed()
         .find((m) => (m as AgentMessage)?.role === "assistant") as AssistantMessage | undefined;
 
       const toolMetasNormalized = toolMetas

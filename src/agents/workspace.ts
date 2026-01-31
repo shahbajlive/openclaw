@@ -26,6 +26,7 @@ export const DEFAULT_IDENTITY_FILENAME = "IDENTITY.md";
 export const DEFAULT_USER_FILENAME = "USER.md";
 export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
+export const DEFAULT_SECURITY_FILENAME = "SECURITY.md";
 export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
 export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
 
@@ -68,6 +69,7 @@ export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_USER_FILENAME
   | typeof DEFAULT_HEARTBEAT_FILENAME
   | typeof DEFAULT_BOOTSTRAP_FILENAME
+  | typeof DEFAULT_SECURITY_FILENAME
   | typeof DEFAULT_MEMORY_FILENAME
   | typeof DEFAULT_MEMORY_ALT_FILENAME;
 
@@ -274,6 +276,10 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
       name: DEFAULT_BOOTSTRAP_FILENAME,
       filePath: path.join(resolvedDir, DEFAULT_BOOTSTRAP_FILENAME),
     },
+    {
+      name: DEFAULT_SECURITY_FILENAME,
+      filePath: path.join(resolvedDir, DEFAULT_SECURITY_FILENAME),
+    },
   ];
 
   entries.push(...(await resolveMemoryBootstrapEntries(resolvedDir)));
@@ -289,6 +295,23 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
         missing: false,
       });
     } catch {
+      // For SECURITY.md, try src/agents/ directory as fallback
+      if (entry.name === DEFAULT_SECURITY_FILENAME) {
+        const agentsDir = path.dirname(fileURLToPath(import.meta.url));
+        const repoSecurityPath = path.join(agentsDir, DEFAULT_SECURITY_FILENAME);
+        try {
+          const content = await fs.readFile(repoSecurityPath, "utf-8");
+          result.push({
+            name: entry.name,
+            path: repoSecurityPath,
+            content,
+            missing: false,
+          });
+          continue;
+        } catch {
+          // Repo file also not found, fall through to missing
+        }
+      }
       result.push({ name: entry.name, path: entry.filePath, missing: true });
     }
   }

@@ -517,8 +517,26 @@ export function buildAgentSystemPrompt(params: {
   }
 
   const contextFiles = params.contextFiles ?? [];
-  if (contextFiles.length > 0) {
-    const hasSoulFile = contextFiles.some((file) => {
+  
+  // Extract SECURITY.md if present and add it as a priority section
+  const securityFile = contextFiles.find((file) => {
+    const normalizedPath = file.path.trim().replace(/\\/g, "/");
+    const baseName = normalizedPath.split("/").pop() ?? normalizedPath;
+    return baseName.toLowerCase() === "security.md";
+  });
+  
+  const otherContextFiles = contextFiles.filter((file) => {
+    const normalizedPath = file.path.trim().replace(/\\/g, "/");
+    const baseName = normalizedPath.split("/").pop() ?? normalizedPath;
+    return baseName.toLowerCase() !== "security.md";
+  });
+  
+  if (securityFile) {
+    lines.push("# Security Guidelines", "", securityFile.content, "");
+  }
+  
+  if (otherContextFiles.length > 0) {
+    const hasSoulFile = otherContextFiles.some((file) => {
       const normalizedPath = file.path.trim().replace(/\\/g, "/");
       const baseName = normalizedPath.split("/").pop() ?? normalizedPath;
       return baseName.toLowerCase() === "soul.md";
@@ -530,7 +548,7 @@ export function buildAgentSystemPrompt(params: {
       );
     }
     lines.push("");
-    for (const file of contextFiles) {
+    for (const file of otherContextFiles) {
       lines.push(`## ${file.path}`, "", file.content, "");
     }
   }

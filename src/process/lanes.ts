@@ -3,4 +3,5 @@ export const enum CommandLane {
   Cron = "cron",
   Subagent = "subagent",
   Nested = "nested",
+  Team = "team",
 }

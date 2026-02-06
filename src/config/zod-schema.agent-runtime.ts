@@ -412,6 +412,23 @@ export const MemorySearchSchema = z
   })
   .strict()
   .optional();
+
+export const AgentTeamsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxTeammatesPerTeam: z.number().int().positive().optional(),
+    defaultModel: z.string().optional(),
+    allowedModels: z.array(z.string()).optional(),
+    teammateTools: z
+      .object({
+        allow: z.array(z.string()).optional(),
+        deny: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
 export const AgentModelSchema = z.union([
   z.string(),
   z
@@ -455,6 +472,7 @@ export const AgentEntrySchema = z
       .optional(),
     sandbox: AgentSandboxSchema,
     tools: AgentToolsSchema,
+    teams: AgentTeamsSchema,
   })
   .strict();
 

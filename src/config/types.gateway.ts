@@ -211,6 +211,48 @@ export type GatewayNodesConfig = {
   denyCommands?: string[];
 };
 
+// ---- Teams Configuration ----
+
+export type TeamsStorageConfig = {
+  /** Base directory for team data (default: "~/.openclaw/teams"). */
+  basePath?: string;
+  /** Task list storage format (default: "json"). */
+  taskListFormat?: "json" | "jsonl";
+  /** Auto-delete read messages after this many hours (default: 24). */
+  mailboxTTLHours?: number;
+};
+
+export type TeamsTmuxConfig = {
+  /** tmux pane layout (default: "tiled"). */
+  layout?: "tiled" | "even-horizontal" | "even-vertical";
+  /** tmux session name prefix (default: "openclaw-team"). */
+  sessionPrefix?: string;
+};
+
+export type TeamsDisplayConfig = {
+  /** Display mode for team visualization (default: "in-process"). */
+  mode?: "in-process" | "tmux";
+  /** tmux-specific settings (only used when mode is "tmux"). */
+  tmux?: TeamsTmuxConfig;
+};
+
+export type TeamsGatewayConfig = {
+  /** Master switch for team functionality (default: false). */
+  enabled?: boolean;
+  /** Maximum concurrent active teams across all agents (default: 3). */
+  maxActiveTeams?: number;
+  /** Maximum teammates per team (default: 5). */
+  maxTeammatesPerTeam?: number;
+  /** Default model for spawned teammates. */
+  defaultModel?: string;
+  /** How long to retain completed team data in days (default: 7). */
+  retentionDays?: number;
+  /** Storage settings. */
+  storage?: TeamsStorageConfig;
+  /** Display mode settings. */
+  display?: TeamsDisplayConfig;
+};
+
 export type GatewayConfig = {
   /** Single multiplexed port for Gateway WS + HTTP (default: 18789). */
   port?: number;
@@ -245,4 +287,6 @@ export type GatewayConfig = {
    * `x-real-ip`) to determine the client IP for local pairing and HTTP checks.
    */
   trustedProxies?: string[];
+  /** Agent Teams configuration. */
+  teams?: TeamsGatewayConfig;
 };

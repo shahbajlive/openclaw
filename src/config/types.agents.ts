@@ -17,6 +17,22 @@ export type AgentModelConfig =
       fallbacks?: string[];
     };
 
+export type AgentTeamsConfig = {
+  /** Enable teams for this agent (default: inherits from gateway.teams.enabled). */
+  enabled?: boolean;
+  /** Override max teammates per team for this agent. */
+  maxTeammatesPerTeam?: number;
+  /** Default model for teammates spawned by this agent. */
+  defaultModel?: string;
+  /** Models allowed for cross-model team spawning. */
+  allowedModels?: string[];
+  /** Tool restrictions for teammates spawned by this agent. */
+  teammateTools?: {
+    allow?: string[];
+    deny?: string[];
+  };
+};
+
 export type AgentConfig = {
   id: string;
   default?: boolean;
@@ -62,6 +78,8 @@ export type AgentConfig = {
     prune?: SandboxPruneSettings;
   };
   tools?: AgentToolsConfig;
+  /** Per-agent Agent Teams overrides. */
+  teams?: AgentTeamsConfig;
 };
 
 export type AgentsConfig = {

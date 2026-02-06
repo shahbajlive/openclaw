@@ -504,6 +504,37 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        teams: z
+          .object({
+            enabled: z.boolean().optional(),
+            maxActiveTeams: z.number().int().positive().optional(),
+            maxTeammatesPerTeam: z.number().int().positive().optional(),
+            defaultModel: z.string().optional(),
+            retentionDays: z.number().int().positive().optional(),
+            storage: z
+              .object({
+                basePath: z.string().optional(),
+                taskListFormat: z.enum(["json", "jsonl"]).optional(),
+                mailboxTTLHours: z.number().positive().optional(),
+              })
+              .strict()
+              .optional(),
+            display: z
+              .object({
+                mode: z.enum(["in-process", "tmux"]).optional(),
+                tmux: z
+                  .object({
+                    layout: z.enum(["tiled", "even-horizontal", "even-vertical"]).optional(),
+                    sessionPrefix: z.string().optional(),
+                  })
+                  .strict()
+                  .optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

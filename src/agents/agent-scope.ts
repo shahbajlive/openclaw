@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import type { OpenClawConfig } from "../config/config.js";
+import { type OpenClawConfig, loadConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
 import {
   DEFAULT_AGENT_ID,
@@ -76,7 +76,13 @@ export function resolveSessionAgentIds(params: { sessionKey?: string; config?: O
   defaultAgentId: string;
   sessionAgentId: string;
 } {
-  const defaultAgentId = resolveDefaultAgentId(params.config ?? {});
+  const cfg = params.config ?? loadConfig();
+  const defaultAgentId = resolveDefaultAgentId(cfg);
+
+  if (!params.sessionKey) {
+    return { defaultAgentId, sessionAgentId: defaultAgentId };
+  }
+
   const sessionKey = params.sessionKey?.trim();
   const normalizedSessionKey = sessionKey ? sessionKey.toLowerCase() : undefined;
   const parsed = normalizedSessionKey ? parseAgentSessionKey(normalizedSessionKey) : null;
@@ -164,8 +170,18 @@ export function resolveAgentModelFallbacksOverride(
   return Array.isArray(raw.fallbacks) ? raw.fallbacks : undefined;
 }
 
-export function resolveAgentWorkspaceDir(cfg: OpenClawConfig, agentId: string) {
-  const id = normalizeAgentId(agentId);
+export function resolveAgentWorkspaceDir(
+  cfg: OpenClawConfig,
+  agentId: string,
+  sessionKey?: string,
+) {
+  const normalizedAgentId = normalizeAgentId(agentId);
+  if (normalizedAgentId.startsWith("team-")) {
+    const root = resolveStateDir(process.env, os.homedir);
+    return path.join(root, "agents", normalizedAgentId, "workspace");
+  }
+
+  const id = normalizedAgentId;
   const configured = resolveAgentConfig(cfg, id)?.workspace?.trim();
   if (configured) {
     return resolveUserPath(configured);

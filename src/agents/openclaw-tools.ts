@@ -3,6 +3,30 @@ import type { GatewayMessageChannel } from "../utils/message-channel.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { resolvePluginTools } from "../plugins/tools.js";
 import { resolveSessionAgentId } from "./agent-scope.js";
+import {
+  createPlanReviewTool,
+  createPlanSubmitTool,
+  createTaskAddTool,
+  createTaskClaimTool,
+  createTaskCompleteTool,
+  createTaskGetTool,
+  createTaskListTool,
+  createTaskUpdateTool,
+  createTeamBroadcastAnswerTool,
+  createTeamCleanupTool,
+  createTeamCompleteTool,
+  createTeamCreateTool,
+  createTeamDiscoverTool,
+  createTeamMessageTool,
+  createTeamStatusTool,
+  createTeammateBroadcastTool,
+  createTeammateJoinApproveTool,
+  createTeammateJoinRejectTool,
+  createTeammateJoinRequestTool,
+  createTeammateMessageTool,
+  createTeammateShutdownTool,
+  createTeammateSpawnTool,
+} from "./teams/tools/index.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createBrowserTool } from "./tools/browser-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
@@ -148,6 +172,39 @@ export function createOpenClawTools(options?: {
     ...(imageTool ? [imageTool] : []),
   ];
 
+  // Add team tools
+  const teamToolOpts = {
+    agentSessionKey: options?.agentSessionKey,
+    agentChannel: options?.agentChannel,
+    sandboxed: options?.sandboxed,
+    config: options?.config,
+  };
+
+  const teamTools: AnyAgentTool[] = [
+    createTeamCreateTool(teamToolOpts),
+    createTeamStatusTool(teamToolOpts),
+    createTeamMessageTool(teamToolOpts),
+    createTeamBroadcastAnswerTool(teamToolOpts),
+    createTeamCleanupTool(teamToolOpts),
+    createTeamCompleteTool(teamToolOpts),
+    createTeamDiscoverTool(teamToolOpts),
+    createTeammateSpawnTool(teamToolOpts),
+    createTeammateMessageTool(teamToolOpts),
+    createTeammateBroadcastTool(teamToolOpts),
+    createTeammateShutdownTool(teamToolOpts),
+    createTeammateJoinRequestTool(teamToolOpts),
+    createTeammateJoinApproveTool(teamToolOpts),
+    createTeammateJoinRejectTool(teamToolOpts),
+    createTaskAddTool(teamToolOpts),
+    createTaskClaimTool(teamToolOpts),
+    createTaskCompleteTool(teamToolOpts),
+    createTaskGetTool(teamToolOpts),
+    createTaskListTool(teamToolOpts),
+    createTaskUpdateTool(teamToolOpts),
+    createPlanSubmitTool(teamToolOpts),
+    createPlanReviewTool(teamToolOpts),
+  ];
+
   const pluginTools = resolvePluginTools({
     context: {
       config: options?.config,
@@ -162,9 +219,9 @@ export function createOpenClawTools(options?: {
       agentAccountId: options?.agentAccountId,
       sandboxed: options?.sandboxed,
     },
-    existingToolNames: new Set(tools.map((tool) => tool.name)),
+    existingToolNames: new Set([...tools, ...teamTools].map((tool) => tool.name)),
     toolAllowlist: options?.pluginToolAllowlist,
   });
 
-  return [...tools, ...pluginTools];
+  return [...tools, ...teamTools, ...pluginTools];
 }

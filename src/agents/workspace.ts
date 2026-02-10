@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runCommandWithTimeout } from "../process/exec.js";
-import { isSubagentSessionKey } from "../routing/session-key.js";
+import { isSubagentSessionKey, parseAgentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
 
@@ -20,6 +20,7 @@ export function resolveDefaultAgentWorkspaceDir(
 export const DEFAULT_AGENT_WORKSPACE_DIR = resolveDefaultAgentWorkspaceDir();
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md";
 export const DEFAULT_SOUL_FILENAME = "SOUL.md";
+export const DEFAULT_TEAM_SOUL_FILENAME = "SOUL.team.md";
 export const DEFAULT_TOOLS_FILENAME = "TOOLS.md";
 export const DEFAULT_IDENTITY_FILENAME = "IDENTITY.md";
 export const DEFAULT_USER_FILENAME = "USER.md";
@@ -58,6 +59,7 @@ async function loadTemplate(name: string): Promise<string> {
 export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_AGENTS_FILENAME
   | typeof DEFAULT_SOUL_FILENAME
+  | typeof DEFAULT_TEAM_SOUL_FILENAME
   | typeof DEFAULT_TOOLS_FILENAME
   | typeof DEFAULT_IDENTITY_FILENAME
   | typeof DEFAULT_USER_FILENAME
@@ -122,34 +124,56 @@ async function ensureGitRepo(dir: string, isBrandNewWorkspace: boolean) {
   }
 }
 
+export type WorkspaceBootstrapMode = "full" | "minimal" | "none";
+export type WorkspaceHeartbeatMode = "none" | "lead" | "all";
+
 export async function ensureAgentWorkspace(params?: {
   dir?: string;
   ensureBootstrapFiles?: boolean;
+  bootstrapMode?: WorkspaceBootstrapMode;
+  heartbeatMode?: WorkspaceHeartbeatMode;
+  skipGitInit?: boolean;
 }): Promise<{
   dir: string;
   agentsPath?: string;
   soulPath?: string;
+  teamSoulPath?: string;
   toolsPath?: string;
   identityPath?: string;
   userPath?: string;
   heartbeatPath?: string;
   bootstrapPath?: string;
+  memoryPath?: string;
 }> {
   const rawDir = params?.dir?.trim() ? params.dir.trim() : DEFAULT_AGENT_WORKSPACE_DIR;
   const dir = resolveUserPath(rawDir);
   await fs.mkdir(dir, { recursive: true });
 
-  if (!params?.ensureBootstrapFiles) {
+  const ensureBootstrapFiles = params?.ensureBootstrapFiles !== false;
+  const bootstrapMode: WorkspaceBootstrapMode = params?.bootstrapMode
+    ? params.bootstrapMode
+    : ensureBootstrapFiles
+      ? "full"
+      : "none";
+  const heartbeatMode: WorkspaceHeartbeatMode = params?.heartbeatMode
+    ? params.heartbeatMode
+    : bootstrapMode === "full"
+      ? "all"
+      : "none";
+
+  if (!ensureBootstrapFiles || bootstrapMode === "none") {
     return { dir };
   }
 
   const agentsPath = path.join(dir, DEFAULT_AGENTS_FILENAME);
   const soulPath = path.join(dir, DEFAULT_SOUL_FILENAME);
+  const teamSoulPath = path.join(dir, DEFAULT_TEAM_SOUL_FILENAME);
   const toolsPath = path.join(dir, DEFAULT_TOOLS_FILENAME);
   const identityPath = path.join(dir, DEFAULT_IDENTITY_FILENAME);
   const userPath = path.join(dir, DEFAULT_USER_FILENAME);
   const heartbeatPath = path.join(dir, DEFAULT_HEARTBEAT_FILENAME);
   const bootstrapPath = path.join(dir, DEFAULT_BOOTSTRAP_FILENAME);
+  const memoryPath = path.join(dir, DEFAULT_MEMORY_FILENAME);
 
   const isBrandNewWorkspace = await (async () => {
     const paths = [agentsPath, soulPath, toolsPath, identityPath, userPath, heartbeatPath];
@@ -166,34 +190,47 @@ export async function ensureAgentWorkspace(params?: {
     return existing.every((v) => !v);
   })();
 
-  const agentsTemplate = await loadTemplate(DEFAULT_AGENTS_FILENAME);
-  const soulTemplate = await loadTemplate(DEFAULT_SOUL_FILENAME);
-  const toolsTemplate = await loadTemplate(DEFAULT_TOOLS_FILENAME);
-  const identityTemplate = await loadTemplate(DEFAULT_IDENTITY_FILENAME);
-  const userTemplate = await loadTemplate(DEFAULT_USER_FILENAME);
-  const heartbeatTemplate = await loadTemplate(DEFAULT_HEARTBEAT_FILENAME);
-  const bootstrapTemplate = await loadTemplate(DEFAULT_BOOTSTRAP_FILENAME);
+  if (bootstrapMode === "full") {
+    const agentsTemplate = await loadTemplate(DEFAULT_AGENTS_FILENAME);
+    const soulTemplate = await loadTemplate(DEFAULT_SOUL_FILENAME);
+    const toolsTemplate = await loadTemplate(DEFAULT_TOOLS_FILENAME);
+    const identityTemplate = await loadTemplate(DEFAULT_IDENTITY_FILENAME);
+    const userTemplate = await loadTemplate(DEFAULT_USER_FILENAME);
+    const heartbeatTemplate = await loadTemplate(DEFAULT_HEARTBEAT_FILENAME);
+    const bootstrapTemplate = await loadTemplate(DEFAULT_BOOTSTRAP_FILENAME);
 
-  await writeFileIfMissing(agentsPath, agentsTemplate);
-  await writeFileIfMissing(soulPath, soulTemplate);
-  await writeFileIfMissing(toolsPath, toolsTemplate);
-  await writeFileIfMissing(identityPath, identityTemplate);
-  await writeFileIfMissing(userPath, userTemplate);
-  await writeFileIfMissing(heartbeatPath, heartbeatTemplate);
-  if (isBrandNewWorkspace) {
-    await writeFileIfMissing(bootstrapPath, bootstrapTemplate);
+    await writeFileIfMissing(agentsPath, agentsTemplate);
+    await writeFileIfMissing(soulPath, soulTemplate);
+    await writeFileIfMissing(toolsPath, toolsTemplate);
+    await writeFileIfMissing(identityPath, identityTemplate);
+    await writeFileIfMissing(userPath, userTemplate);
+    if (heartbeatMode !== "none") {
+      await writeFileIfMissing(heartbeatPath, heartbeatTemplate);
+    }
+    if (isBrandNewWorkspace) {
+      await writeFileIfMissing(bootstrapPath, bootstrapTemplate);
+    }
+    if (!params?.skipGitInit) {
+      await ensureGitRepo(dir, isBrandNewWorkspace);
+    }
+  } else if (bootstrapMode === "minimal") {
+    const toolsTemplate = await loadTemplate(DEFAULT_TOOLS_FILENAME);
+    const memoryTemplate = await loadTemplate(DEFAULT_MEMORY_FILENAME);
+    await writeFileIfMissing(toolsPath, toolsTemplate);
+    await writeFileIfMissing(memoryPath, memoryTemplate);
   }
-  await ensureGitRepo(dir, isBrandNewWorkspace);
 
   return {
     dir,
     agentsPath,
     soulPath,
+    teamSoulPath,
     toolsPath,
     identityPath,
     userPath,
     heartbeatPath,
     bootstrapPath,
+    memoryPath,
   };
 }
 
@@ -250,6 +287,10 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
       filePath: path.join(resolvedDir, DEFAULT_SOUL_FILENAME),
     },
     {
+      name: DEFAULT_TEAM_SOUL_FILENAME,
+      filePath: path.join(resolvedDir, DEFAULT_TEAM_SOUL_FILENAME),
+    },
+    {
       name: DEFAULT_TOOLS_FILENAME,
       filePath: path.join(resolvedDir, DEFAULT_TOOLS_FILENAME),
     },
@@ -291,13 +332,43 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
 }
 
 const SUBAGENT_BOOTSTRAP_ALLOWLIST = new Set([DEFAULT_AGENTS_FILENAME, DEFAULT_TOOLS_FILENAME]);
+const TEAM_BOOTSTRAP_BLOCKLIST = new Set([
+  DEFAULT_USER_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+  DEFAULT_HEARTBEAT_FILENAME,
+]);
 
 export function filterBootstrapFilesForSession(
   files: WorkspaceBootstrapFile[],
   sessionKey?: string,
 ): WorkspaceBootstrapFile[] {
-  if (!sessionKey || !isSubagentSessionKey(sessionKey)) {
+  if (!sessionKey) {
     return files;
   }
-  return files.filter((file) => SUBAGENT_BOOTSTRAP_ALLOWLIST.has(file.name));
+
+  if (isSubagentSessionKey(sessionKey)) {
+    return files.filter((file) => SUBAGENT_BOOTSTRAP_ALLOWLIST.has(file.name));
+  }
+
+  const parsed = parseAgentSessionKey(sessionKey);
+  if (parsed?.agentId?.startsWith("team-")) {
+    // 1. Check for SOUL.team.md override
+    const teamSoul = files.find((f) => f.name === DEFAULT_TEAM_SOUL_FILENAME && !f.missing);
+    // 2. Filter files
+    return files.filter((file) => {
+      // If we have a team soul, exclude the default soul
+      if (teamSoul && file.name === DEFAULT_SOUL_FILENAME) {
+        return false;
+      }
+      // If we don't have a team soul, we accept the default soul (implicit keep)
+
+      // Exclude blocked files
+      if (TEAM_BOOTSTRAP_BLOCKLIST.has(file.name)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  return files;
 }

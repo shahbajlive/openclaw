@@ -20,8 +20,6 @@ export type AgentModelConfig =
 export type AgentTeamsConfig = {
   /** Enable teams for this agent (default: inherits from gateway.teams.enabled). */
   enabled?: boolean;
-  /** Override max teammates per team for this agent. */
-  maxTeammatesPerTeam?: number;
   /** Default model for teammates spawned by this agent. */
   defaultModel?: string;
   /** Models allowed for cross-model team spawning. */

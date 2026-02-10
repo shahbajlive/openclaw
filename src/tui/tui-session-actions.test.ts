@@ -37,7 +37,7 @@ describe("tui session actions", () => {
       isConnected: true,
       autoMessageSent: false,
       toolsExpanded: false,
-      showThinking: false,
+      showThinking: true,
       connectionStatus: "connected",
       activityStatus: "idle",
       statusTimeout: null,

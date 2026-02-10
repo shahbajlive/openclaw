@@ -85,6 +85,10 @@ const BASE_METHODS = [
   "chat.history",
   "chat.abort",
   "chat.send",
+  // Agent team methods
+  "teams.status",
+  "teams.tasks",
+  "teams.cleanup",
 ];
 
 export function listGatewayMethods(): string[] {

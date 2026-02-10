@@ -125,6 +125,46 @@ export function applyMessageDefaults(cfg: OpenClawConfig): OpenClawConfig {
   };
 }
 
+export function applyTeamDefaults(cfg: OpenClawConfig): OpenClawConfig {
+  let mutated = false;
+
+  const gateway = cfg.gateway ?? {};
+  const teams = gateway.teams ?? {};
+  let nextTeams = teams;
+  if (teams.enabled === undefined) {
+    nextTeams = { ...nextTeams, enabled: true };
+    mutated = true;
+  }
+
+  const tools = cfg.tools ?? {};
+  const agentToAgent = tools.agentToAgent ?? {};
+  let nextAgentToAgent = agentToAgent;
+  if (agentToAgent.enabled === undefined) {
+    nextAgentToAgent = { ...nextAgentToAgent, enabled: true };
+    mutated = true;
+  }
+  if (agentToAgent.allow === undefined && nextAgentToAgent.enabled !== false) {
+    nextAgentToAgent = { ...nextAgentToAgent, allow: ["*"] };
+    mutated = true;
+  }
+
+  if (!mutated) {
+    return cfg;
+  }
+
+  return {
+    ...cfg,
+    gateway: {
+      ...gateway,
+      teams: nextTeams,
+    },
+    tools: {
+      ...tools,
+      agentToAgent: nextAgentToAgent,
+    },
+  };
+}
+
 export function applySessionDefaults(
   cfg: OpenClawConfig,
   options: SessionDefaultsOptions = {},
@@ -298,7 +338,11 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
   const hasSubMax =
     typeof defaults?.subagents?.maxConcurrent === "number" &&
     Number.isFinite(defaults.subagents.maxConcurrent);
-  if (hasMax && hasSubMax) {
+  const hasVerboseDefault =
+    defaults?.verboseDefault === "off" ||
+    defaults?.verboseDefault === "on" ||
+    defaults?.verboseDefault === "full";
+  if (hasMax && hasSubMax && hasVerboseDefault) {
     return cfg;
   }
 
@@ -312,6 +356,11 @@ export function applyAgentDefaults(cfg: OpenClawConfig): OpenClawConfig {
   const nextSubagents = defaults?.subagents ? { ...defaults.subagents } : {};
   if (!hasSubMax) {
     nextSubagents.maxConcurrent = DEFAULT_SUBAGENT_MAX_CONCURRENT;
+    mutated = true;
+  }
+
+  if (!hasVerboseDefault) {
+    nextDefaults.verboseDefault = "on";
     mutated = true;
   }
 

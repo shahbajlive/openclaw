@@ -7,6 +7,7 @@ import {
   isSubagentSessionKey,
   normalizeAgentId,
   resolveAgentIdFromSessionKey,
+  isTeamSessionKey,
 } from "../../routing/session-key.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
 import {
@@ -38,6 +39,7 @@ export function createSessionsSendTool(opts?: {
   agentSessionKey?: string;
   agentChannel?: GatewayMessageChannel;
   sandboxed?: boolean;
+  allowTeamSessionTarget?: boolean;
 }): AnyAgentTool {
   return {
     label: "Session Send",
@@ -198,6 +200,15 @@ export function createSessionsSendTool(opts?: {
       const resolvedKey = resolvedSession.key;
       const displayKey = resolvedSession.displayKey;
       const resolvedViaSessionId = resolvedSession.resolvedViaSessionId;
+
+      if (isTeamSessionKey(resolvedKey) && opts?.allowTeamSessionTarget !== true) {
+        return jsonResult({
+          runId: crypto.randomUUID(),
+          status: "forbidden",
+          error: "Use team_message or teammate_message for team communication.",
+          sessionKey: displayKey,
+        });
+      }
 
       if (restrictToSpawned && !resolvedViaSessionId) {
         const sessions = await listSessions({

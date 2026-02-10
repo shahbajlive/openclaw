@@ -416,7 +416,6 @@ export const MemorySearchSchema = z
 export const AgentTeamsSchema = z
   .object({
     enabled: z.boolean().optional(),
-    maxTeammatesPerTeam: z.number().int().positive().optional(),
     defaultModel: z.string().optional(),
     allowedModels: z.array(z.string()).optional(),
     teammateTools: z

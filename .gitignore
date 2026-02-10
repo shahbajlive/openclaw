@@ -1,4 +1,9 @@
 .idea
+.opencode
+pnpm-lock.yaml
+rough.md
+~/
+
 node_modules
 **/node_modules/
 .env

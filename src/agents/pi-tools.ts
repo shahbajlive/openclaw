@@ -43,11 +43,13 @@ import {
   wrapToolParamNormalization,
 } from "./pi-tools.read.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
+import { listCreatorTeams, resolveCallerTeamContext } from "./teams/team-registry.js";
 import {
   applyOwnerOnlyToolPolicy,
   buildPluginToolGroups,
   collectExplicitAllowlist,
   expandPolicyWithPluginGroups,
+  expandToolGroups,
   normalizeToolName,
   resolveToolProfilePolicy,
   stripPluginOnlyAllowlist,
@@ -197,6 +199,11 @@ export function createOpenClawCodingTools(options?: {
     senderUsername: options?.senderUsername,
     senderE164: options?.senderE164,
   });
+  // Resolve team context early so we can ensure team tools are available
+  // even when restrictive tool profiles are configured.
+  const teamContext = options?.sessionKey ? resolveCallerTeamContext(options.sessionKey) : null;
+  const creatorTeams = options?.sessionKey ? listCreatorTeams(options.sessionKey) : [];
+
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
 
@@ -207,7 +214,15 @@ export function createOpenClawCodingTools(options?: {
     return { ...policy, allow: Array.from(new Set([...policy.allow, ...alsoAllow])) };
   };
 
-  const profilePolicyWithAlsoAllow = mergeAlsoAllow(profilePolicy, profileAlsoAllow);
+  const teamProfileAllow = teamContext ? ["group:teams"] : [];
+  const profileAlsoAllowMerged =
+    profileAlsoAllow && profileAlsoAllow.length > 0
+      ? Array.from(new Set([...profileAlsoAllow, ...teamProfileAllow]))
+      : teamProfileAllow.length > 0
+        ? teamProfileAllow
+        : profileAlsoAllow;
+
+  const profilePolicyWithAlsoAllow = mergeAlsoAllow(profilePolicy, profileAlsoAllowMerged);
   const providerProfilePolicyWithAlsoAllow = mergeAlsoAllow(
     providerProfilePolicy,
     providerProfileAlsoAllow,
@@ -406,6 +421,116 @@ export function createOpenClawCodingTools(options?: {
   const sandboxPolicyExpanded = expandPolicyWithPluginGroups(sandbox?.tools, pluginGroups);
   const subagentPolicyExpanded = expandPolicyWithPluginGroups(subagentPolicy, pluginGroups);
 
+  // ---- TEAM POLICY ENFORCEMENT (lead coordination + plan approval) ----
+  // Resolve the team context once for both checks.
+  // teamContext + creatorTeams already resolved above for tool allowlist handling.
+
+  // Lead sessions are coordinator-only; deny implementation tools.
+  let delegateModeDenyPolicy: typeof subagentPolicy | undefined;
+  if (teamContext?.isLead) {
+    delegateModeDenyPolicy = {
+      deny: [...expandToolGroups(["group:fs", "group:runtime"])],
+    };
+  }
+  const delegateModePolicyExpanded = expandPolicyWithPluginGroups(
+    delegateModeDenyPolicy,
+    pluginGroups,
+  );
+
+  // Plan approval: if a teammate hasn't had their plan approved yet, deny
+  // implementation tools until the lead reviews and approves.
+  let planApprovalDenyPolicy: typeof subagentPolicy | undefined;
+  if (teamContext && !teamContext.isLead && teamContext.teammate) {
+    const tm = teamContext.teammate;
+    if (tm.requirePlanApproval && !tm.planApproved) {
+      planApprovalDenyPolicy = {
+        deny: [...expandToolGroups(["group:fs", "group:runtime"])],
+      };
+    }
+  }
+  const planApprovalPolicyExpanded = expandPolicyWithPluginGroups(
+    planApprovalDenyPolicy,
+    pluginGroups,
+  );
+
+  // Team sessions should not use cross-session tools for coordination.
+  let teamSessionPolicy: typeof subagentPolicy | undefined;
+  if (teamContext) {
+    teamSessionPolicy = {
+      deny: [
+        "sessions_list",
+        "sessions_history",
+        "sessions_send",
+        "sessions_spawn",
+        "session_status",
+        "team_discover",
+        "group:messaging",
+        "group:automation",
+      ],
+    };
+    if (!teamContext.isLead) {
+      teamSessionPolicy.deny.push("team_status");
+    }
+  }
+  const teamSessionPolicyExpanded = expandPolicyWithPluginGroups(teamSessionPolicy, pluginGroups);
+
+  // Creator sessions (outside the team) should not use lead/teammate-only tools.
+  let creatorSessionPolicy: typeof subagentPolicy | undefined;
+  if (creatorTeams.length > 0 && !teamContext?.isLead) {
+    creatorSessionPolicy = {
+      deny: [
+        "teammate_spawn",
+        "teammate_shutdown",
+        "teammate_message",
+        "teammate_broadcast",
+        "teammate_join_request",
+        "teammate_join_approve",
+        "teammate_join_reject",
+        "task_add",
+        "task_claim",
+        "task_complete",
+        "task_list",
+        "plan_submit",
+        "plan_review",
+        "team_cleanup",
+        "team_complete",
+        "team_broadcast_answer",
+      ],
+    };
+  }
+  const creatorSessionPolicyExpanded = expandPolicyWithPluginGroups(
+    creatorSessionPolicy,
+    pluginGroups,
+  );
+
+  // Non-team sessions should not see team-only coordination tools.
+  let nonTeamPolicy: typeof subagentPolicy | undefined;
+  if (!teamContext && creatorTeams.length === 0) {
+    nonTeamPolicy = {
+      deny: [
+        "team_status",
+        "team_message",
+        "team_cleanup",
+        "team_complete",
+        "team_broadcast_answer",
+        "teammate_spawn",
+        "teammate_shutdown",
+        "teammate_message",
+        "teammate_broadcast",
+        "teammate_join_request",
+        "teammate_join_approve",
+        "teammate_join_reject",
+        "task_add",
+        "task_claim",
+        "task_complete",
+        "task_list",
+        "plan_submit",
+        "plan_review",
+      ],
+    };
+  }
+  const nonTeamPolicyExpanded = expandPolicyWithPluginGroups(nonTeamPolicy, pluginGroups);
+
   const toolsFiltered = profilePolicyExpanded
     ? filterToolsByPolicy(toolsByAuthorization, profilePolicyExpanded)
     : toolsByAuthorization;
@@ -433,9 +558,24 @@ export function createOpenClawCodingTools(options?: {
   const subagentFiltered = subagentPolicyExpanded
     ? filterToolsByPolicy(sandboxed, subagentPolicyExpanded)
     : sandboxed;
+  const delegateModeFiltered = delegateModePolicyExpanded
+    ? filterToolsByPolicy(subagentFiltered, delegateModePolicyExpanded)
+    : subagentFiltered;
+  const planApprovalFiltered = planApprovalPolicyExpanded
+    ? filterToolsByPolicy(delegateModeFiltered, planApprovalPolicyExpanded)
+    : delegateModeFiltered;
+  const teamSessionFiltered = teamSessionPolicyExpanded
+    ? filterToolsByPolicy(planApprovalFiltered, teamSessionPolicyExpanded)
+    : planApprovalFiltered;
+  const creatorFiltered = creatorSessionPolicyExpanded
+    ? filterToolsByPolicy(teamSessionFiltered, creatorSessionPolicyExpanded)
+    : teamSessionFiltered;
+  const nonTeamFiltered = nonTeamPolicyExpanded
+    ? filterToolsByPolicy(creatorFiltered, nonTeamPolicyExpanded)
+    : creatorFiltered;
   // Always normalize tool JSON Schemas before handing them to pi-agent/pi-ai.
   // Without this, some providers (notably OpenAI) will reject root-level union schemas.
-  const normalized = subagentFiltered.map(normalizeToolParameters);
+  const normalized = nonTeamFiltered.map(normalizeToolParameters);
   const withHooks = normalized.map((tool) =>
     wrapToolWithBeforeToolCallHook(tool, {
       agentId,

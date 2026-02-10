@@ -1,6 +1,6 @@
 import type { AnyAgentTool } from "./tools/common.js";
 
-export type ToolProfileId = "minimal" | "coding" | "messaging" | "full";
+export type ToolProfileId = "minimal" | "coding" | "messaging" | "full" | "teammate";
 
 type ToolProfilePolicy = {
   allow?: string[];
@@ -36,6 +36,22 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   "group:messaging": ["message"],
   // Nodes + device tools
   "group:nodes": ["nodes"],
+  // Team coordination tools
+  "group:teams": [
+    "team_create",
+    "team_status",
+    "team_message",
+    "teammate_spawn",
+    "teammate_message",
+    "teammate_broadcast",
+    "teammate_shutdown",
+    "task_add",
+    "task_claim",
+    "task_complete",
+    "task_list",
+    "plan_submit",
+    "plan_review",
+  ],
   // All OpenClaw native tools (excludes provider plugins).
   "group:openclaw": [
     "browser",
@@ -55,6 +71,19 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "web_search",
     "web_fetch",
     "image",
+    "team_create",
+    "team_status",
+    "team_message",
+    "teammate_spawn",
+    "teammate_message",
+    "teammate_broadcast",
+    "teammate_shutdown",
+    "task_add",
+    "task_claim",
+    "task_complete",
+    "task_list",
+    "plan_submit",
+    "plan_review",
   ],
 };
 
@@ -77,6 +106,34 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
     ],
   },
   full: {},
+  // Teammate profile: focused worker tools only
+  teammate: {
+    allow: [
+      "group:fs", // read, write, edit, apply_patch
+      "group:runtime", // exec, process
+      "group:memory", // memory_search, memory_get
+      "group:web", // web_search, web_fetch
+      "task_claim",
+      "task_complete",
+      "task_list",
+      "task_add",
+      "teammate_message",
+      "teammate_broadcast",
+      "team_status",
+      "plan_submit",
+      "sessions_spawn",
+      "image",
+    ],
+    deny: [
+      "team_create", // only lead can create teams
+      "team_message", // only creator can message the lead
+      "teammate_spawn", // only lead can spawn teammates
+      "teammate_shutdown", // only lead can shut down teammates
+      "plan_review", // only lead can review plans
+      "group:automation", // no cron, no gateway tool
+      "group:messaging", // no direct user messaging (message tool)
+    ],
+  },
 };
 
 export function normalizeToolName(name: string) {

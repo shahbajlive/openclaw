@@ -20,6 +20,7 @@ import {
   applyMessageDefaults,
   applyModelDefaults,
   applySessionDefaults,
+  applyTeamDefaults,
   applyTalkApiKey,
 } from "./defaults.js";
 import { MissingEnvVarError, resolveConfigEnvVars } from "./env-substitution.js";
@@ -277,7 +278,9 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         applyCompactionDefaults(
           applyContextPruningDefaults(
             applyAgentDefaults(
-              applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+              applySessionDefaults(
+                applyTeamDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+              ),
             ),
           ),
         ),
@@ -328,7 +331,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         applyModelDefaults(
           applyCompactionDefaults(
             applyContextPruningDefaults(
-              applyAgentDefaults(applySessionDefaults(applyMessageDefaults({}))),
+              applyAgentDefaults(applySessionDefaults(applyTeamDefaults(applyMessageDefaults({})))),
             ),
           ),
         ),
@@ -451,7 +454,9 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           applyTalkApiKey(
             applyModelDefaults(
               applyAgentDefaults(
-                applySessionDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+                applySessionDefaults(
+                  applyTeamDefaults(applyLoggingDefaults(applyMessageDefaults(validated.config))),
+                ),
               ),
             ),
           ),

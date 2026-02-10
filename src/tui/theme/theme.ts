@@ -15,11 +15,12 @@ const palette = {
   accent: "#F6C453",
   accentSoft: "#F2A65A",
   border: "#3C414B",
+  borderVisible: "#5A6070", // Brighter border for editor — visible on dark bg
   userBg: "#2B2F36",
   userText: "#F3EEE0",
   systemText: "#9BA3B2",
-  toolPendingBg: "#1F2A2F",
-  toolSuccessBg: "#1E2D23",
+  toolPendingBg: "#2A2A2A",
+  toolSuccessBg: "#2A2A2A",
   toolErrorBg: "#2F1F1F",
   toolTitle: "#F6C453",
   toolOutput: "#E1DACB",
@@ -78,6 +79,10 @@ export const theme = {
   border: fg(palette.border),
   bold: (text: string) => chalk.bold(text),
   italic: (text: string) => chalk.italic(text),
+  // State-aware border colors for dynamic editor styling
+  borderIdle: fg(palette.accentSoft),
+  borderActive: fg(palette.accent),
+  borderError: fg(palette.error),
 };
 
 export const markdownTheme: MarkdownTheme = {
@@ -121,7 +126,7 @@ export const settingsListTheme: SettingsListTheme = {
 };
 
 export const editorTheme: EditorTheme = {
-  borderColor: (text) => fg(palette.border)(text),
+  borderColor: fg(palette.accentSoft), // Warm accent border for the input field
   selectList: selectListTheme,
 };
 

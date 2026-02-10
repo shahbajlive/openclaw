@@ -57,6 +57,7 @@ describe("agent concurrency defaults", () => {
 
       expect(cfg.agents?.defaults?.maxConcurrent).toBe(DEFAULT_AGENT_MAX_CONCURRENT);
       expect(cfg.agents?.defaults?.subagents?.maxConcurrent).toBe(DEFAULT_SUBAGENT_MAX_CONCURRENT);
+      expect(cfg.agents?.defaults?.verboseDefault).toBe("on");
     });
   });
 });

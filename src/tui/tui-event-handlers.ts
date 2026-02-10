@@ -1,7 +1,13 @@
 import type { TUI } from "@mariozechner/pi-tui";
 import type { ChatLog } from "./components/chat-log.js";
 import type { AgentEvent, ChatEvent, TuiStateAccess } from "./tui-types.js";
-import { asString, extractTextFromMessage, isCommandMessage } from "./tui-formatters.js";
+import {
+  asString,
+  extractTextFromMessage,
+  isCommandMessage,
+  isTeamMessage,
+  indentTeamMessage,
+} from "./tui-formatters.js";
 import { TuiStreamAssembler } from "./tui-stream-assembler.js";
 
 type EventHandlerContext = {
@@ -110,14 +116,30 @@ export function createEventHandlers(context: EventHandlerContext) {
     }
     if (evt.state === "final") {
       if (isCommandMessage(evt.message)) {
+        // In team view mode, filter out command messages
+        if (state.teamViewMode) {
+          streamAssembler.drop(evt.runId);
+          noteFinalizedRun(evt.runId);
+          state.activeChatRunId = null;
+          setActivityStatus("idle");
+          void refreshSessionInfo?.();
+          tui.requestRender();
+          return;
+        }
         if (isLocalRunId?.(evt.runId)) {
           forgetLocalRunId?.(evt.runId);
+          if (state.showThinking) {
+            void loadHistory?.();
+          }
         } else {
           void loadHistory?.();
         }
-        const text = extractTextFromMessage(evt.message);
+        const text = extractTextFromMessage(evt.message, {
+          includeThinking: state.showThinking,
+        });
         if (text) {
-          chatLog.addSystem(text);
+          const formatted = isTeamMessage(text) ? indentTeamMessage(text) : text;
+          chatLog.addSystem(formatted);
         }
         streamAssembler.drop(evt.runId);
         noteFinalizedRun(evt.runId);
@@ -129,6 +151,9 @@ export function createEventHandlers(context: EventHandlerContext) {
       }
       if (isLocalRunId?.(evt.runId)) {
         forgetLocalRunId?.(evt.runId);
+        if (state.showThinking) {
+          void loadHistory?.();
+        }
       } else {
         void loadHistory?.();
       }
@@ -140,7 +165,8 @@ export function createEventHandlers(context: EventHandlerContext) {
           : "";
 
       const finalText = streamAssembler.finalize(evt.runId, evt.message, state.showThinking);
-      chatLog.finalizeAssistant(finalText, evt.runId);
+      const formatted = isTeamMessage(finalText) ? indentTeamMessage(finalText) : finalText;
+      chatLog.finalizeAssistant(formatted, evt.runId);
       noteFinalizedRun(evt.runId);
       state.activeChatRunId = null;
       setActivityStatus(stopReason === "error" ? "error" : "idle");
@@ -186,26 +212,43 @@ export function createEventHandlers(context: EventHandlerContext) {
     // active chat run id, not the session id. Tool results can arrive after the chat
     // final event, so accept finalized runs for tool updates.
     const isActiveRun = evt.runId === state.activeChatRunId;
-    const isKnownRun = isActiveRun || sessionRuns.has(evt.runId) || finalizedRuns.has(evt.runId);
+    const sessionKey = typeof evt.sessionKey === "string" ? evt.sessionKey : "";
+    const matchesSession = sessionKey && sessionKey === state.currentSessionKey;
+    const isKnownRun =
+      isActiveRun || sessionRuns.has(evt.runId) || finalizedRuns.has(evt.runId) || matchesSession;
     if (!isKnownRun) {
       return;
     }
     if (evt.stream === "tool") {
+      // In team view mode, filter out tool events
+      if (state.teamViewMode) {
+        return;
+      }
+      if (matchesSession) {
+        noteSessionRun(evt.runId);
+      }
       const verbose = state.sessionInfo.verboseLevel ?? "off";
       const allowToolEvents = verbose !== "off";
       const allowToolOutput = verbose === "full";
-      if (!allowToolEvents) {
-        return;
-      }
       const data = evt.data ?? {};
       const phase = asString(data.phase, "");
       const toolCallId = asString(data.toolCallId, "");
       const toolName = asString(data.name, "tool");
+      if (phase === "start") {
+        setActivityStatus("running");
+      }
+      if (phase === "result" && !state.activeChatRunId) {
+        setActivityStatus("idle");
+      }
+      if (!allowToolEvents) {
+        return;
+      }
       if (!toolCallId) {
         return;
       }
       if (phase === "start") {
         chatLog.startTool(toolCallId, toolName, data.args);
+        setActivityStatus("running");
       } else if (phase === "update") {
         if (!allowToolOutput) {
           return;
@@ -220,6 +263,9 @@ export function createEventHandlers(context: EventHandlerContext) {
           });
         } else {
           chatLog.updateToolResult(toolCallId, { content: [] }, { isError: Boolean(data.isError) });
+        }
+        if (!state.activeChatRunId) {
+          setActivityStatus("idle");
         }
       }
       tui.requestRender();

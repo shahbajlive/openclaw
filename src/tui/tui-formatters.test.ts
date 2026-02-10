@@ -4,6 +4,7 @@ import {
   extractTextFromMessage,
   extractThinkingFromMessage,
   isCommandMessage,
+  splitThinkingFromText,
 } from "./tui-formatters.js";
 
 describe("extractTextFromMessage", () => {
@@ -56,7 +57,34 @@ describe("extractTextFromMessage", () => {
       { includeThinking: true },
     );
 
-    expect(text).toBe("[thinking]\nponder\n\nhello");
+    // Composed string uses markers; verify via split
+    const { thinking, content } = splitThinkingFromText(text);
+    expect(thinking).toBe("ponder");
+    expect(content).toBe("hello");
+  });
+});
+
+describe("splitThinkingFromText", () => {
+  it("roundtrips thinking and content", () => {
+    const text = extractTextFromMessage(
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "deep thought" },
+          { type: "text", text: "answer" },
+        ],
+      },
+      { includeThinking: true },
+    );
+    const { thinking, content } = splitThinkingFromText(text);
+    expect(thinking).toBe("deep thought");
+    expect(content).toBe("answer");
+  });
+
+  it("returns empty thinking when no markers present", () => {
+    const { thinking, content } = splitThinkingFromText("just content");
+    expect(thinking).toBe("");
+    expect(content).toBe("just content");
   });
 });
 

@@ -95,11 +95,15 @@ export async function agentCommand(
   }
   const agentCfg = cfg.agents?.defaults;
   const sessionAgentId = agentIdOverride ?? resolveAgentIdFromSessionKey(opts.sessionKey?.trim());
-  const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, sessionAgentId);
+  const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, sessionAgentId, opts.sessionKey);
   const agentDir = resolveAgentDir(cfg, sessionAgentId);
+  const isTeamAgent = sessionAgentId.startsWith("team-");
   const workspace = await ensureAgentWorkspace({
     dir: workspaceDirRaw,
-    ensureBootstrapFiles: !agentCfg?.skipBootstrap,
+    ensureBootstrapFiles: isTeamAgent ? true : !agentCfg?.skipBootstrap,
+    bootstrapMode: isTeamAgent ? (cfg.gateway?.teams?.bootstrapMode ?? "minimal") : undefined,
+    heartbeatMode: isTeamAgent ? (cfg.gateway?.teams?.heartbeatMode ?? "none") : undefined,
+    skipGitInit: isTeamAgent,
   });
   const workspaceDir = workspace.dir;
   const configuredModel = resolveConfiguredModelRef({

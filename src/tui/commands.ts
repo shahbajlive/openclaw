@@ -1,5 +1,6 @@
 import type { SlashCommand } from "@mariozechner/pi-tui";
 import type { OpenClawConfig } from "../config/types.js";
+import type { PaneContext } from "./tui-types.js";
 import { listChatCommands, listChatCommandsForConfig } from "../auto-reply/commands-registry.js";
 import { formatThinkingLevels, listThinkingLevelLabels } from "../auto-reply/thinking.js";
 
@@ -24,6 +25,65 @@ const COMMAND_ALIASES: Record<string, string> = {
   elev: "elevated",
 };
 
+/**
+ * Get the list of allowed commands for a given pane context.
+ */
+export function getAllowedCommands(context: PaneContext): string[] {
+  const allCommands = [
+    "help",
+    "status",
+    "agent",
+    "agents",
+    "session",
+    "sessions",
+    "model",
+    "models",
+    "think",
+    "verbose",
+    "reasoning",
+    "usage",
+    "elevated",
+    "elev",
+    "activation",
+    "team",
+    "teams",
+    "abort",
+    "new",
+    "reset",
+    "settings",
+    "split",
+    "exit",
+    "quit",
+  ];
+
+  if (context.type === "standalone") {
+    return allCommands;
+  }
+
+  if (context.type === "teammate") {
+    // Teammate panes: minimal set, block team/session management
+    return [
+      "help",
+      "abort",
+      "new",
+      "reset",
+      "exit",
+      "quit",
+      "model",
+      "models",
+      "think",
+      "verbose",
+      "reasoning",
+      "usage",
+      "elevated",
+      "elev",
+    ];
+  }
+
+  // Lead panes: all commands (we filter /team view in the handler)
+  return allCommands;
+}
+
 export function parseCommand(input: string): ParsedCommand {
   const trimmed = input.replace(/^\//, "").trim();
   if (!trimmed) {
@@ -37,7 +97,10 @@ export function parseCommand(input: string): ParsedCommand {
   };
 }
 
-export function getSlashCommands(options: SlashCommandOptions = {}): SlashCommand[] {
+export function getSlashCommands(
+  options: SlashCommandOptions = {},
+  context?: PaneContext,
+): SlashCommand[] {
   const thinkLevels = listThinkingLevelLabels(options.provider, options.model);
   const commands: SlashCommand[] = [
     { name: "help", description: "Show slash command help" },
@@ -79,7 +142,7 @@ export function getSlashCommands(options: SlashCommandOptions = {}): SlashComman
     },
     {
       name: "usage",
-      description: "Toggle per-response usage line",
+      description: "Toggle per-response usage line or show usage logs",
       getArgumentCompletions: (prefix) =>
         USAGE_FOOTER_LEVELS.filter((v) => v.startsWith(prefix.toLowerCase())).map((value) => ({
           value,
@@ -113,12 +176,25 @@ export function getSlashCommands(options: SlashCommandOptions = {}): SlashComman
           label: value,
         })),
     },
+    {
+      name: "team",
+      description: "Show team status, tasks, or view/close the team",
+      getArgumentCompletions: (prefix) =>
+        ["status", "tasks", "view", "remove"]
+          .filter((v) => v.startsWith(prefix.toLowerCase()))
+          .map((value) => ({ value, label: value })),
+    },
+    {
+      name: "teams",
+      description: "Switch between team members",
+    },
     { name: "abort", description: "Abort active run" },
     { name: "new", description: "Reset the session" },
     { name: "reset", description: "Reset the session" },
     { name: "settings", description: "Open settings" },
     { name: "exit", description: "Exit the TUI" },
     { name: "quit", description: "Exit the TUI" },
+    { name: "split", description: "Split view commands" },
   ];
 
   const seen = new Set(commands.map((command) => command.name));
@@ -135,12 +211,18 @@ export function getSlashCommands(options: SlashCommandOptions = {}): SlashComman
     }
   }
 
+  // Filter commands based on context if provided
+  if (context) {
+    const allowed = new Set(getAllowedCommands(context));
+    return commands.filter((cmd) => allowed.has(cmd.name));
+  }
+
   return commands;
 }
 
-export function helpText(options: SlashCommandOptions = {}): string {
+export function helpText(options: SlashCommandOptions = {}, context?: PaneContext): string {
   const thinkLevels = formatThinkingLevels(options.provider, options.model, "|");
-  return [
+  const allCommands = [
     "Slash commands:",
     "/help",
     "/commands",
@@ -152,12 +234,62 @@ export function helpText(options: SlashCommandOptions = {}): string {
     "/verbose <on|off>",
     "/reasoning <on|off>",
     "/usage <off|tokens|full>",
+    "/usage logs [limit]",
     "/elevated <on|off|ask|full>",
     "/elev <on|off|ask|full>",
     "/activation <mention|always>",
+    "/team [status|tasks|remove]",
+    "/teams",
     "/new or /reset",
     "/abort",
     "/settings",
+    "/exit",
+  ];
+
+  if (!context || context.type === "standalone") {
+    return allCommands.join("\n");
+  }
+
+  if (context.type === "teammate") {
+    return [
+      "Slash commands (teammate pane):",
+      "/help",
+      "/abort",
+      "/new or /reset",
+      "/exit or /quit",
+      "/model <provider/model> (or /models)",
+      `/think <${thinkLevels}>`,
+      "/verbose <on|off>",
+      "/reasoning <on|off>",
+      "/usage <off|tokens|full>",
+      "/usage logs [limit]",
+      "/elevated <on|off|ask|full>",
+    ].join("\n");
+  }
+
+  // Lead pane: all except /team view
+  return [
+    "Slash commands (lead pane):",
+    "/help",
+    "/commands",
+    "/status",
+    "/agent <id> (or /agents)",
+    "/session <key> (or /sessions)",
+    "/model <provider/model> (or /models)",
+    `/think <${thinkLevels}>`,
+    "/verbose <on|off>",
+    "/reasoning <on|off>",
+    "/usage <off|tokens|full>",
+    "/usage logs [limit]",
+    "/elevated <on|off|ask|full>",
+    "/elev <on|off|ask|full>",
+    "/activation <mention|always>",
+    "/team [status|tasks|remove]",
+    "/teams",
+    "/new or /reset",
+    "/abort",
+    "/settings",
+    "/split [exit|close]",
     "/exit",
   ].join("\n");
 }

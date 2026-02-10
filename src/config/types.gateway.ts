@@ -230,8 +230,8 @@ export type TeamsTmuxConfig = {
 };
 
 export type TeamsDisplayConfig = {
-  /** Display mode for team visualization (default: "in-process"). */
-  mode?: "in-process" | "tmux";
+  /** Display mode for team visualization (default: "auto"). */
+  mode?: "auto" | "inline" | "tmux";
   /** tmux-specific settings (only used when mode is "tmux"). */
   tmux?: TeamsTmuxConfig;
 };
@@ -239,10 +239,12 @@ export type TeamsDisplayConfig = {
 export type TeamsGatewayConfig = {
   /** Master switch for team functionality (default: false). */
   enabled?: boolean;
+  /** Workspace bootstrap mode for team workspaces (default: "minimal"). */
+  bootstrapMode?: "none" | "minimal" | "full";
+  /** Heartbeat file policy for team workspaces (default: "none"). */
+  heartbeatMode?: "none" | "lead" | "all";
   /** Maximum concurrent active teams across all agents (default: 3). */
   maxActiveTeams?: number;
-  /** Maximum teammates per team (default: 5). */
-  maxTeammatesPerTeam?: number;
   /** Default model for spawned teammates. */
   defaultModel?: string;
   /** How long to retain completed team data in days (default: 7). */

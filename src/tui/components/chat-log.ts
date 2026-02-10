@@ -8,11 +8,32 @@ export class ChatLog extends Container {
   private toolById = new Map<string, ToolExecutionComponent>();
   private streamingRuns = new Map<string, AssistantMessageComponent>();
   private toolsExpanded = false;
+  private toolOrder: string[] = []; // Track tool insertion order
+  private toolGroupSummary: Text | null = null;
+  private roleLabel: string | null = null;
+  private roleColor: string | null = null;
+
+  /**
+   * Set a role context that is applied as a colored @Role badge to every
+   * new AssistantMessageComponent. Pass null to clear.
+   */
+  setRoleContext(role: string | null, color: string | null) {
+    this.roleLabel = role;
+    this.roleColor = color;
+  }
+
+  private applyRoleBadge(component: AssistantMessageComponent) {
+    if (this.roleLabel) {
+      component.setRoleBadge(this.roleLabel, this.roleColor);
+    }
+  }
 
   clearAll() {
     this.clear();
     this.toolById.clear();
     this.streamingRuns.clear();
+    this.toolOrder = [];
+    this.toolGroupSummary = null;
   }
 
   addSystem(text: string) {
@@ -30,6 +51,7 @@ export class ChatLog extends Container {
 
   startAssistant(text: string, runId?: string) {
     const component = new AssistantMessageComponent(text);
+    this.applyRoleBadge(component);
     this.streamingRuns.set(this.resolveRunId(runId), component);
     this.addChild(component);
     return component;
@@ -53,7 +75,9 @@ export class ChatLog extends Container {
       this.streamingRuns.delete(effectiveRunId);
       return;
     }
-    this.addChild(new AssistantMessageComponent(text));
+    const component = new AssistantMessageComponent(text);
+    this.applyRoleBadge(component);
+    this.addChild(component);
   }
 
   startTool(toolCallId: string, toolName: string, args: unknown) {
@@ -65,7 +89,9 @@ export class ChatLog extends Container {
     const component = new ToolExecutionComponent(toolName, args);
     component.setExpanded(this.toolsExpanded);
     this.toolById.set(toolCallId, component);
+    this.toolOrder.push(toolCallId);
     this.addChild(component);
+    this.updateToolGrouping();
     return component;
   }
 
@@ -99,6 +125,34 @@ export class ChatLog extends Container {
     this.toolsExpanded = expanded;
     for (const tool of this.toolById.values()) {
       tool.setExpanded(expanded);
+    }
+    this.updateToolGrouping();
+  }
+
+  private updateToolGrouping() {
+    // Remove existing summary if present
+    if (this.toolGroupSummary) {
+      this.removeChild(this.toolGroupSummary);
+      this.toolGroupSummary = null;
+    }
+
+    const count = this.toolOrder.length;
+    if (count === 0) {
+      return;
+    }
+
+    // When collapsed and there are many tools, show a summary count at the top
+    if (!this.toolsExpanded && count > 5) {
+      const summaryText = theme.dim(`└─ ${count} tool uses (ctrl+o to expand details)`);
+      this.toolGroupSummary = new Text(summaryText, 1, 0);
+      // Insert summary before the first tool
+      const firstTool = this.toolById.get(this.toolOrder[0]);
+      if (firstTool) {
+        const idx = this.children.indexOf(firstTool);
+        if (idx >= 0) {
+          this.children.splice(idx, 0, this.toolGroupSummary);
+        }
+      }
     }
   }
 }

@@ -250,69 +250,100 @@ export function resolveThreadSessionKeys(params: {
 
 // ---- Team session key helpers ----
 
-const TEAM_KEY_RE = /^agent:([^:]+):team:([^:]+):(.+)$/;
+const TEAM_AGENT_PREFIX = "team-";
 const TEAM_LEAD_SUFFIX = "lead";
+const TEAMMATE_PREFIX = "teammate:";
 
 export type ParsedTeamSessionKey = {
   agentId: string;
   teamId: string;
   role: string;
   isLead: boolean;
+  /** For non-lead teammates, the role doubles as the teammate identifier. */
+  teammateId?: string;
 };
 
 /**
- * Returns true if the session key contains `:team:` segment.
+ * Returns true if the session key belongs to a team agent.
+ * Format: agent:team-{teamId}:lead OR agent:team-{teamId}:teammate:{role}
  */
 export function isTeamSessionKey(key: string | undefined | null): boolean {
-  if (!key) return false;
-  return key.includes(":team:");
+  if (!key) {
+    return false;
+  }
+  const parsed = parseAgentSessionKey(key.trim().toLowerCase());
+  if (!parsed) {
+    return false;
+  }
+  const agentId = normalizeAgentId(parsed.agentId);
+  if (!agentId.startsWith(TEAM_AGENT_PREFIX)) {
+    return false;
+  }
+  const rest = (parsed.rest ?? "").toLowerCase();
+  return rest === TEAM_LEAD_SUFFIX || rest.startsWith(TEAMMATE_PREFIX);
 }
 
 /**
  * Parse a team session key into its components.
  * Returns null if the key is not a team session key.
  *
- * Format: agent:{agentId}:team:{teamId}:{role}
- * Lead:   agent:{agentId}:team:{teamId}:lead
+ * Format: agent:team-{teamId}:lead
+ *         agent:team-{teamId}:teammate:{role}
  */
 export function parseTeamSessionKey(key: string | undefined | null): ParsedTeamSessionKey | null {
-  if (!key) return null;
-  const match = TEAM_KEY_RE.exec(key.trim().toLowerCase());
-  if (!match) return null;
-  const [, agentId, teamId, role] = match;
+  if (!key) {
+    return null;
+  }
+  const parsed = parseAgentSessionKey(key.trim().toLowerCase());
+  if (!parsed) {
+    return null;
+  }
+  const agentId = normalizeAgentId(parsed.agentId);
+  if (!agentId.startsWith(TEAM_AGENT_PREFIX)) {
+    return null;
+  }
+  const teamId = agentId.slice(TEAM_AGENT_PREFIX.length) || agentId;
+  const rest = parsed.rest.trim();
+  const restLower = rest.toLowerCase();
+  if (restLower === TEAM_LEAD_SUFFIX) {
+    return {
+      agentId,
+      teamId,
+      role: TEAM_LEAD_SUFFIX,
+      isLead: true,
+    };
+  }
+  if (!restLower.startsWith(TEAMMATE_PREFIX)) {
+    return null;
+  }
+  const role = rest.slice(TEAMMATE_PREFIX.length) || "teammate";
   return {
     agentId,
     teamId,
     role,
-    isLead: role === TEAM_LEAD_SUFFIX,
+    isLead: false,
+    teammateId: role,
   };
 }
 
 /**
- * Build a teammate session key.
- * Format: agent:{agentId}:team:{teamId}:{role}-{uuid}
+ * Build a teammate session key for a team-specific agent id.
+ * Format: agent:team-{teamId}:teammate:{role}-{uuid}
  */
-export function buildTeammateSessionKey(params: {
-  agentId: string;
-  teamId: string;
-  role: string;
-}): string {
-  const agentId = normalizeAgentId(params.agentId);
-  const teamId = params.teamId.trim().toLowerCase();
+export function buildTeammateSessionKey(params: { teamAgentId: string; role: string }): string {
+  const agentId = normalizeAgentId(params.teamAgentId);
   const roleSafe = params.role
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "-");
-  // Caller appends UUID to make it unique. E.g.: agent:main:team:abc123:security-reviewer-550e8400
-  return `agent:${agentId}:team:${teamId}:${roleSafe}`;
+  return `agent:${agentId}:teammate:${roleSafe}`;
 }
 
 /**
- * Build the lead session key for a team.
- * Format: agent:{agentId}:team:{teamId}:lead
+ * Build the lead session key for a team-specific agent id.
+ * Format: agent:team-{teamId}:lead
  */
-export function buildTeamLeadSessionKey(params: { agentId: string; teamId: string }): string {
-  const agentId = normalizeAgentId(params.agentId);
-  const teamId = params.teamId.trim().toLowerCase();
-  return `agent:${agentId}:team:${teamId}:lead`;
+export function buildTeamLeadSessionKey(params: { teamAgentId: string }): string {
+  const agentId = normalizeAgentId(params.teamAgentId);
+  return `agent:${agentId}:lead`;
 }

@@ -91,6 +91,82 @@ export type GatewayModelChoice = {
   reasoning?: boolean;
 };
 
+export type GatewayTeammateSummary = {
+  teammateId: string;
+  role: string;
+  status: string;
+  sessionKey: string;
+  currentTask: string | null;
+  model: string | null;
+};
+
+export type GatewayTeamStatus = {
+  teamId: string;
+  teamName: string;
+  description: string | null;
+  status: string;
+  leadSessionKey: string;
+  teammateCount: number;
+  teammates: GatewayTeammateSummary[];
+  taskSummary: {
+    total: number;
+    pending: number;
+    blocked: number;
+    inProgress: number;
+    completed: number;
+    failed: number;
+  } | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type GatewayTeamTask = {
+  taskId: string;
+  title: string;
+  status: string;
+  assignee: string | null;
+  priority: string;
+  dependsOn: string[];
+  completedAt: number | null;
+};
+
+export type GatewayTeamTasks = {
+  teamId: string;
+  tasks: GatewayTeamTask[];
+  summary: {
+    total: number;
+    pending: number;
+    blocked: number;
+    inProgress: number;
+    completed: number;
+    failed: number;
+  } | null;
+};
+
+export type GatewayTeamCleanupResult = {
+  status: "cleaned" | "warning" | "error";
+  teamId?: string;
+  teamName?: string;
+  message?: string;
+  error?: string;
+  activeTeammates?: Array<{ teammateId: string; role: string; status: string; sessionKey: string }>;
+};
+
+export type GatewaySessionUsageLogEntry = {
+  timestamp: number;
+  role: "user" | "assistant" | "tool" | "toolResult";
+  content: string;
+  tokens?: number;
+  cost?: number;
+  usageBreakdown?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+};
+
 export class GatewayChatClient {
   private client: GatewayClient;
   private readyPromise: Promise<void>;
@@ -215,6 +291,45 @@ export class GatewayChatClient {
   async listModels(): Promise<GatewayModelChoice[]> {
     const res = await this.client.request<{ models?: GatewayModelChoice[] }>("models.list");
     return Array.isArray(res?.models) ? res.models : [];
+  }
+
+  async getTeamStatuses(sessionKey: string): Promise<GatewayTeamStatus[]> {
+    const res = await this.client.request<{
+      teams?: GatewayTeamStatus[] | null;
+    }>("teams.status", { sessionKey });
+    return res?.teams ?? [];
+  }
+
+  async getTeamTasks(sessionKey: string): Promise<GatewayTeamTasks | null> {
+    const res = await this.client.request<GatewayTeamTasks>("teams.tasks", { sessionKey });
+    return res ?? null;
+  }
+
+  async cleanupTeam(
+    sessionKey: string,
+    teamId: string,
+    force: boolean,
+  ): Promise<GatewayTeamCleanupResult | null> {
+    const res = await this.client.request<GatewayTeamCleanupResult>("teams.cleanup", {
+      sessionKey,
+      teamId,
+      force,
+    });
+    return res ?? null;
+  }
+
+  async getSessionUsageLogs(params: {
+    sessionKey: string;
+    limit?: number;
+  }): Promise<GatewaySessionUsageLogEntry[]> {
+    const res = await this.client.request<{ logs?: GatewaySessionUsageLogEntry[] }>(
+      "sessions.usage.logs",
+      {
+        key: params.sessionKey,
+        limit: params.limit,
+      },
+    );
+    return res?.logs ?? [];
   }
 }
 

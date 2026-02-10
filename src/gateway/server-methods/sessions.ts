@@ -3,6 +3,11 @@ import fs from "node:fs";
 import type { GatewayRequestHandlers } from "./types.js";
 import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun, waitForEmbeddedPiRunEnd } from "../../agents/pi-embedded.js";
+import {
+  killTeamTmuxSession,
+  resolveTeamTmuxSessionName,
+} from "../../agents/teams/display-tmux.js";
+import { cleanupTeam, listAllTeams } from "../../agents/teams/team-registry.js";
 import { stopSubagentsForRequester } from "../../auto-reply/reply/abort.js";
 import { clearSessionQueues } from "../../auto-reply/reply/queue.js";
 import { loadConfig } from "../../config/config.js";
@@ -41,6 +46,31 @@ import {
 } from "../session-utils.js";
 import { applySessionsPatchToStore } from "../sessions-patch.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
+
+function cleanupEphemeralTeamsForSession(sessionKeys: string[]) {
+  const uniqueKeys = new Set(sessionKeys.filter((key) => key.trim()));
+  if (uniqueKeys.size === 0) {
+    return;
+  }
+  const cfg = loadConfig();
+  const sessionPrefix = cfg.gateway?.teams?.display?.tmux?.sessionPrefix ?? "openclaw-team";
+  for (const team of listAllTeams()) {
+    if (team.persistent) {
+      continue;
+    }
+    if (!team.boundSessionKey || !uniqueKeys.has(team.boundSessionKey)) {
+      continue;
+    }
+    try {
+      killTeamTmuxSession(
+        resolveTeamTmuxSessionName({ teamName: team.teamName, prefix: sessionPrefix }),
+      );
+    } catch {
+      // Ignore tmux cleanup errors
+    }
+    cleanupTeam(team.teamId);
+  }
+}
 
 export const sessionsHandlers: GatewayRequestHandlers = {
   "sessions.list": ({ params, respond }) => {
@@ -268,6 +298,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       store[primaryKey] = nextEntry;
       return nextEntry;
     });
+    cleanupEphemeralTeamsForSession([key, target.canonicalKey ?? ""]);
     respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
   },
   "sessions.delete": async ({ params, respond }) => {
@@ -314,6 +345,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
     clearSessionQueues([...queueKeys]);
     stopSubagentsForRequester({ cfg, requesterSessionKey: target.canonicalKey });
+    cleanupEphemeralTeamsForSession([key, target.canonicalKey ?? ""]);
     if (sessionId) {
       abortEmbeddedPiRun(sessionId);
       const ended = await waitForEmbeddedPiRunEnd(sessionId, 15_000);
@@ -340,6 +372,32 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         delete store[primaryKey];
       }
     });
+
+    // Cleanup session-bound (ephemeral) teams tied to this gateway session.
+    try {
+      const sessionKey = target.canonicalKey ?? key;
+      const sessionPrefix = cfg.gateway?.teams?.display?.tmux?.sessionPrefix ?? "openclaw-team";
+      for (const team of listAllTeams()) {
+        if (team.persistent) {
+          continue;
+        }
+        if (team.boundSessionKey !== sessionKey) {
+          continue;
+        }
+        try {
+          const sessionName = resolveTeamTmuxSessionName({
+            teamName: team.teamName,
+            prefix: sessionPrefix,
+          });
+          killTeamTmuxSession(sessionName);
+        } catch {
+          // Ignore tmux cleanup errors
+        }
+        cleanupTeam(team.teamId);
+      }
+    } catch {
+      // Ignore team cleanup errors
+    }
 
     const archived: string[] = [];
     if (deleteTranscript && sessionId) {

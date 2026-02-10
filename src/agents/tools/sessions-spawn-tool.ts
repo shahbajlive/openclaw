@@ -141,9 +141,8 @@ export function createSessionsSpawnTool(opts?: {
       const requesterAgentId = normalizeAgentId(
         opts?.requesterAgentIdOverride ?? parseAgentSessionKey(requesterInternalKey)?.agentId,
       );
-      const targetAgentId = requestedAgentId
-        ? normalizeAgentId(requestedAgentId)
-        : requesterAgentId;
+      let spawnWarning: string | undefined;
+      let targetAgentId = requestedAgentId ? normalizeAgentId(requestedAgentId) : requesterAgentId;
       if (targetAgentId !== requesterAgentId) {
         const allowAgents = resolveAgentConfig(cfg, requesterAgentId)?.subagents?.allowAgents ?? [];
         const allowAny = allowAgents.some((value) => value.trim() === "*");
@@ -154,15 +153,9 @@ export function createSessionsSpawnTool(opts?: {
             .map((value) => normalizeAgentId(value).toLowerCase()),
         );
         if (!allowAny && !allowSet.has(normalizedTargetId)) {
-          const allowedText = allowAny
-            ? "*"
-            : allowSet.size > 0
-              ? Array.from(allowSet).join(", ")
-              : "none";
-          return jsonResult({
-            status: "forbidden",
-            error: `agentId is not allowed for sessions_spawn (allowed: ${allowedText})`,
-          });
+          spawnWarning =
+            "agentId is not allowlisted for sessions_spawn; spawning under the requester agent instead.";
+          targetAgentId = requesterAgentId;
         }
       }
       const childSessionKey = `agent:${targetAgentId}:subagent:${crypto.randomUUID()}`;
@@ -280,7 +273,11 @@ export function createSessionsSpawnTool(opts?: {
         childSessionKey,
         runId: childRunId,
         modelApplied: resolvedModel ? modelApplied : undefined,
-        warning: modelWarning,
+        warning: modelWarning
+          ? spawnWarning
+            ? `${spawnWarning} ${modelWarning}`
+            : modelWarning
+          : spawnWarning,
       });
     },
   };

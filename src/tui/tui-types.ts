@@ -20,6 +20,7 @@ export type ChatEvent = {
 
 export type AgentEvent = {
   runId: string;
+  sessionKey?: string;
   stream: string;
   data?: Record<string, unknown>;
 };
@@ -45,6 +46,9 @@ export type AgentSummary = {
   id: string;
   name?: string;
 };
+
+// Forward declaration - actual type imported from gateway-chat.ts
+export type GatewayTeamStatus = import("./gateway-chat.js").GatewayTeamStatus;
 
 export type GatewayStatusSummary = {
   linkChannel?: {
@@ -84,6 +88,11 @@ export type GatewayStatusSummary = {
   };
 };
 
+export type PaneContext =
+  | { type: "lead"; teamStatus: GatewayTeamStatus }
+  | { type: "teammate"; teamStatus: GatewayTeamStatus; teammateIndex: number }
+  | { type: "standalone" };
+
 export type TuiStateAccess = {
   agentDefaultId: string;
   sessionMainKey: string;
@@ -104,4 +113,12 @@ export type TuiStateAccess = {
   activityStatus: string;
   statusTimeout: ReturnType<typeof setTimeout> | null;
   lastCtrlCAt: number;
+
+  // Split view state
+  splitViewMode: boolean;
+  splitViewPanes: string[]; // sessionKeys to display in split view
+  activePaneIndex: number; // which pane has focus (0-based)
+
+  // Team view mode - when true, only show team communication messages
+  teamViewMode: boolean;
 };

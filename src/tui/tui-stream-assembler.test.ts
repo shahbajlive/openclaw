@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { splitThinkingFromText } from "./tui-formatters.js";
 import { TuiStreamAssembler } from "./tui-stream-assembler.js";
 
 describe("TuiStreamAssembler", () => {
@@ -22,7 +23,10 @@ describe("TuiStreamAssembler", () => {
       },
       true,
     );
-    expect(second).toBe("[thinking]\nBrain\n\nHello");
+    // Composed string uses markers; verify via split
+    const { thinking, content } = splitThinkingFromText(second!);
+    expect(thinking).toBe("Brain");
+    expect(content).toBe("Hello");
   });
 
   it("omits thinking when showThinking is false", () => {

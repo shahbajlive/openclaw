@@ -16,6 +16,12 @@ export function resolveFinalAssistantText(params: {
   return "(no output)";
 }
 
+// Invisible markers (Unit Separator) to delimit thinking blocks inside a
+// composed display string.  AssistantMessageComponent parses these and
+// renders thinking in its own styled section.
+export const THINKING_OPEN = "\x1FTHINKING\x1F";
+export const THINKING_CLOSE = "\x1F/THINKING\x1F";
+
 export function composeThinkingAndContent(params: {
   thinkingText?: string;
   contentText?: string;
@@ -26,13 +32,31 @@ export function composeThinkingAndContent(params: {
   const parts: string[] = [];
 
   if (params.showThinking && thinkingText) {
-    parts.push(`[thinking]\n${thinkingText}`);
+    parts.push(`${THINKING_OPEN}${thinkingText}${THINKING_CLOSE}`);
   }
   if (contentText) {
     parts.push(contentText);
   }
 
   return parts.join("\n\n").trim();
+}
+
+/**
+ * Split a composed display string into its thinking and content parts.
+ * Returns empty thinking when no markers are present.
+ */
+export function splitThinkingFromText(text: string): {
+  thinking: string;
+  content: string;
+} {
+  const openIdx = text.indexOf(THINKING_OPEN);
+  const closeIdx = text.indexOf(THINKING_CLOSE);
+  if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) {
+    return { thinking: "", content: text };
+  }
+  const thinking = text.slice(openIdx + THINKING_OPEN.length, closeIdx).trim();
+  const content = text.slice(closeIdx + THINKING_CLOSE.length).trim();
+  return { thinking, content };
 }
 
 /**
@@ -175,6 +199,23 @@ export function isCommandMessage(message: unknown): boolean {
     return false;
   }
   return (message as Record<string, unknown>).command === true;
+}
+
+/**
+ * Check if a system message is a team communication message.
+ * Team messages match the pattern: "From {sender}: {message}" or "[URGENT] From {sender}: {message}"
+ */
+export function isTeamMessage(text: string): boolean {
+  if (typeof text !== "string") {
+    return false;
+  }
+  // Match "From {sender}:" pattern (with optional [URGENT] prefix)
+  return /^(?:\[URGENT\]\s+)?From\s+\S+:\s/.test(text);
+}
+
+export function indentTeamMessage(text: string): string {
+  const lines = text.split(/\r?\n/);
+  return lines.map((line, index) => (index === 0 ? `│ team ${line}` : `│ ${line}`)).join("\n");
 }
 
 export function formatTokens(total?: number | null, context?: number | null) {

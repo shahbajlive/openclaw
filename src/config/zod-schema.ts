@@ -507,8 +507,9 @@ export const OpenClawSchema = z
         teams: z
           .object({
             enabled: z.boolean().optional(),
+            bootstrapMode: z.enum(["none", "minimal", "full"]).optional(),
+            heartbeatMode: z.enum(["none", "lead", "all"]).optional(),
             maxActiveTeams: z.number().int().positive().optional(),
-            maxTeammatesPerTeam: z.number().int().positive().optional(),
             defaultModel: z.string().optional(),
             retentionDays: z.number().int().positive().optional(),
             storage: z
@@ -521,7 +522,7 @@ export const OpenClawSchema = z
               .optional(),
             display: z
               .object({
-                mode: z.enum(["in-process", "tmux"]).optional(),
+                mode: z.enum(["auto", "inline", "tmux"]).optional(),
                 tmux: z
                   .object({
                     layout: z.enum(["tiled", "even-horizontal", "even-vertical"]).optional(),

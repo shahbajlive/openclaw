@@ -924,6 +924,13 @@ export type SessionLogEntry = {
   content: string;
   tokens?: number;
   cost?: number;
+  usageBreakdown?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
 };
 
 export async function loadSessionLogs(params: {
@@ -1044,16 +1051,25 @@ export async function loadSessionLogs(params: {
       // Get usage for assistant messages
       let tokens: number | undefined;
       let cost: number | undefined;
+      let usageBreakdown: SessionLogEntry["usageBreakdown"];
       if (role === "assistant") {
         const usageRaw = message.usage as Record<string, unknown> | undefined;
         const usage = normalizeUsage(usageRaw);
         if (usage) {
-          tokens =
+          const total =
             usage.total ??
             (usage.input ?? 0) +
               (usage.output ?? 0) +
               (usage.cacheRead ?? 0) +
               (usage.cacheWrite ?? 0);
+          tokens = total;
+          usageBreakdown = {
+            input: usage.input ?? 0,
+            output: usage.output ?? 0,
+            cacheRead: usage.cacheRead ?? 0,
+            cacheWrite: usage.cacheWrite ?? 0,
+            total,
+          };
           const breakdown = extractCostBreakdown(usageRaw);
           if (breakdown?.total !== undefined) {
             cost = breakdown.total;
@@ -1074,6 +1090,7 @@ export async function loadSessionLogs(params: {
         content,
         tokens,
         cost,
+        usageBreakdown,
       });
     } catch {
       // Ignore malformed lines

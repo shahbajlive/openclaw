@@ -8,7 +8,13 @@ import {
   normalizeMainKey,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
-import { asString, extractTextFromMessage, isCommandMessage } from "./tui-formatters.js";
+import {
+  asString,
+  extractTextFromMessage,
+  isCommandMessage,
+  isTeamMessage,
+  indentTeamMessage,
+} from "./tui-formatters.js";
 
 type SessionActionContext = {
   client: GatewayChatClient;
@@ -242,13 +248,22 @@ export function createSessionActions(context: SessionActionContext) {
       });
       const normalizeMatchKey = (key: string) => parseAgentSessionKey(key)?.rest ?? key;
       const currentMatchKey = normalizeMatchKey(state.currentSessionKey);
+      const currentParsed = parseAgentSessionKey(state.currentSessionKey);
+      const currentAgentId = currentParsed?.agentId ?? state.currentAgentId;
       const entry = result.sessions.find((row) => {
         // Exact match
         if (row.key === state.currentSessionKey) {
           return true;
         }
         // Also match canonical keys like "agent:default:main" against "main"
-        return normalizeMatchKey(row.key) === currentMatchKey;
+        if (normalizeMatchKey(row.key) !== currentMatchKey) {
+          return false;
+        }
+        const rowParsed = parseAgentSessionKey(row.key);
+        if (rowParsed?.agentId && currentAgentId && rowParsed.agentId !== currentAgentId) {
+          return false;
+        }
+        return true;
       });
       if (entry?.key && entry.key !== state.currentSessionKey) {
         updateAgentFromSessionKey(entry.key);
@@ -311,18 +326,36 @@ export function createSessionActions(context: SessionActionContext) {
       const showTools = (state.sessionInfo.verboseLevel ?? "off") !== "off";
       chatLog.clearAll();
       chatLog.addSystem(`session ${state.currentSessionKey}`);
+      // Collect tool_use args from assistant messages so tool results can display them
+      const toolArgsById = new Map<string, unknown>();
       for (const entry of record.messages ?? []) {
         if (!entry || typeof entry !== "object") {
           continue;
         }
         const message = entry as Record<string, unknown>;
-        if (isCommandMessage(message)) {
-          const text = extractTextFromMessage(message);
-          if (text) {
-            chatLog.addSystem(text);
+
+        // In team view mode, filter out command messages and tool results
+        if (state.teamViewMode) {
+          if (isCommandMessage(message)) {
+            continue;
           }
-          continue;
+          if (message.role === "toolResult") {
+            continue;
+          }
+        } else {
+          // Normal mode: show command messages
+          if (isCommandMessage(message)) {
+            const text = extractTextFromMessage(message, {
+              includeThinking: state.showThinking,
+            });
+            if (text) {
+              const formatted = isTeamMessage(text) ? indentTeamMessage(text) : text;
+              chatLog.addSystem(formatted);
+            }
+            continue;
+          }
         }
+
         if (message.role === "user") {
           const text = extractTextFromMessage(message);
           if (text) {
@@ -335,17 +368,56 @@ export function createSessionActions(context: SessionActionContext) {
             includeThinking: state.showThinking,
           });
           if (text) {
-            chatLog.finalizeAssistant(text);
+            const formatted = isTeamMessage(text) ? indentTeamMessage(text) : text;
+            chatLog.finalizeAssistant(formatted);
+          }
+          // Extract tool_use blocks from assistant content to recover args for tool display
+          if (showTools && Array.isArray(message.content)) {
+            for (const block of message.content as Record<string, unknown>[]) {
+              if (!block || typeof block !== "object") {
+                continue;
+              }
+              // Anthropic-style tool_use blocks
+              if (block.type === "tool_use" && typeof block.id === "string") {
+                toolArgsById.set(block.id, block.input ?? {});
+              }
+            }
+            // OpenAI-style tool_calls array
+            const toolCalls = message.tool_calls ?? message.toolCalls;
+            if (Array.isArray(toolCalls)) {
+              for (const call of toolCalls as Record<string, unknown>[]) {
+                const id = typeof call.id === "string" ? call.id : undefined;
+                if (!id) {
+                  continue;
+                }
+                const fn = call.function as Record<string, unknown> | undefined;
+                let args: unknown = {};
+                if (fn && typeof fn.arguments === "string") {
+                  try {
+                    args = JSON.parse(fn.arguments);
+                  } catch {
+                    args = {};
+                  }
+                }
+                toolArgsById.set(id, args);
+              }
+            }
           }
           continue;
         }
         if (message.role === "toolResult") {
+          // In team view mode, always skip tool results
+          if (state.teamViewMode) {
+            continue;
+          }
           if (!showTools) {
             continue;
           }
           const toolCallId = asString(message.toolCallId, "");
           const toolName = asString(message.toolName, "tool");
-          const component = chatLog.startTool(toolCallId, toolName, {});
+          // Recover args from the preceding assistant message's tool_use block
+          const recoveredArgs = toolArgsById.get(toolCallId) ?? {};
+          const component = chatLog.startTool(toolCallId, toolName, recoveredArgs);
           component.setResult(
             {
               content: Array.isArray(message.content)

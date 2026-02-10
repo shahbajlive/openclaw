@@ -8,6 +8,8 @@ import type {
 } from "./types.js";
 import { loadConfig } from "../../config/config.js";
 import { onAgentEvent } from "../../infra/agent-events.js";
+import { setCommandLaneConcurrency } from "../../process/command-queue.js";
+import { CommandLane } from "../../process/lanes.js";
 import { sendMessage as sendMailboxMessage } from "./mailbox.js";
 import { listTasks } from "./task-list.js";
 import { deleteTeamFromDisk, loadAllTeamsFromDisk, saveTeamToDisk } from "./team-registry.store.js";
@@ -59,6 +61,13 @@ function resolveTeamIdFromName(teamName: string): string {
   return `${base}-${Date.now()}`;
 }
 
+function recomputeTeamLaneConcurrency(): void {
+  const totalMembers = Array.from(activeTeams.values())
+    .filter((team) => team.status === "active")
+    .reduce((sum, team) => sum + 1 + Object.keys(team.teammates).length, 0);
+  setCommandLaneConcurrency(CommandLane.Team, totalMembers > 0 ? totalMembers : 1);
+}
+
 /**
  * Create a new team.
  * Uses teamName as teamId (with numeric prefix on collision).
@@ -101,6 +110,7 @@ export function createTeam(params: {
 
   activeTeams.set(teamId, team);
   persistTeam(team);
+  recomputeTeamLaneConcurrency();
 
   return team;
 }
@@ -149,6 +159,7 @@ export function addTeammate(teamId: string, teammate: Teammate): void {
   team.idleNotificationSent = false;
   team.updatedAt = Date.now();
   persistTeam(team);
+  recomputeTeamLaneConcurrency();
 }
 
 /**
@@ -163,6 +174,7 @@ export function removeTeammate(teamId: string, teammateId: string): void {
   delete team.teammates[teammateId];
   team.updatedAt = Date.now();
   persistTeam(team);
+  recomputeTeamLaneConcurrency();
 }
 
 /**
@@ -200,6 +212,7 @@ export function updateTeamStatus(teamId: string, status: TeamStatus): void {
   team.status = status;
   team.updatedAt = Date.now();
   persistTeam(team);
+  recomputeTeamLaneConcurrency();
 }
 
 /**
@@ -527,6 +540,7 @@ export function unregisterTeammateRun(runId: string): void {
  */
 export function initTeamRegistry(): void {
   restoreTeamsOnce();
+  recomputeTeamLaneConcurrency();
   ensureListener();
 }
 
@@ -650,6 +664,47 @@ function notifyLeadOfTeammateFinish(
   }
 }
 
+function notifyLeadOfTeammateInterrupted(
+  teamId: string,
+  teammateId: string,
+  tasks: Array<{ taskId: string; title?: string; status?: string }>,
+): void {
+  try {
+    const team = activeTeams.get(teamId);
+    if (!team) {
+      return;
+    }
+    const teammate = team.teammates[teammateId];
+    const roleLabel = teammate?.role ?? teammateId;
+    const lines: string[] = [];
+    lines.push(`Teammate "${roleLabel}" ended before completing assigned tasks.`);
+    if (tasks.length > 0) {
+      lines.push("");
+      lines.push("Assigned tasks still incomplete:");
+      for (const task of tasks.slice(0, 3)) {
+        const title = task.title ? ` ${task.title}` : "";
+        const status = task.status ? ` (${task.status})` : "";
+        lines.push(`- ${task.taskId}${title}${status}`);
+      }
+      if (tasks.length > 3) {
+        lines.push(`- ...and ${tasks.length - 3} more`);
+      }
+    }
+    lines.push("");
+    lines.push("Reassign or retry these tasks.");
+
+    sendMailboxMessage({
+      teamId,
+      from: teammateId,
+      to: "lead",
+      message: lines.join("\n"),
+      priority: "urgent",
+    });
+  } catch {
+    // Best-effort notification; don't break the lifecycle flow
+  }
+}
+
 /**
  * Persist a team to disk.
  */
@@ -728,10 +783,34 @@ function ensureListener(): void {
     if (phase === "start") {
       updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_ACTIVE);
     } else if (phase === "end") {
-      updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_COMPLETED);
+      let incompleteAssigned: Array<{ taskId: string; title?: string; status?: string }> = [];
+      try {
+        const { tasks } = listTasks(teamId, { includeCompleted: true });
+        incompleteAssigned = tasks.filter(
+          (task) =>
+            task.assignee === teammateId && task.status !== "completed" && task.status !== "failed",
+        );
+      } catch {
+        // Ignore task lookup errors
+      }
+
+      if (incompleteAssigned.length > 0) {
+        updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_INTERRUPTED);
+        notifyLeadOfTeammateInterrupted(teamId, teammateId, incompleteAssigned);
+      } else {
+        const team = activeTeams.get(teamId);
+        const teammate = team?.teammates[teammateId];
+        if (team && teammate) {
+          teammate.status = TEAMMATE_STATUS_IDLE;
+          teammate.currentTask = undefined;
+          team.updatedAt = Date.now();
+          persistTeam(team);
+        } else {
+          updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_IDLE);
+        }
+      }
+
       unregisterTeammateRun(evt.runId);
-      // Auto-notify the lead that this teammate finished
-      notifyLeadOfTeammateFinish(teamId, teammateId, "completed");
       // Notify the lead if the whole team is now idle
       notifyLeadIfTeamIdle(teamId);
     } else if (phase === "error") {
@@ -760,6 +839,7 @@ export function cleanupTeam(teamId: string): { success: boolean; error?: string 
 
     // Remove from memory
     activeTeams.delete(teamId);
+    recomputeTeamLaneConcurrency();
 
     // Delete team directory from disk
     deleteTeamFromDisk(teamId);

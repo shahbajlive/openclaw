@@ -143,6 +143,12 @@ export function buildTeammateSessionKey(params: { agentId; teamId; role }): stri
 export function buildTeamLeadSessionKey(params: { agentId; teamId }): string;
 ```
 
+**Team Lane Concurrency (Important):**
+- All team runs (lead + teammates) should use `CommandLane.Team`.
+- **Concurrency must equal total team members** across active teams: `lead + teammates`.
+- This avoids serialized teammate spawns and ensures full parallelism.
+- When teams are created/teammates added or removed, recompute and update the lane concurrency.
+
 ### 03-config: Configuration Schema
 
 **Gateway Config** (`src/config/types.gateway.ts`):
@@ -219,8 +225,13 @@ listenerStop = onAgentEvent((evt) => {
   if (phase === "start") {
     updateTeammateStatus(teamId, teammateId, "active");
   } else if (phase === "end") {
-    updateTeammateStatus(teamId, teammateId, "completed");
-    notifyLeadOfTeammateFinish(teamId, teammateId, "completed");
+    const incompleteTasks = listAssignedIncompleteTasks(teamId, teammateId);
+    if (incompleteTasks.length > 0) {
+      updateTeammateStatus(teamId, teammateId, "interrupted");
+      notifyLeadOfTeammateInterrupted(teamId, teammateId, incompleteTasks);
+    } else {
+      updateTeammateStatus(teamId, teammateId, "idle");
+    }
     notifyLeadIfTeamIdle(teamId);
   } else if (phase === "error") {
     updateTeammateStatus(teamId, teammateId, "failed");
@@ -487,7 +498,7 @@ const runId = idem;  // idempotencyKey becomes runId
 ### Changes Made
 - **Removed:** Defensive check for different `response.runId` (teammate-spawn-tool.ts)
 - **Removed:** Optimistic status transition to "active" 
-- **Status transitions:** Only via lifecycle events (registry listener)
+- **Status transitions:** Lifecycle start/end + task tools (`task_complete` -> idle, `teammate_shutdown` -> completed)
 - **Added:** `transitionTeammateToIdle()` function for when teammates have no tasks
 
 **Benefits:**
@@ -525,29 +536,27 @@ const runId = idem;  // idempotencyKey becomes runId
                             │(next task│
                             └────┬─────┘
                                  │
-                                 │ lifecycle "end"
+                                 │ lifecycle "end" (no incomplete tasks)
                                  ▼
                           ┌───────────┐
-                          │ completed │ (terminal)
+                          │   idle    │ (waiting)
                           └─────┬─────┘
-                                │
-                                │ 🔔 Notification to Lead 
-                                │ "Mission Accomplished"
+                                │ teammate_shutdown
                                 ▼
                           ┌───────────┐
-                          │  cleanup  │ (Auto for Ephemeral -
-                          └───────────┘  ON LEAD SESSION END)
+                          │ completed │ (terminal)
+                          └───────────┘
+                                ▲
+                                │ lifecycle "end" (incomplete tasks)
+                                │
+                          ┌─────┴─────┐
+                          │interrupted│ (recovery)
+                          └─────┬─────┘
                                 ▲
                                 │ lifecycle "error"
                                 │
                           ┌─────┴─────┐
                           │   failed  │ (terminal)
-                          └───────────┘
-                                 │
-                                 │ gateway restart
-                                 ▼
-                          ┌───────────┐
-                          │interrupted│ (recovery)
                           └───────────┘
 ```
 
@@ -560,12 +569,15 @@ const runId = idem;  // idempotencyKey becomes runId
 | `active` | `active` | Task claimed | Teammate working on task (same state) |
 | `active` | `idle` | Task completed (no more tasks) | No pending tasks, teammate waiting |
 | `idle` | `active` | Task claimed | Task available, teammate resumes work |
-| `active` | `completed` | Lifecycle "end" event | Teammate finished all work (terminal) |
+| `active` | `idle` | Lifecycle "end" event (no assigned tasks) | Session ended with no incomplete tasks |
+| `active` | `interrupted` | Lifecycle "end" event (incomplete tasks) | Teammate ended before finishing tasks |
+| `idle` | `completed` | `teammate_shutdown` | Lead retires the teammate |
 | `active` | `failed` | Lifecycle "error" event | Teammate encountered error (terminal) |
 | `spawning`/`active` | `interrupted` | Gateway restart | Unclean shutdown, recovery state |
 
 **Terminal states:** `completed`, `failed` - teammate won't work again
 **Active states:** `spawning`, `active`, `idle` - teammate can still work
+**Recovery state:** `interrupted` - requires lead action (retry/reassign)
 
 ---
 
@@ -701,6 +713,7 @@ Since teammates share workspace but have isolated sessions:
 
 **Task Execution Order & Communication:**
 - Tasks are executed strictly in dependency order - a task can only be claimed after all its dependencies are completed.
+- **Preferred workflow:** create tasks first → spawn teammates → teammates claim tasks.
 - **Teammate Communication:** Since teammates can only work on tasks that are ready (dependencies completed), their communication is always about upcoming tasks - tasks they're about to work on, will work on next, or need coordination for.
 - **Lead Communication:** The lead receives messages via the same immediate system event delivery mechanism. However, the lead's role is coordination-focused:
   - Receives automatic notifications when teammates finish/fail (via `notifyLeadOfTeammateFinish`)

@@ -4,6 +4,7 @@ import type { AnyAgentTool } from "../../tools/common.js";
 import { loadConfig } from "../../../config/config.js";
 import { callGateway } from "../../../gateway/call.js";
 import { resolveAgentWorkspaceDir } from "../../agent-scope.js";
+import { AGENT_LANE_TEAM } from "../../lanes.js";
 import { jsonResult, readStringParam, readStringArrayParam } from "../../tools/common.js";
 import { ensureAgentWorkspace } from "../../workspace.js";
 import { createTeamTmuxView, resolveTeamDisplayMode } from "../display-tmux.js";
@@ -160,6 +161,7 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
             params: {
               message: leadInitMessage,
               sessionKey: leadSessionKey,
+              lane: AGENT_LANE_TEAM,
               extraSystemPrompt: leadPrompt,
               deliver: false,
               idempotencyKey: leadRunId,

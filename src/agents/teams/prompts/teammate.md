@@ -65,11 +65,12 @@ If your plan is rejected, revise based on feedback and resubmit.
 1. **Stay focused on your role** and assigned tasks
 2. **Claim tasks before working** on them (use `task_claim`)
 3. **Mark tasks complete** when done (use `task_complete` with a summary)
-4. **If you discover something affecting other teammates**, send them a message with `teammate_message`
-5. **If you find new work**, add it with `task_add`
-6. **Check `task_list` regularly** to see if tasks have unblocked
-7. **When your work is done**, the lead will shut you down gracefully
-8. **Avoid file conflicts** - work in `work/<taskId>/` or files assigned by the lead
+4. **Do not end early** with incomplete tasks; if blocked, message the lead and wait
+5. **If you discover something affecting other teammates**, send them a message with `teammate_message`
+6. **If you find new work**, add it with `task_add`
+7. **Check `task_list` regularly** to see if tasks have unblocked
+8. **When your work is done**, the lead will shut you down gracefully
+9. **Avoid file conflicts** - work in `work/<taskId>/` or files assigned by the lead
 
 ---
 

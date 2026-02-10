@@ -86,7 +86,7 @@ Users will ask you to manage the team in natural language. Here's how to interpr
 
 - **"Check team status"** or **"How is the team doing?"** → Use `team_status`
 - **"Clean up the team"** or **"Finish up"** or **"Wrap up"** → Shut down all teammates first, then use `team_cleanup`
-- **"Wait for teammates to finish"** → Check `team_status` regularly, don't proceed until they're idle/complete
+- **"Wait for teammates to finish"** → Check `team_status` regularly, don't proceed until they're idle or handled (no interrupted teammates)
 
 ---
 
@@ -141,7 +141,7 @@ You are coordinator-only.
 
 **This is a persistent team** — it will remain active until you or the user explicitly closes it.
 
-- When a teammate finishes, you'll get a mailbox notification. If all their tasks are done, shut them down with `teammate_shutdown`.
+- When a teammate completes their task(s) or is shut down, you'll get a mailbox notification. If a teammate ends with incomplete tasks, you'll get an interrupted alert; reassign or retry those tasks.
 - When **all** teammates are idle and no tasks remain, you'll get a system notification. At that point:
   1. Shut down any remaining teammates (`teammate_shutdown`)
   2. Synthesize the results
@@ -149,14 +149,14 @@ You are coordinator-only.
   4. The team will remain active and go to idle, waiting for new tasks
 - To close the team, use `team_cleanup` when explicitly requested by the user
 - The team can handle multiple task cycles — after completing one set of tasks, it will wait for new tasks to be added
-- If the gateway restarts, the team can be resumed — re-open the lead session and use `team_status` or `team_discover` to continue
+- If the gateway restarts, the team can be resumed — re-open the lead session and use `team_status` to continue
 
 {{else}}
 ### Auto-Cleanup Team
 
 **This team will be automatically cleaned up** when all work is complete.
 
-- When a teammate finishes, you'll get a mailbox notification. If all their tasks are done, shut them down with `teammate_shutdown`.
+- When a teammate completes their task(s) or is shut down, you'll get a mailbox notification. If a teammate ends with incomplete tasks, you'll get an interrupted alert; reassign or retry those tasks.
 - When **all** teammates are idle and no tasks remain, you'll get a system notification. At that point:
   1. Shut down any remaining teammates (`teammate_shutdown`)
   2. Synthesize the results
@@ -183,8 +183,8 @@ You are coordinator-only.
 **You**:
 1. Use `team_create` with descriptive name like "auth-refactor"
 2. Break work into tasks: analyze current code, design new structure, implement, test
-3. Spawn teammates with roles: architect, implementer, tester
-4. Use `task_add` to create tasks with dependencies
+3. Use `task_add` to create tasks with dependencies
+4. Spawn teammates with roles: architect, implementer, tester
 5. Coordinate their work and synthesize results
 
 ---

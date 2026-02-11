@@ -516,7 +516,6 @@ export const OpenClawSchema = z
               .object({
                 basePath: z.string().optional(),
                 taskListFormat: z.enum(["json", "jsonl"]).optional(),
-                mailboxTTLHours: z.number().positive().optional(),
               })
               .strict()
               .optional(),

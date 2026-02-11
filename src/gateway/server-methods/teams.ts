@@ -103,6 +103,8 @@ export const teamsHandlers: GatewayRequestHandlers = {
         taskId: t.taskId,
         title: t.title,
         status: t.status,
+        taskClass: t.taskClass ?? null,
+        reservedTask: t.metadata?.excludedTaskClass === true,
         assignee: t.assignee ?? null,
         priority: t.priority,
         dependsOn: t.dependsOn,
@@ -143,22 +145,22 @@ export const teamsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    if (!isTeamLead(team.teamId, sessionKey)) {
+    if (!team.creatorSessionKey || team.creatorSessionKey !== sessionKey) {
       respond(
         false,
         undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "Only the team lead can remove the team."),
+        errorShape(ErrorCodes.INVALID_REQUEST, "Only the team creator can remove the team."),
       );
       return;
     }
 
     const activeTeammates = Object.values(team.teammates).filter(
-      (tm) => tm.status === "active" || tm.status === "spawning",
+      (tm) => tm.status === "working" || tm.status === "init",
     );
     if (activeTeammates.length > 0 && !force) {
       respond(true, {
         status: "warning",
-        error: `${activeTeammates.length} teammate(s) still active. Shut them down first using teammate_shutdown.`,
+        error: `${activeTeammates.length} teammate(s) still active. Wait for them to finish or rerun with force.`,
         activeTeammates: activeTeammates.map((tm) => ({
           teammateId: tm.teammateId,
           role: tm.role,
@@ -170,7 +172,7 @@ export const teamsHandlers: GatewayRequestHandlers = {
     }
     if (activeTeammates.length > 0 && force) {
       for (const teammate of activeTeammates) {
-        updateTeammateStatus(team.teamId, teammate.teammateId, "completed");
+        updateTeammateStatus(team.teamId, teammate.teammateId, "idle");
       }
     }
 

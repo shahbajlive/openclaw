@@ -4,29 +4,23 @@
 
 // ---- Lead Status Constants ----
 
-export const LEAD_STATUS_SPAWNING = "spawning";
+export const LEAD_STATUS_INIT = "init";
 export const LEAD_STATUS_IDLE = "idle";
 export const LEAD_STATUS_WORKING = "working";
-export const LEAD_STATUS_COMPLETED = "completed";
 export const LEAD_STATUS_FAILED = "failed";
-export const LEAD_STATUS_INTERRUPTED = "interrupted";
 
 export type LeadStatus =
-  | typeof LEAD_STATUS_SPAWNING
+  | typeof LEAD_STATUS_INIT
   | typeof LEAD_STATUS_IDLE
   | typeof LEAD_STATUS_WORKING
-  | typeof LEAD_STATUS_COMPLETED
-  | typeof LEAD_STATUS_FAILED
-  | typeof LEAD_STATUS_INTERRUPTED;
+  | typeof LEAD_STATUS_FAILED;
 
 // ---- Teammate Status Constants ----
 
-export const TEAMMATE_STATUS_SPAWNING = "spawning";
-export const TEAMMATE_STATUS_ACTIVE = "active";
+export const TEAMMATE_STATUS_INIT = "init";
 export const TEAMMATE_STATUS_IDLE = "idle";
-export const TEAMMATE_STATUS_COMPLETED = "completed";
+export const TEAMMATE_STATUS_WORKING = "working";
 export const TEAMMATE_STATUS_FAILED = "failed";
-export const TEAMMATE_STATUS_INTERRUPTED = "interrupted";
 
 // ---- Team ----
 
@@ -34,7 +28,7 @@ export type TeamConfig = {
   notifyOnUnblock: boolean;
 };
 
-export type TeamStatus = "active" | "completed" | "failed" | "interrupted";
+export type TeamStatus = "init" | "working" | "failed" | "idle";
 
 export type Team = {
   teamId: string; // UUID
@@ -67,13 +61,7 @@ export type Team = {
 
 // ---- Teammate ----
 
-export type TeammateStatus =
-  | "spawning"
-  | "active"
-  | "idle"
-  | "completed"
-  | "failed"
-  | "interrupted";
+export type TeammateStatus = "init" | "idle" | "working" | "failed";
 
 export type Teammate = {
   teammateId: string; // UUID
@@ -81,9 +69,11 @@ export type Teammate = {
   sessionKey: string;
   status: TeammateStatus;
   model?: string; // cross-model support
+  isChore?: boolean;
   requirePlanApproval: boolean;
   planApproved: boolean; // false until lead approves
   currentTask?: string;
+  currentTaskId?: string;
   claimedTasks: number;
   completedTasks: number;
   createdAt: number;
@@ -94,6 +84,7 @@ export type Teammate = {
 
 export type TaskStatus = "pending" | "blocked" | "claimed" | "in-progress" | "completed" | "failed";
 export type TaskPriority = "low" | "normal" | "high" | "critical";
+export type TaskClass = "primary" | "secondary";
 
 export type Task = {
   taskId: string;
@@ -103,6 +94,7 @@ export type Task = {
   assignee?: string; // teammateId
   dependsOn: string[]; // task IDs
   priority: TaskPriority;
+  taskClass?: TaskClass;
   metadata?: Record<string, unknown>;
   result?: "success" | "failure";
   summary?: string;

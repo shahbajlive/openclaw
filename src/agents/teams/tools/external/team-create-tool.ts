@@ -1,15 +1,16 @@
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
-import type { AnyAgentTool } from "../../tools/common.js";
-import { loadConfig } from "../../../config/config.js";
-import { callGateway } from "../../../gateway/call.js";
-import { resolveAgentWorkspaceDir } from "../../agent-scope.js";
-import { AGENT_LANE_TEAM } from "../../lanes.js";
-import { jsonResult, readStringParam, readStringArrayParam } from "../../tools/common.js";
-import { ensureAgentWorkspace } from "../../workspace.js";
-import { createTeamTmuxView, resolveTeamDisplayMode } from "../display-tmux.js";
-import { buildTeamLeadSystemPrompt } from "../system-prompt.js";
-import { addTask } from "../task-list.js";
+import type { AnyAgentTool } from "../../../tools/common.js";
+import { loadConfig } from "../../../../config/config.js";
+import { callGateway } from "../../../../gateway/call.js";
+import { resolveAgentWorkspaceDir } from "../../../agent-scope.js";
+import { AGENT_LANE_TEAM } from "../../../lanes.js";
+import { jsonResult, readStringParam, readStringArrayParam } from "../../../tools/common.js";
+import { ensureAgentWorkspace } from "../../../workspace.js";
+import { createTeamTmuxView, resolveTeamDisplayMode } from "../../display-tmux.js";
+import { buildTeamLeadSystemPrompt } from "../../system-prompt.js";
+import { addTask } from "../../task-list.js";
+import { TASK_INIT } from "../../task-taxonomy.js";
 import {
   createTeam,
   listActiveTeams,
@@ -18,7 +19,7 @@ import {
   cleanupTeam,
   updateLeadSessionKey,
   updateTeamTmuxPanes,
-} from "../team-registry.js";
+} from "../../team-registry.js";
 
 const TeamCreateSchema = Type.Object({
   teamName: Type.String(),
@@ -36,7 +37,7 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
     label: "Teams",
     name: "team_create",
     description:
-      "Create a new agent team. Teams can be task-specific (auto-cleanup, default) or persistent. Task-specific teams require initial tasks on creation; these tasks are instructions for the team lead, who will create subtasks and dependencies.",
+      "Create a new agent team. Teams can be task-specific (auto-cleanup, default) or persistent. When initial tasks are provided, the system creates a single init_task for the lead to break down into subtasks with dependencies and assignees.",
     parameters: TeamCreateSchema,
     execute: async (_toolCallId, args) => {
       // 1. Check teams enabled
@@ -61,7 +62,7 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
       if (maxActiveTeams && activeTeams.length >= maxActiveTeams) {
         return jsonResult({
           status: "error",
-          error: `Maximum active teams limit reached (${maxActiveTeams}). Complete or interrupt existing teams before creating new ones.`,
+          error: `Maximum active teams limit reached (${maxActiveTeams}). Clean up existing teams before creating new ones.`,
         });
       }
 
@@ -135,12 +136,26 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
 
         // 5. Add tasks
         let taskMsg = "";
+        let initTaskId: string | undefined;
         if (tasks && tasks.length > 0) {
-          for (const taskDesc of tasks) {
-            // Note: using taskDesc as title, description empty
-            addTask(team.teamId, { title: taskDesc });
-          }
-          taskMsg = ` Added ${tasks.length} initial tasks.`;
+          const initDescriptionLines = [
+            "Create subtasks with clear dependencies and assignees based on the initial tasks below.",
+            "Reply with JSON in this shape:",
+            '{"tasks":[{"id":"spec","title":"...","description":"...","assignee":"<teammateId or role>","dependsOn":["spec"]}]}',
+            "Use dependsOn ids or 1-based indices to reference tasks in your JSON list.",
+            "",
+            "Initial tasks from creator:",
+            ...tasks.map((taskDesc, index) => `${index + 1}. ${taskDesc}`),
+          ];
+          const initTask = addTask(team.teamId, {
+            title: TASK_INIT,
+            description: initDescriptionLines.join("\n"),
+            assignTo: "lead",
+            priority: "critical",
+            metadata: { initialTasks: tasks },
+          });
+          initTaskId = initTask.taskId;
+          taskMsg = " Added init_task for the lead.";
         }
 
         // 6. Spawn lead agent session
@@ -150,7 +165,7 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
         });
         const leadInitMessage =
           tasks && tasks.length > 0
-            ? `Initial team tasks:\n${tasks.map((taskDesc, index) => `${index + 1}. ${taskDesc}`).join("\n")}`
+            ? `An init_task was created for you${initTaskId ? ` (taskId: ${initTaskId})` : ""}. Use task_answer on init_task with the JSON plan described in the task to create subtasks.`
             : "Team lead initialized. Awaiting tasks.";
         const leadRunId = crypto.randomUUID();
         registerLeadRun(team.teamId, leadRunId);

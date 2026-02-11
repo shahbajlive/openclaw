@@ -1,21 +1,22 @@
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
-import type { AnyAgentTool } from "../../tools/common.js";
-import type { Teammate } from "../types.js";
-import { loadConfig } from "../../../config/config.js";
-import { callGateway } from "../../../gateway/call.js";
-import { resolveAgentIdFromSessionKey } from "../../../routing/session-key.js";
-import { AGENT_LANE_TEAM } from "../../lanes.js";
-import { jsonResult, readStringParam } from "../../tools/common.js";
-import { createTeamTmuxView, resolveTeamDisplayMode } from "../display-tmux.js";
-import { buildTeammateSystemPrompt } from "../system-prompt.js";
+import type { AnyAgentTool } from "../../../../tools/common.js";
+import type { Teammate } from "../../../types.js";
+import { loadConfig } from "../../../../../config/config.js";
+import { callGateway } from "../../../../../gateway/call.js";
+import { resolveAgentIdFromSessionKey } from "../../../../../routing/session-key.js";
+import { AGENT_LANE_TEAM } from "../../../../lanes.js";
+import { jsonResult, readStringParam } from "../../../../tools/common.js";
+import { createTeamTmuxView, resolveTeamDisplayMode } from "../../../display-tmux.js";
+import { buildTeammateSystemPrompt } from "../../../system-prompt.js";
 import {
   getTeam,
   addTeammate,
   isTeamLead,
   registerTeammateRun,
+  updateTeammateStatus,
   updateTeamTmuxPanes,
-} from "../team-registry.js";
+} from "../../../team-registry.js";
 
 const TeammateSpawnSchema = Type.Object({
   teamId: Type.String(),
@@ -57,6 +58,12 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
       const teamId = readStringParam(params, "teamId", { required: true });
       const role = readStringParam(params, "role", { required: true });
       const task = readStringParam(params, "task", { required: true });
+      if (role.trim().toLowerCase() === "chore") {
+        return jsonResult({
+          status: "error",
+          error: "Chore teammate is system-managed and cannot be spawned manually.",
+        });
+      }
       const modelOverride = readStringParam(params, "model");
       const requirePlanApproval = params.requirePlanApproval === true;
       const timeout =
@@ -123,11 +130,12 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
         teammateId,
         role,
         sessionKey,
-        status: "spawning",
+        status: "init",
         model: resolvedModel,
         requirePlanApproval,
         planApproved: false,
         currentTask: task,
+        currentTaskId: undefined,
         claimedTasks: 0,
         completedTasks: 0,
         createdAt: Date.now(),
@@ -135,10 +143,12 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
       };
 
       // 10. Build teammate system prompt BEFORE adding to registry (for atomicity)
-      const otherTeammates = Object.values(team.teammates).map((tm) => ({
-        role: tm.role,
-        teammateId: tm.teammateId,
-      }));
+      const otherTeammates = Object.values(team.teammates)
+        .filter((tm) => !tm.isChore)
+        .map((tm) => ({
+          role: tm.role,
+          teammateId: tm.teammateId,
+        }));
 
       const childSystemPrompt = buildTeammateSystemPrompt({
         team,
@@ -189,7 +199,7 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
         // so lifecycle events will find the mapping and transition status correctly.
       } catch (err) {
         // optimistically added, so remove if failed
-        const { removeTeammate } = await import("../team-registry.js");
+        const { removeTeammate } = await import("../../../team-registry.js");
         removeTeammate(teamId, teammateId);
 
         const messageText =
@@ -210,12 +220,14 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
           const view = await createTeamTmuxView({
             teamName: team.teamName,
             leadSessionKey: team.leadSessionKey,
-            teammates: Object.values(team.teammates).map((t) => ({
-              teammateId: t.teammateId,
-              role: t.role,
-              sessionKey: t.sessionKey,
-              currentTask: t.currentTask,
-            })),
+            teammates: Object.values(team.teammates)
+              .filter((t) => !t.isChore)
+              .map((t) => ({
+                teammateId: t.teammateId,
+                role: t.role,
+                sessionKey: t.sessionKey,
+                currentTask: t.currentTask,
+              })),
             sessionPrefix,
           });
           updateTeamTmuxPanes({
@@ -227,6 +239,14 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
         } catch {
           // Non-fatal: continue even if tmux setup fails
         }
+      }
+
+      const latestTeam = getTeam(teamId);
+      const spawned = latestTeam?.teammates[teammateId];
+      if (spawned) {
+        spawned.currentTask = undefined;
+        spawned.currentTaskId = undefined;
+        updateTeammateStatus(teamId, teammateId, "idle");
       }
 
       // 16. Return result

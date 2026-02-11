@@ -2,7 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { addTask, claimTask, completeTask, listTasks, getTask, removeTask } from "./task-list.js";
+import {
+  addTask as addTaskRaw,
+  claimTask,
+  completeTask,
+  listTasks,
+  getTask,
+  removeTask,
+  updateTask,
+} from "./task-list.js";
+import { TASK_BROADCAST_ANSWER } from "./task-taxonomy.js";
 
 // Must be declared before vi.mock so the closure captures the reference
 let testBasePath = "";
@@ -15,6 +24,19 @@ vi.mock("./team-registry.store.js", () => ({
 
 describe("task-list", () => {
   const teamId = "test-team-123";
+  const addTask = (params: Parameters<typeof addTaskRaw>[1]) => {
+    if (params.title === TASK_BROADCAST_ANSWER) {
+      return addTaskRaw(teamId, params);
+    }
+    const metadata = { ...(params.metadata ?? {}) };
+    if (metadata.taskClass !== "primary" && metadata.taskClass !== "secondary") {
+      metadata.taskClass = "primary";
+    }
+    return addTaskRaw(teamId, {
+      ...params,
+      metadata,
+    });
+  };
 
   beforeEach(() => {
     // Create a temp directory for test data
@@ -30,7 +52,7 @@ describe("task-list", () => {
   });
 
   it("adds a task with pending status", () => {
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Implement feature X",
       description: "Add new feature",
       priority: "normal",
@@ -43,13 +65,97 @@ describe("task-list", () => {
     expect(task.dependsOn).toEqual([]);
   });
 
+  it("classifies normal tasks as secondary by default", () => {
+    const primaryTask = addTaskRaw(teamId, {
+      title: "Primary seed",
+      priority: "normal",
+      metadata: { taskClass: "primary" },
+    });
+    const task = addTaskRaw(teamId, {
+      title: "Follow-up investigation",
+      priority: "normal",
+      metadata: { context_task_id: primaryTask.taskId },
+    });
+    expect(task.taskClass).toBe("secondary");
+  });
+
+  it("rejects secondary tasks without primary context", () => {
+    expect(() =>
+      addTaskRaw(teamId, {
+        title: "No context task",
+        priority: "normal",
+      }),
+    ).toThrow("Secondary tasks must derive exactly one primary context.");
+  });
+
+  it("assigns primary tasks to their own primary context", () => {
+    const primaryTask = addTask({
+      title: "Primary task",
+      priority: "normal",
+      metadata: { taskClass: "primary" },
+    });
+
+    expect(primaryTask.taskClass).toBe("primary");
+    expect(primaryTask.metadata?.primary_context_task_id).toBe(primaryTask.taskId);
+  });
+
+  it("derives secondary task context from dependency primary task", () => {
+    const primaryTask = addTask({
+      title: "Primary task",
+      priority: "normal",
+      metadata: { taskClass: "primary" },
+    });
+
+    const secondaryTask = addTask({
+      title: "Secondary task",
+      priority: "normal",
+      dependsOn: [primaryTask.taskId],
+      metadata: { taskClass: "secondary" },
+    });
+
+    expect(secondaryTask.taskClass).toBe("secondary");
+    expect(secondaryTask.metadata?.primary_context_task_id).toBe(primaryTask.taskId);
+  });
+
+  it("rejects secondary tasks that derive multiple primary contexts", () => {
+    const primaryA = addTask({
+      title: "Primary A",
+      priority: "normal",
+      metadata: { taskClass: "primary" },
+    });
+    const primaryB = addTask({
+      title: "Primary B",
+      priority: "normal",
+      metadata: { taskClass: "primary" },
+    });
+
+    expect(() => {
+      addTaskRaw(teamId, {
+        title: "Ambiguous secondary",
+        priority: "normal",
+        dependsOn: [primaryA.taskId, primaryB.taskId],
+      });
+    }).toThrow("multiple primary contexts");
+  });
+
+  it("classifies reserved tasks outside primary/secondary", () => {
+    const task = addTask({
+      title: TASK_BROADCAST_ANSWER,
+      assignTo: "lead",
+      priority: "critical",
+    });
+    expect(task.taskClass).toBeUndefined();
+    expect(task.metadata?.reservedTask).toBe(true);
+    expect(task.metadata?.excludedTaskClass).toBe(true);
+  });
+
   it("adds a blocked task when dependencies are not met", () => {
-    const taskA = addTask(teamId, {
+    const taskA = addTask({
       title: "Task A",
       priority: "normal",
     });
 
-    const taskB = addTask(teamId, {
+    const taskB = addTask({
       title: "Task B",
       dependsOn: [taskA.taskId],
       priority: "normal",
@@ -61,7 +167,7 @@ describe("task-list", () => {
 
   it("rejects nonexistent dependencies", () => {
     expect(() => {
-      addTask(teamId, {
+      addTask({
         title: "Task with bad dep",
         dependsOn: ["nonexistent-id"],
         priority: "normal",
@@ -70,7 +176,7 @@ describe("task-list", () => {
   });
 
   it("claims a task atomically (first-claim-wins)", () => {
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Claimable task",
       priority: "normal",
     });
@@ -105,17 +211,17 @@ describe("task-list", () => {
   });
 
   it("auto-selects highest priority task when no taskId given", () => {
-    addTask(teamId, {
+    addTask({
       title: "Normal task",
       priority: "normal",
     });
 
-    const criticalTask = addTask(teamId, {
+    const criticalTask = addTask({
       title: "Critical task",
       priority: "critical",
     });
 
-    addTask(teamId, {
+    addTask({
       title: "Low task",
       priority: "low",
     });
@@ -139,12 +245,12 @@ describe("task-list", () => {
   });
 
   it("auto-unblocks tasks when dependencies complete", () => {
-    const taskA = addTask(teamId, {
+    const taskA = addTask({
       title: "Task A",
       priority: "normal",
     });
 
-    const taskB = addTask(teamId, {
+    const taskB = addTask({
       title: "Task B",
       dependsOn: [taskA.taskId],
       priority: "normal",
@@ -171,9 +277,9 @@ describe("task-list", () => {
   });
 
   it("keeps tasks blocked when only some dependencies complete", () => {
-    const taskA = addTask(teamId, { title: "Task A", priority: "normal" });
-    const taskB = addTask(teamId, { title: "Task B", priority: "normal" });
-    const taskC = addTask(teamId, {
+    const taskA = addTask({ title: "Task A", priority: "normal" });
+    const taskB = addTask({ title: "Task B", priority: "normal" });
+    const taskC = addTask({
       title: "Task C",
       dependsOn: [taskA.taskId, taskB.taskId],
       priority: "normal",
@@ -192,17 +298,17 @@ describe("task-list", () => {
   });
 
   it("computes blockedBy for tasks", () => {
-    const taskA = addTask(teamId, {
+    const taskA = addTask({
       title: "Task A",
       priority: "normal",
     });
 
-    const taskB = addTask(teamId, {
+    const taskB = addTask({
       title: "Task B",
       priority: "normal",
     });
 
-    addTask(teamId, {
+    addTask({
       title: "Task C",
       dependsOn: [taskA.taskId, taskB.taskId],
       priority: "normal",
@@ -228,12 +334,12 @@ describe("task-list", () => {
   });
 
   it("filters tasks by status", () => {
-    const taskA = addTask(teamId, {
+    const taskA = addTask({
       title: "Task A",
       priority: "normal",
     });
 
-    addTask(teamId, {
+    addTask({
       title: "Task B",
       dependsOn: [taskA.taskId],
       priority: "normal",
@@ -254,7 +360,7 @@ describe("task-list", () => {
   });
 
   it("filters tasks by assignee", () => {
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Task for teammate1",
       priority: "normal",
     });
@@ -273,12 +379,12 @@ describe("task-list", () => {
   });
 
   it("filters tasks by priority", () => {
-    addTask(teamId, {
+    addTask({
       title: "Normal task",
       priority: "normal",
     });
 
-    const criticalTask = addTask(teamId, {
+    const criticalTask = addTask({
       title: "Critical task",
       priority: "critical",
     });
@@ -292,12 +398,12 @@ describe("task-list", () => {
   });
 
   it("computes task summary correctly", () => {
-    const taskA = addTask(teamId, {
+    const taskA = addTask({
       title: "Task A",
       priority: "normal",
     });
 
-    addTask(teamId, {
+    addTask({
       title: "Task B",
       dependsOn: [taskA.taskId],
       priority: "normal",
@@ -316,7 +422,7 @@ describe("task-list", () => {
   });
 
   it("removes pending tasks", () => {
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Task to remove",
       priority: "normal",
     });
@@ -329,7 +435,7 @@ describe("task-list", () => {
   });
 
   it("prevents removing claimed tasks", () => {
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Claimed task",
       priority: "normal",
     });
@@ -345,7 +451,7 @@ describe("task-list", () => {
   });
 
   it("marks completed tasks with result and summary", () => {
-    const task = addTask(teamId, { title: "Task", priority: "normal" });
+    const task = addTask({ title: "Task", priority: "normal" });
     claimTask(teamId, { taskId: task.taskId, claimerId: "tm1" });
 
     const result = completeTask(teamId, {
@@ -364,7 +470,7 @@ describe("task-list", () => {
   });
 
   it("marks failed tasks correctly", () => {
-    const task = addTask(teamId, { title: "Task", priority: "normal" });
+    const task = addTask({ title: "Task", priority: "normal" });
     claimTask(teamId, { taskId: task.taskId, claimerId: "tm1" });
 
     const result = completeTask(teamId, {
@@ -379,20 +485,22 @@ describe("task-list", () => {
   });
 
   it("FIFO within same priority", () => {
-    const first = addTask(teamId, { title: "First normal", priority: "high" });
-    addTask(teamId, { title: "Second normal", priority: "high" });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValueOnce(1_000).mockReturnValueOnce(1_001);
+    const first = addTask({ title: "First normal", priority: "high" });
+    addTask({ title: "Second normal", priority: "high" });
+    nowSpy.mockRestore();
 
     const result = claimTask(teamId, { claimerId: "tm1" });
     expect(result.task?.taskId).toBe(first.taskId);
   });
 
   it("adds task with unblocked status when all deps are completed", () => {
-    const dep = addTask(teamId, { title: "Dep", priority: "normal" });
+    const dep = addTask({ title: "Dep", priority: "normal" });
     claimTask(teamId, { taskId: dep.taskId, claimerId: "tm1" });
     completeTask(teamId, { taskId: dep.taskId, result: "success" });
 
     // Now add a task depending on the completed dep
-    const task = addTask(teamId, {
+    const task = addTask({
       title: "Dependent",
       dependsOn: [dep.taskId],
       priority: "normal",
@@ -400,5 +508,20 @@ describe("task-list", () => {
 
     // Should be pending, not blocked, since dep is already completed
     expect(task.status).toBe("pending");
+  });
+
+  it("blocks claimed tasks when new unmet dependencies are added", () => {
+    const blocker = addTask({ title: "Blocker", priority: "normal" });
+    const task = addTask({ title: "Needs info", priority: "normal" });
+    claimTask(teamId, { taskId: task.taskId, claimerId: "tm1" });
+
+    const updated = updateTask(teamId, task.taskId, { dependsOn: [blocker.taskId] });
+    expect(updated.status).toBe("blocked");
+
+    claimTask(teamId, { taskId: blocker.taskId, claimerId: "tm2" });
+    completeTask(teamId, { taskId: blocker.taskId, result: "success" });
+
+    const unblocked = getTask(teamId, task.taskId);
+    expect(unblocked?.status).toBe("pending");
   });
 });

@@ -1,9 +1,9 @@
 import { Type } from "@sinclair/typebox";
-import type { AnyAgentTool } from "../../tools/common.js";
-import { loadConfig } from "../../../config/config.js";
-import { jsonResult } from "../../tools/common.js";
-import { killTeamTmuxSession, resolveTeamTmuxSessionName } from "../display-tmux.js";
-import { cleanupTeam, getTeam, isTeamLead, resolveCallerTeamContext } from "../team-registry.js";
+import type { AnyAgentTool } from "../../../tools/common.js";
+import { loadConfig } from "../../../../config/config.js";
+import { jsonResult } from "../../../tools/common.js";
+import { killTeamTmuxSession, resolveTeamTmuxSessionName } from "../../display-tmux.js";
+import { cleanupTeam, getTeam, resolveCallerTeamContext } from "../../team-registry.js";
 
 const TeamCleanupSchema = Type.Object({
   teamId: Type.Optional(
@@ -15,6 +15,11 @@ const TeamCleanupSchema = Type.Object({
     description:
       "Must be true to confirm cleanup. This removes all team resources and cannot be undone.",
   }),
+  force: Type.Optional(
+    Type.Boolean({
+      description: "Force cleanup even when teammates are still init/working.",
+    }),
+  ),
 });
 
 export function createTeamCleanupTool(opts?: { agentSessionKey?: string }): AnyAgentTool {
@@ -22,7 +27,7 @@ export function createTeamCleanupTool(opts?: { agentSessionKey?: string }): AnyA
     label: "Teams",
     name: "team_cleanup",
     description:
-      "Remove all team resources when work is complete. Deletes team data, tasks, mailbox, and tmux session. Only available to team leads. Use this after shutting down all teammates and completing work. This action cannot be undone.",
+      "Remove all team resources when work is complete. Deletes team data, tasks, and tmux session. Only available to the team creator. This action cannot be undone.",
     parameters: TeamCleanupSchema,
     execute: async (_toolCallId, args) => {
       const cfg = loadConfig();
@@ -31,6 +36,7 @@ export function createTeamCleanupTool(opts?: { agentSessionKey?: string }): AnyA
       }
 
       const confirm = args.confirm === true;
+      const force = args.force === true;
       if (!confirm) {
         return jsonResult({
           status: "error",
@@ -64,28 +70,30 @@ export function createTeamCleanupTool(opts?: { agentSessionKey?: string }): AnyA
         return jsonResult({ status: "error", error: `Team ${teamId} not found` });
       }
 
-      // Only team lead can cleanup
-      if (!isTeamLead(teamId, callerSessionKey)) {
+      // Only the team creator can cleanup
+      if (!team.creatorSessionKey || team.creatorSessionKey !== callerSessionKey) {
         return jsonResult({
           status: "error",
-          error: "Only the team lead can cleanup the team",
+          error: "Only the team creator can cleanup the team",
         });
       }
 
       // Check if there are active teammates
       const activeTeammates = Object.values(team.teammates).filter(
-        (tm) => tm.status === "active" || tm.status === "spawning",
+        (tm) => tm.status === "working" || tm.status === "init",
       );
       if (activeTeammates.length > 0) {
-        return jsonResult({
-          status: "warning",
-          error: `${activeTeammates.length} teammate(s) still active. Shut them down first using teammate_shutdown.`,
-          activeTeammates: activeTeammates.map((tm) => ({
-            teammateId: tm.teammateId,
-            role: tm.role,
-            status: tm.status,
-          })),
-        });
+        if (!force) {
+          return jsonResult({
+            status: "warning",
+            error: `${activeTeammates.length} teammate(s) still active. Rerun with force: true to cleanup now.`,
+            activeTeammates: activeTeammates.map((tm) => ({
+              teammateId: tm.teammateId,
+              role: tm.role,
+              status: tm.status,
+            })),
+          });
+        }
       }
 
       // Kill tmux session if it exists
@@ -113,7 +121,11 @@ export function createTeamCleanupTool(opts?: { agentSessionKey?: string }): AnyA
         status: "cleaned",
         teamId,
         teamName: team.teamName,
-        message: `Team "${team.teamName}" has been cleaned up. All resources removed.`,
+        message:
+          activeTeammates.length > 0 && force
+            ? `Team "${team.teamName}" has been force-cleaned with active teammates.`
+            : `Team "${team.teamName}" has been cleaned up. All resources removed.`,
+        forced: activeTeammates.length > 0 && force,
       });
     },
   };

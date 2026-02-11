@@ -1,9 +1,9 @@
 import { Type } from "@sinclair/typebox";
-import type { AnyAgentTool } from "../../tools/common.js";
-import { loadConfig } from "../../../config/config.js";
-import { jsonResult, readStringParam } from "../../tools/common.js";
-import { getTask } from "../task-list.js";
-import { getTeam, resolveCallerTeamContext } from "../team-registry.js";
+import type { AnyAgentTool } from "../../../../tools/common.js";
+import { loadConfig } from "../../../../../config/config.js";
+import { jsonResult, readStringParam } from "../../../../tools/common.js";
+import { getTask } from "../../../task-list.js";
+import { getTeam, resolveCallerTeamContext } from "../../../team-registry.js";
 
 const TaskGetSchema = Type.Object({
   taskId: Type.String({ description: "ID of the task to get details for" }),
@@ -13,8 +13,7 @@ export function createTaskGetTool(opts?: { agentSessionKey?: string }): AnyAgent
   return {
     label: "Teams",
     name: "task_get",
-    description:
-      "Get details of a specific task by ID. Use this when you need to check task status, dependencies, assignee, or other task details. Available to both team leads and teammates.",
+    description: "Get details of a specific task by ID. Lead-only tool.",
     parameters: TaskGetSchema,
     execute: async (_toolCallId, args) => {
       const cfg = loadConfig();
@@ -32,6 +31,9 @@ export function createTaskGetTool(opts?: { agentSessionKey?: string }): AnyAgent
       const context = resolveCallerTeamContext(callerSessionKey);
       if (!context) {
         return jsonResult({ status: "error", error: "Caller is not in a team" });
+      }
+      if (!context.isLead) {
+        return jsonResult({ status: "error", error: "task_get is only available to team leads." });
       }
 
       const teamId = context.team.teamId;

@@ -124,6 +124,8 @@ export type GatewayTeamTask = {
   taskId: string;
   title: string;
   status: string;
+  taskClass?: string | null;
+  reservedTask?: boolean;
   assignee: string | null;
   priority: string;
   dependsOn: string[];

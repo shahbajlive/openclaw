@@ -1,5 +1,6 @@
 import type {
   LeadStatus,
+  Task,
   Team,
   TeamConfig,
   TeamStatus,
@@ -8,20 +9,32 @@ import type {
 } from "./types.js";
 import { loadConfig } from "../../config/config.js";
 import { onAgentEvent } from "../../infra/agent-events.js";
+import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { setCommandLaneConcurrency } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
-import { sendMessage as sendMailboxMessage } from "./mailbox.js";
-import { listTasks } from "./task-list.js";
+import {
+  ensureChoreTeammate,
+  startChoreWatcher,
+  stopAllChoreWatchers,
+  stopChoreWatcher,
+} from "./chore-watch.js";
+import { resolvePrimaryContextTaskId } from "./task-context.js";
+import { addTask, claimTask, listTasks } from "./task-list.js";
+import {
+  TASK_BROADCAST_ANSWER,
+  TASK_INIT,
+  TASK_LEAD_REVIEW,
+  TASK_REVIEW_QUESTION,
+  isQuestionRequestTitle,
+} from "./task-taxonomy.js";
 import { deleteTeamFromDisk, loadAllTeamsFromDisk, saveTeamToDisk } from "./team-registry.store.js";
 import {
   LEAD_STATUS_IDLE,
   LEAD_STATUS_WORKING,
-  TEAMMATE_STATUS_SPAWNING,
-  TEAMMATE_STATUS_ACTIVE,
+  TEAMMATE_STATUS_INIT,
   TEAMMATE_STATUS_IDLE,
-  TEAMMATE_STATUS_COMPLETED,
+  TEAMMATE_STATUS_WORKING,
   TEAMMATE_STATUS_FAILED,
-  TEAMMATE_STATUS_INTERRUPTED,
 } from "./types.js";
 
 // In-memory state
@@ -30,8 +43,64 @@ const runIdToTeammate = new Map<string, { teamId: string; teammateId: string }>(
 const runIdToLead = new Map<string, string>();
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
+const idleClaimTimers = new Map<string, NodeJS.Timeout>();
+const lastLeadDispatchTaskId = new Map<string, string>();
 // Use var to avoid TDZ when init runs across circular imports during bootstrap.
 var restoreAttempted = false;
+
+// 3 Hz idle-claim heartbeat (override via OPENCLAW_TEAM_IDLE_CLAIM_MS).
+const DEFAULT_IDLE_CLAIM_MS = 333;
+
+function getIdleClaimIntervalMs(): number {
+  const raw = Number(process.env.OPENCLAW_TEAM_IDLE_CLAIM_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_IDLE_CLAIM_MS;
+}
+
+function idleClaimKey(teamId: string, teammateId: string): string {
+  return `${teamId}:${teammateId}`;
+}
+
+function stopIdleClaimHeartbeat(teamId: string, teammateId: string): void {
+  const key = idleClaimKey(teamId, teammateId);
+  const timer = idleClaimTimers.get(key);
+  if (timer) {
+    clearInterval(timer);
+    idleClaimTimers.delete(key);
+  }
+}
+
+function startIdleClaimHeartbeat(teamId: string, teammateId: string): void {
+  const key = idleClaimKey(teamId, teammateId);
+  if (idleClaimTimers.has(key)) {
+    return;
+  }
+  const intervalMs = getIdleClaimIntervalMs();
+  const timer = setInterval(() => {
+    const team = activeTeams.get(teamId);
+    const teammate = team?.teammates[teammateId];
+    if (!team || !teammate || teammate.status !== TEAMMATE_STATUS_IDLE) {
+      stopIdleClaimHeartbeat(teamId, teammateId);
+      return;
+    }
+    const claimed = autoClaimNextTaskForTeammate(teamId, teammateId);
+    if (claimed) {
+      stopIdleClaimHeartbeat(teamId, teammateId);
+    }
+  }, intervalMs);
+  idleClaimTimers.set(key, timer);
+}
+
+function clearIdleClaimTimersForTeam(teamId: string): void {
+  for (const key of idleClaimTimers.keys()) {
+    if (key.startsWith(`${teamId}:`)) {
+      const timer = idleClaimTimers.get(key);
+      if (timer) {
+        clearInterval(timer);
+      }
+      idleClaimTimers.delete(key);
+    }
+  }
+}
 
 function normalizeTeamId(value: string): string {
   const normalized = value
@@ -61,10 +130,109 @@ function resolveTeamIdFromName(teamName: string): string {
   return `${base}-${Date.now()}`;
 }
 
+function isTeamOpenStatus(status: TeamStatus): boolean {
+  return status !== "idle";
+}
+
+function isTeamWorkingStatus(status: TeamStatus): boolean {
+  return status === "working";
+}
+
+const PRIORITY_ORDER = { critical: 4, high: 3, normal: 2, low: 1 } as const;
+
+function sortByPriorityThenCreated(a: Task, b: Task): number {
+  const aPriority = PRIORITY_ORDER[a.priority];
+  const bPriority = PRIORITY_ORDER[b.priority];
+  if (aPriority !== bPriority) {
+    return bPriority - aPriority;
+  }
+  if (a.createdAt !== b.createdAt) {
+    return a.createdAt - b.createdAt;
+  }
+  return a.taskId.localeCompare(b.taskId);
+}
+
+function readTaskIdFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  return undefined;
+}
+
+function readFirstTaskIdFromMetadataList(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const first = value.find(
+    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+  );
+  return first;
+}
+
+function resolveTaskPrimaryContext(task: Task, allTasks: Task[]): string | undefined {
+  const metadata = task.metadata;
+
+  // Context for review tasks is derived at dispatch-time from the pointed task.
+  if (task.title === TASK_LEAD_REVIEW || task.title === TASK_REVIEW_QUESTION) {
+    const contextTaskId =
+      readTaskIdFromMetadata(metadata, "context_task_id") ??
+      readTaskIdFromMetadata(metadata, "source_task_id") ??
+      readFirstTaskIdFromMetadataList(metadata, "taskIds") ??
+      readFirstTaskIdFromMetadataList(metadata, "targetTaskIds");
+    if (!contextTaskId) {
+      return undefined;
+    }
+    return resolvePrimaryContextTaskId(contextTaskId, allTasks);
+  }
+
+  // qn_request primary context is derived from the pointed dependency task.
+  if (isQuestionRequestTitle(task.title)) {
+    const contextTaskId =
+      readTaskIdFromMetadata(metadata, "prev_task_id") ??
+      readTaskIdFromMetadata(metadata, "context_task_id") ??
+      readTaskIdFromMetadata(metadata, "source_task_id");
+    if (!contextTaskId) {
+      return undefined;
+    }
+    return resolvePrimaryContextTaskId(contextTaskId, allTasks);
+  }
+
+  const fromMetadata = readTaskIdFromMetadata(metadata, "primary_context_task_id");
+  if (fromMetadata) {
+    return fromMetadata;
+  }
+  return resolvePrimaryContextTaskId(task.taskId, allTasks);
+}
+
+function formatContextSwitchMessage(task: Task, primaryContextTaskId?: string): string {
+  const description = task.description ? `\nDescription: ${task.description}` : "";
+  const contextLine = primaryContextTaskId
+    ? `Primary context task: ${primaryContextTaskId}`
+    : "Primary context task: none";
+  return (
+    `Task context switched.\n` +
+    `Assigned task: "${task.title}" (taskId: ${task.taskId}).\n` +
+    `${contextLine}.\n` +
+    "Use only this primary context for task-specific reasoning." +
+    `${description}`
+  );
+}
+
 function recomputeTeamLaneConcurrency(): void {
   const totalMembers = Array.from(activeTeams.values())
-    .filter((team) => team.status === "active")
-    .reduce((sum, team) => sum + 1 + Object.keys(team.teammates).length, 0);
+    .filter((team) => isTeamOpenStatus(team.status))
+    .reduce(
+      (sum, team) => sum + 1 + Object.values(team.teammates).filter((tm) => !tm.isChore).length,
+      0,
+    );
   setCommandLaneConcurrency(CommandLane.Team, totalMembers > 0 ? totalMembers : 1);
 }
 
@@ -88,7 +256,7 @@ export function createTeam(params: {
   const now = Date.now();
   const persistent = params.persistent ?? false; // default to false (auto-cleanup)
 
-  const leadStatus = persistent ? LEAD_STATUS_IDLE : LEAD_STATUS_WORKING;
+  const leadStatus = LEAD_STATUS_IDLE;
 
   const team: Team = {
     teamId,
@@ -97,7 +265,7 @@ export function createTeam(params: {
     creatorSessionKey: params.creatorSessionKey,
     teamAgentId,
     leadSessionKey,
-    status: "active",
+    status: "init",
     persistent,
     boundSessionKey: !persistent ? params.boundSessionKey : undefined,
     createdAt: now,
@@ -108,9 +276,11 @@ export function createTeam(params: {
     answerBroadcasted: false,
   };
 
+  ensureChoreTeammate(team);
   activeTeams.set(teamId, team);
   persistTeam(team);
   recomputeTeamLaneConcurrency();
+  startChoreWatcher(teamId);
 
   return team;
 }
@@ -127,7 +297,7 @@ export function getTeam(teamId: string): Team | null {
  * List all active teams.
  */
 export function listActiveTeams(): Team[] {
-  return Array.from(activeTeams.values()).filter((team) => team.status === "active");
+  return Array.from(activeTeams.values()).filter((team) => isTeamOpenStatus(team.status));
 }
 
 /**
@@ -160,6 +330,9 @@ export function addTeammate(teamId: string, teammate: Teammate): void {
   team.updatedAt = Date.now();
   persistTeam(team);
   recomputeTeamLaneConcurrency();
+  if (!teammate.isChore && teammate.status === TEAMMATE_STATUS_IDLE) {
+    startIdleClaimHeartbeat(teamId, teammate.teammateId);
+  }
 }
 
 /**
@@ -171,6 +344,7 @@ export function removeTeammate(teamId: string, teammateId: string): void {
     return;
   }
 
+  stopIdleClaimHeartbeat(teamId, teammateId);
   delete team.teammates[teammateId];
   team.updatedAt = Date.now();
   persistTeam(team);
@@ -198,6 +372,12 @@ export function updateTeammateStatus(
   teammate.status = status;
   team.updatedAt = Date.now();
   persistTeam(team);
+
+  if (status === TEAMMATE_STATUS_IDLE) {
+    startIdleClaimHeartbeat(teamId, teammateId);
+  } else {
+    stopIdleClaimHeartbeat(teamId, teammateId);
+  }
 }
 
 /**
@@ -212,13 +392,16 @@ export function updateTeamStatus(teamId: string, status: TeamStatus): void {
   team.status = status;
   team.updatedAt = Date.now();
   persistTeam(team);
+  if (status === "idle") {
+    lastLeadDispatchTaskId.delete(teamId);
+  }
   recomputeTeamLaneConcurrency();
 }
 
 /**
  * Transition a teammate to "idle" status when they have no current task.
  * This is called when a teammate completes a task and no new task is assigned.
- * Also allows transition from terminal states (completed/failed) to idle for persistent teams.
+ * Also allows transition from failure states back to idle for persistent teams.
  */
 export function transitionTeammateToIdle(teamId: string, teammateId: string): void {
   const team = activeTeams.get(teamId);
@@ -231,25 +414,121 @@ export function transitionTeammateToIdle(teamId: string, teammateId: string): vo
     return;
   }
 
-  // Allow transition from "active", "completed", or "failed" to "idle"
+  // Allow transition from "init", "working", or "failed" to "idle".
   if (
-    teammate.status === TEAMMATE_STATUS_ACTIVE ||
-    teammate.status === TEAMMATE_STATUS_COMPLETED ||
+    teammate.status === TEAMMATE_STATUS_INIT ||
+    teammate.status === TEAMMATE_STATUS_WORKING ||
     teammate.status === TEAMMATE_STATUS_FAILED
   ) {
     teammate.status = TEAMMATE_STATUS_IDLE;
     teammate.currentTask = undefined;
+    teammate.currentTaskId = undefined;
     team.updatedAt = Date.now();
     persistTeam(team);
+    const claimed = autoClaimNextTaskForTeammate(teamId, teammateId);
+    if (!claimed) {
+      startIdleClaimHeartbeat(teamId, teammateId);
+    } else {
+      stopIdleClaimHeartbeat(teamId, teammateId);
+    }
   }
 }
 
-/**
- * Notify the lead when all teammates are idle and no incomplete tasks remain.
- * Does NOT auto-transition team status — the lead decides lifecycle.
- * Sends at most one notification per idle window; resets when a teammate
- * is spawned or a task is added (via {@link resetIdleNotification}).
- */
+function autoClaimNextTaskForTeammate(teamId: string, teammateId: string): boolean {
+  const team = activeTeams.get(teamId);
+  if (!team) {
+    return false;
+  }
+  const teammate = team.teammates[teammateId];
+  if (!teammate || teammate.isChore) {
+    return false;
+  }
+
+  let allTasks: Task[] = [];
+  let readyTasks: ReturnType<typeof listTasks>["tasks"] = [];
+  try {
+    const { tasks } = listTasks(teamId, { includeCompleted: true });
+    allTasks = tasks;
+    readyTasks = tasks
+      .filter((task) => task.assignee === teammateId && task.status === "pending")
+      .toSorted(sortByPriorityThenCreated);
+  } catch {
+    return false;
+  }
+
+  const next = readyTasks[0];
+  if (!next) {
+    return false;
+  }
+
+  const claimResult = claimTask(teamId, { taskId: next.taskId, claimerId: teammateId });
+  if (!claimResult.success || !claimResult.task) {
+    return false;
+  }
+
+  teammate.status = TEAMMATE_STATUS_WORKING;
+  teammate.currentTask = claimResult.task.title;
+  teammate.currentTaskId = claimResult.task.taskId;
+  teammate.claimedTasks++;
+  team.updatedAt = Date.now();
+  persistTeam(team);
+  stopIdleClaimHeartbeat(teamId, teammateId);
+
+  const primaryContextTaskId = resolveTaskPrimaryContext(claimResult.task, allTasks);
+  enqueueSystemEvent(formatContextSwitchMessage(claimResult.task, primaryContextTaskId), {
+    sessionKey: teammate.sessionKey,
+  });
+
+  return true;
+}
+
+export function dispatchLeadPendingTask(teamId: string): void {
+  const team = activeTeams.get(teamId);
+  if (!team || team.status === "idle") {
+    return;
+  }
+
+  let nextLeadTask: Task | undefined;
+  let allTasks: Task[] = [];
+  try {
+    const listed = listTasks(teamId, { includeCompleted: true }).tasks;
+    allTasks = listed;
+    nextLeadTask = listed
+      .filter((task) => task.assignee === "lead" && task.status === "pending")
+      .toSorted(sortByPriorityThenCreated)[0];
+  } catch {
+    return;
+  }
+
+  if (!nextLeadTask) {
+    lastLeadDispatchTaskId.delete(teamId);
+    return;
+  }
+
+  if (lastLeadDispatchTaskId.get(teamId) === nextLeadTask.taskId) {
+    return;
+  }
+
+  const primaryContextTaskId = resolveTaskPrimaryContext(nextLeadTask, allTasks);
+  enqueueSystemEvent(formatContextSwitchMessage(nextLeadTask, primaryContextTaskId), {
+    sessionKey: team.leadSessionKey,
+  });
+  lastLeadDispatchTaskId.set(teamId, nextLeadTask.taskId);
+}
+
+export function autoClaimIdleTeammateTasks(teamId: string): void {
+  const team = activeTeams.get(teamId);
+  if (!team || !isTeamWorkingStatus(team.status)) {
+    return;
+  }
+
+  for (const teammate of Object.values(team.teammates)) {
+    if (teammate.isChore || teammate.status !== TEAMMATE_STATUS_IDLE) {
+      continue;
+    }
+    autoClaimNextTaskForTeammate(teamId, teammate.teammateId);
+  }
+}
 
 export function notifyLeadIfTeamIdle(teamId: string): void {
   const team = activeTeams.get(teamId);
@@ -257,72 +536,74 @@ export function notifyLeadIfTeamIdle(teamId: string): void {
     return;
   }
 
-  // Only notify for active teams
-  if (team.status !== "active") {
+  // Only notify for working teams.
+  if (!isTeamWorkingStatus(team.status)) {
     return;
   }
 
-  // Already notified for this idle window
-  if (team.idleNotificationSent) {
+  if (team.answerBroadcasted) {
     return;
   }
 
-  // Check if any teammates are still active or spawning
+  // Check if any teammates are still initializing or working.
   const busy = Object.values(team.teammates).filter(
-    (tm) => tm.status === "active" || tm.status === "spawning",
+    (tm) => tm.status === TEAMMATE_STATUS_INIT || tm.status === TEAMMATE_STATUS_WORKING,
   );
   if (busy.length > 0) {
     return;
   }
 
-  // Check task completion status
   try {
-    const { summary } = listTasks(teamId, { includeCompleted: true });
-
-    const hasIncompleteTasks = summary.pending > 0 || summary.blocked > 0 || summary.inProgress > 0;
-
-    if (hasIncompleteTasks) {
+    const { tasks } = listTasks(teamId, { includeCompleted: true });
+    if (tasks.length === 0) {
       return;
     }
-  } catch {
-    // If we can't load tasks, don't notify/cleanup
-    return;
-  }
 
-  // --- Auto-cleanup Team Notification ---
-  if (!team.persistent) {
-    if (team.idleNotificationSent) {
+    const hasOpenTerminalTask = tasks.some(
+      (task) =>
+        task.title === TASK_BROADCAST_ANSWER &&
+        task.assignee === "lead" &&
+        task.status !== "completed" &&
+        task.status !== "failed",
+    );
+    if (hasOpenTerminalTask) {
       return;
     }
-    team.idleNotificationSent = true;
-    persistTeam(team);
 
-    sendMailboxMessage({
-      teamId,
-      from: "system",
-      to: "lead",
-      message: `Ephemeral team "${team.teamName}" has completed all tasks. Mission accomplished. I will automatically disband the team once you finish your current session.`,
-      priority: "normal",
+    const hasIncompleteNonTerminal = tasks.some((task) => {
+      if (task.status === "completed" || task.status === "failed") {
+        return false;
+      }
+      return !(task.title === TASK_BROADCAST_ANSWER && task.assignee === "lead");
     });
+    if (hasIncompleteNonTerminal) {
+      return;
+    }
+
+    const hasCompletedTerminal = tasks.some(
+      (task) =>
+        task.title === TASK_BROADCAST_ANSWER &&
+        task.assignee === "lead" &&
+        (task.status === "completed" || task.status === "failed"),
+    );
+    if (hasCompletedTerminal) {
+      return;
+    }
+
+    addTask(teamId, {
+      title: TASK_BROADCAST_ANSWER,
+      description:
+        "All work is complete. Broadcast the final answer to the caller using team_broadcast_answer.",
+      assignTo: "lead",
+      priority: "critical",
+      metadata: {
+        source: "system_terminal",
+      },
+    });
+  } catch {
+    // If we can't load tasks, don't create terminal task.
     return;
   }
-
-  // --- Persistent Team Notification ---
-
-  // All teammates idle and no incomplete tasks — notify the lead once
-  team.idleNotificationSent = true;
-  persistTeam(team);
-
-  sendMailboxMessage({
-    teamId,
-    from: "system",
-    to: "lead",
-    message:
-      "All teammates have finished and no incomplete tasks remain. " +
-      "You can shut down idle teammates with teammate_shutdown, " +
-      "synthesize results, and close the team with team_complete / team_cleanup.",
-    priority: "normal",
-  });
 }
 
 /**
@@ -431,24 +712,63 @@ export function recomputeLeadStatusFromTasks(teamId: string): void {
   if (!team) {
     return;
   }
-  if (team.status !== "active") {
-    return;
-  }
-  if (!team.persistent) {
-    if (team.leadStatus !== LEAD_STATUS_WORKING) {
-      updateLeadStatus(teamId, LEAD_STATUS_WORKING);
-    }
+  if (team.status === "idle") {
     return;
   }
   try {
-    const { summary } = listTasks(teamId, { includeCompleted: true });
-    const hasIncomplete = summary.pending > 0 || summary.blocked > 0 || summary.inProgress > 0;
-    const next = hasIncomplete ? LEAD_STATUS_WORKING : LEAD_STATUS_IDLE;
+    const { tasks } = listTasks(teamId, { includeCompleted: true });
+    const hasLeadWork = tasks.some(
+      (task) => task.assignee === "lead" && task.status !== "completed" && task.status !== "failed",
+    );
+    const next = hasLeadWork ? LEAD_STATUS_WORKING : LEAD_STATUS_IDLE;
     if (team.leadStatus !== next) {
       updateLeadStatus(teamId, next);
     }
   } catch {
     // Ignore task read errors; keep last known status.
+  }
+}
+
+export function recomputeTeamStatusFromTasks(teamId: string): void {
+  const team = activeTeams.get(teamId);
+  if (!team) {
+    return;
+  }
+  if (team.answerBroadcasted) {
+    if (team.status !== "idle") {
+      updateTeamStatus(teamId, "idle");
+    }
+    return;
+  }
+  try {
+    const { tasks } = listTasks(teamId, { includeCompleted: true });
+    const initTask = tasks.find((task) => task.title === TASK_INIT && task.assignee === "lead");
+    if (initTask) {
+      if (initTask.status === "failed" || initTask.metadata?.initFailure === true) {
+        if (team.status !== "failed") {
+          updateTeamStatus(teamId, "failed");
+        }
+        return;
+      }
+      const initHandled =
+        initTask.status === "claimed" ||
+        initTask.status === "in-progress" ||
+        initTask.status === "completed";
+      const nextStatus: TeamStatus = initHandled ? "working" : "init";
+      if (team.status !== nextStatus) {
+        updateTeamStatus(teamId, nextStatus);
+      }
+      return;
+    }
+
+    const hasOpenWork = tasks.some(
+      (task) => task.status !== "completed" && task.status !== "failed",
+    );
+    if (hasOpenWork && team.status !== "working") {
+      updateTeamStatus(teamId, "working");
+    }
+  } catch {
+    // Ignore task read errors; keep last known team status.
   }
 }
 
@@ -514,20 +834,6 @@ export function markAnswerBroadcasted(teamId: string): void {
 }
 
 /**
- * Check if all teammates are cleaned up (in terminal states or removed).
- */
-function areAllTeammatesCleaned(team: Team): boolean {
-  const teammates = Object.values(team.teammates);
-  if (teammates.length === 0) return true;
-  return teammates.every(
-    (tm) =>
-      tm.status === TEAMMATE_STATUS_COMPLETED ||
-      tm.status === TEAMMATE_STATUS_FAILED ||
-      tm.status === TEAMMATE_STATUS_INTERRUPTED,
-  );
-}
-
-/**
  * Unregister a runId -> teammate mapping.
  */
 export function unregisterTeammateRun(runId: string): void {
@@ -551,6 +857,8 @@ export function resetTeamRegistryForTests(): void {
   activeTeams.clear();
   runIdToTeammate.clear();
   runIdToLead.clear();
+  lastLeadDispatchTaskId.clear();
+  stopAllChoreWatchers();
   if (listenerStop) {
     listenerStop();
     listenerStop = null;
@@ -565,7 +873,7 @@ export function resetTeamRegistryForTests(): void {
  */
 export function findTeamByLeadSession(leadSessionKey: string): Team | null {
   for (const team of activeTeams.values()) {
-    if (team.status === "active" && team.leadSessionKey === leadSessionKey) {
+    if (isTeamOpenStatus(team.status) && team.leadSessionKey === leadSessionKey) {
       return team;
     }
   }
@@ -577,7 +885,7 @@ export function findTeamByLeadSession(leadSessionKey: string): Team | null {
  */
 export function findTeamBySession(sessionKey: string): Team | null {
   for (const team of activeTeams.values()) {
-    if (team.status !== "active") {
+    if (!isTeamOpenStatus(team.status)) {
       continue;
     }
     if (team.leadSessionKey === sessionKey) {
@@ -633,72 +941,48 @@ export function findAllTeamsBySessionAny(sessionKey: string): Team[] {
 
 // ---- Internal functions ----
 
-/**
- * Notify the lead that a teammate has finished (completed or failed).
- * Sends a mailbox message so the lead gets an automatic update.
- */
-function notifyLeadOfTeammateFinish(
+function createLeadReviewForTeammateLifecycleIssue(
   teamId: string,
   teammateId: string,
-  status: "completed" | "failed",
+  params: {
+    reason: string;
+    kind: "failed" | "ended";
+    tasks?: Array<{ taskId: string; title?: string; status?: string }>;
+  },
 ): void {
   try {
     const team = activeTeams.get(teamId);
     if (!team) {
       return;
     }
-    const teammate = team.teammates[teammateId];
-    const roleLabel = teammate?.role ?? teammateId;
-    const statusLabel = status === "completed" ? "finished" : "failed";
-    const priority = status === "failed" ? "urgent" : "normal";
-
-    sendMailboxMessage({
-      teamId,
-      from: teammateId,
-      to: "lead",
-      message: `Teammate "${roleLabel}" has ${statusLabel}.`,
-      priority,
-    });
-  } catch {
-    // Best-effort notification; don't break the lifecycle flow
-  }
-}
-
-function notifyLeadOfTeammateInterrupted(
-  teamId: string,
-  teammateId: string,
-  tasks: Array<{ taskId: string; title?: string; status?: string }>,
-): void {
-  try {
-    const team = activeTeams.get(teamId);
-    if (!team) {
+    const { tasks } = listTasks(teamId, { includeCompleted: true });
+    const contextTaskId =
+      params.tasks?.[0]?.taskId ?? tasks.find((task) => task.assignee === teammateId)?.taskId;
+    const hasOpenReview = tasks.some(
+      (task) =>
+        task.title === TASK_LEAD_REVIEW &&
+        task.assignee === "lead" &&
+        task.status !== "completed" &&
+        task.status !== "failed" &&
+        task.metadata?.source === "teammate_lifecycle" &&
+        task.metadata?.teammateId === teammateId,
+    );
+    if (hasOpenReview) {
       return;
     }
-    const teammate = team.teammates[teammateId];
-    const roleLabel = teammate?.role ?? teammateId;
-    const lines: string[] = [];
-    lines.push(`Teammate "${roleLabel}" ended before completing assigned tasks.`);
-    if (tasks.length > 0) {
-      lines.push("");
-      lines.push("Assigned tasks still incomplete:");
-      for (const task of tasks.slice(0, 3)) {
-        const title = task.title ? ` ${task.title}` : "";
-        const status = task.status ? ` (${task.status})` : "";
-        lines.push(`- ${task.taskId}${title}${status}`);
-      }
-      if (tasks.length > 3) {
-        lines.push(`- ...and ${tasks.length - 3} more`);
-      }
-    }
-    lines.push("");
-    lines.push("Reassign or retry these tasks.");
 
-    sendMailboxMessage({
-      teamId,
-      from: teammateId,
-      to: "lead",
-      message: lines.join("\n"),
-      priority: "urgent",
+    addTask(teamId, {
+      title: TASK_LEAD_REVIEW,
+      description: params.reason,
+      assignTo: "lead",
+      priority: "critical",
+      metadata: {
+        source: "teammate_lifecycle",
+        kind: params.kind,
+        teammateId,
+        context_task_id: contextTaskId,
+        taskIds: params.tasks?.map((task) => task.taskId),
+      },
     });
   } catch {
     // Best-effort notification; don't break the lifecycle flow
@@ -748,10 +1032,13 @@ function ensureListener(): void {
             if (evt.runId && !leadTeamId) {
               registerLeadRun(team.teamId, evt.runId);
             }
+            lastLeadDispatchTaskId.delete(team.teamId);
+            dispatchLeadPendingTask(team.teamId);
           } else if (phase === "end" || phase === "error") {
             if (evt.runId) {
               unregisterLeadRun(evt.runId);
             }
+            lastLeadDispatchTaskId.delete(team.teamId);
           }
         }
 
@@ -762,8 +1049,7 @@ function ensureListener(): void {
             const { summary } = listTasks(team.teamId, { includeCompleted: true });
             const hasIncompleteTasks =
               summary.pending > 0 || summary.blocked > 0 || summary.inProgress > 0;
-            const allTeammatesCleaned = areAllTeammatesCleaned(team);
-            if (!hasIncompleteTasks && team.answerBroadcasted && allTeammatesCleaned) {
+            if (!hasIncompleteTasks && team.answerBroadcasted) {
               cleanupTeam(team.teamId);
             }
           } catch {
@@ -781,7 +1067,7 @@ function ensureListener(): void {
     const { teamId, teammateId } = mapping;
 
     if (phase === "start") {
-      updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_ACTIVE);
+      updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_IDLE);
     } else if (phase === "end") {
       let incompleteAssigned: Array<{ taskId: string; title?: string; status?: string }> = [];
       try {
@@ -795,19 +1081,34 @@ function ensureListener(): void {
       }
 
       if (incompleteAssigned.length > 0) {
-        updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_INTERRUPTED);
-        notifyLeadOfTeammateInterrupted(teamId, teammateId, incompleteAssigned);
-      } else {
+        updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_FAILED);
         const team = activeTeams.get(teamId);
         const teammate = team?.teammates[teammateId];
-        if (team && teammate) {
-          teammate.status = TEAMMATE_STATUS_IDLE;
-          teammate.currentTask = undefined;
-          team.updatedAt = Date.now();
-          persistTeam(team);
-        } else {
-          updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_IDLE);
+        const roleLabel = teammate?.role ?? teammateId;
+        const lines: string[] = [];
+        lines.push(`Teammate "${roleLabel}" ended before completing assigned tasks.`);
+        if (incompleteAssigned.length > 0) {
+          lines.push("");
+          lines.push("Assigned tasks still incomplete:");
+          for (const task of incompleteAssigned.slice(0, 3)) {
+            const title = task.title ? ` ${task.title}` : "";
+            const status = task.status ? ` (${task.status})` : "";
+            lines.push(`- ${task.taskId}${title}${status}`);
+          }
+          if (incompleteAssigned.length > 3) {
+            lines.push(`- ...and ${incompleteAssigned.length - 3} more`);
+          }
         }
+        lines.push("");
+        lines.push("Decide whether to retry, reassign, or replace this teammate.");
+        createLeadReviewForTeammateLifecycleIssue(teamId, teammateId, {
+          kind: "ended",
+          reason: lines.join("\n"),
+          tasks: incompleteAssigned,
+        });
+        transitionTeammateToIdle(teamId, teammateId);
+      } else {
+        transitionTeammateToIdle(teamId, teammateId);
       }
 
       unregisterTeammateRun(evt.runId);
@@ -816,8 +1117,16 @@ function ensureListener(): void {
     } else if (phase === "error") {
       updateTeammateStatus(teamId, teammateId, TEAMMATE_STATUS_FAILED);
       unregisterTeammateRun(evt.runId);
-      // Auto-notify the lead that this teammate failed
-      notifyLeadOfTeammateFinish(teamId, teammateId, "failed");
+      const team = activeTeams.get(teamId);
+      const teammate = team?.teammates[teammateId];
+      const roleLabel = teammate?.role ?? teammateId;
+      createLeadReviewForTeammateLifecycleIssue(teamId, teammateId, {
+        kind: "failed",
+        reason:
+          `Teammate "${roleLabel}" failed unexpectedly.` +
+          "\nDecide whether to retry, reassign, or replace this teammate.",
+      });
+      transitionTeammateToIdle(teamId, teammateId);
       // Notify the lead if the whole team is now idle
       notifyLeadIfTeamIdle(teamId);
 
@@ -837,6 +1146,9 @@ export function cleanupTeam(teamId: string): { success: boolean; error?: string 
       return { success: false, error: "Team not found" };
     }
 
+    stopChoreWatcher(teamId);
+    clearIdleClaimTimersForTeam(teamId);
+    lastLeadDispatchTaskId.delete(teamId);
     // Remove from memory
     activeTeams.delete(teamId);
     recomputeTeamLaneConcurrency();
@@ -853,7 +1165,7 @@ export function cleanupTeam(teamId: string): { success: boolean; error?: string 
 
 /**
  * Restore teams from disk on startup.
- * Marks any spawning/active teammates as idle (graceful degradation).
+ * Marks any init/working teammates as idle (graceful degradation).
  */
 function restoreTeamsOnce(): void {
   if (restoreAttempted) {
@@ -877,31 +1189,28 @@ function restoreTeamsOnce(): void {
         }
       }
 
-      // Mark any teammates that were mid-run as interrupted after restart
+      // Mark any teammates that were mid-run as failed after restart, then return them to idle.
       for (const teammate of Object.values(team.teammates)) {
         if (
-          teammate.status === TEAMMATE_STATUS_SPAWNING ||
-          teammate.status === TEAMMATE_STATUS_ACTIVE
+          teammate.status === TEAMMATE_STATUS_INIT ||
+          teammate.status === TEAMMATE_STATUS_WORKING
         ) {
-          teammate.status = TEAMMATE_STATUS_INTERRUPTED;
+          teammate.status = TEAMMATE_STATUS_FAILED;
+          if (!teammate.isChore) {
+            teammate.currentTask = undefined;
+            teammate.currentTaskId = undefined;
+          }
+          teammate.status = TEAMMATE_STATUS_IDLE;
         }
       }
 
-      if (team.persistent) {
-        if (team.status === "interrupted") {
-          team.status = "active";
-        }
-      } else {
-        if (team.status === "active") {
-          team.status = "interrupted";
-        }
+      if (!team.persistent) {
         try {
           if (team.answerBroadcasted) {
             const { summary } = listTasks(team.teamId, { includeCompleted: true });
             const hasIncompleteTasks =
               summary.pending > 0 || summary.blocked > 0 || summary.inProgress > 0;
-            const allTeammatesCleaned = areAllTeammatesCleaned(team);
-            if (!hasIncompleteTasks && allTeammatesCleaned) {
+            if (!hasIncompleteTasks) {
               deleteTeamFromDisk(team.teamId);
               continue;
             }
@@ -912,7 +1221,10 @@ function restoreTeamsOnce(): void {
       }
 
       activeTeams.set(teamId, team);
+      ensureChoreTeammate(team);
       recomputeLeadStatusFromTasks(teamId);
+      startChoreWatcher(teamId);
+      dispatchLeadPendingTask(teamId);
     }
   } catch {
     // Ignore restore failures

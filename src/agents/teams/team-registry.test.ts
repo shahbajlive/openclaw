@@ -10,7 +10,7 @@ import {
   resolveCallerTeamContext,
   resetTeamRegistryForTests,
   notifyLeadIfTeamIdle,
-  resetIdleNotification,
+  updateTeamStatus,
 } from "./team-registry.js";
 
 // Mock config and store to prevent real disk I/O
@@ -29,16 +29,13 @@ vi.mock("../../infra/agent-events.js", () => ({
   onAgentEvent: vi.fn().mockReturnValue(() => {}),
 }));
 
-// Mock mailbox so notifyLeadIfTeamIdle doesn't touch disk
-const mockSendMessage = vi.fn();
-vi.mock("./mailbox.js", () => ({
-  sendMessage: (...args: unknown[]) => mockSendMessage(...args),
-}));
-
 // Mock task-list so notifyLeadIfTeamIdle can check task state
 const mockListTasks = vi.fn();
+const mockAddTask = vi.fn();
 vi.mock("./task-list.js", () => ({
   listTasks: (...args: unknown[]) => mockListTasks(...args),
+  addTask: (...args: unknown[]) => mockAddTask(...args),
+  claimTask: vi.fn(),
 }));
 
 describe("team-registry", () => {
@@ -54,8 +51,13 @@ describe("team-registry", () => {
     });
     expect(team.teamId).toBeTruthy();
     expect(team.teamName).toBe("test-team");
-    expect(team.status).toBe("active");
-    expect(team.teammates).toEqual({});
+    expect(team.status).toBe("init");
+    expect(team.teammates.chore).toMatchObject({
+      teammateId: "chore",
+      role: "chore",
+      status: "idle",
+      isChore: true,
+    });
     expect(getTeam(team.teamId)).toEqual(team);
   });
 
@@ -87,7 +89,7 @@ describe("team-registry", () => {
       teammateId: "tm1",
       role: "reviewer",
       sessionKey: "agent:team-x:teammate:reviewer-tm1",
-      status: "spawning" as const,
+      status: "init" as const,
       requirePlanApproval: false,
       planApproved: false,
       claimedTasks: 0,
@@ -106,7 +108,7 @@ describe("team-registry", () => {
         teammateId: "tm1",
         role: "reviewer",
         sessionKey: "agent:team-x:teammate:reviewer-tm1",
-        status: "spawning",
+        status: "init",
         requirePlanApproval: false,
         planApproved: false,
         claimedTasks: 0,
@@ -126,7 +128,7 @@ describe("team-registry", () => {
       teammateId: "tm1",
       role: "reviewer",
       sessionKey: "agent:team-x:teammate:reviewer-tm1",
-      status: "spawning" as const,
+      status: "init" as const,
       requirePlanApproval: false,
       planApproved: false,
       claimedTasks: 0,
@@ -134,8 +136,8 @@ describe("team-registry", () => {
       createdAt: Date.now(),
     };
     addTeammate(team.teamId, teammate);
-    updateTeammateStatus(team.teamId, "tm1", "active");
-    expect(getTeam(team.teamId)?.teammates["tm1"].status).toBe("active");
+    updateTeammateStatus(team.teamId, "tm1", "working");
+    expect(getTeam(team.teamId)?.teammates["tm1"].status).toBe("working");
   });
 
   it("identifies lead vs teammate", () => {
@@ -174,7 +176,7 @@ describe("team-registry", () => {
       teammateId: "tm1",
       role: "reviewer",
       sessionKey: "agent:team-x:teammate:reviewer-tm1",
-      status: "active" as const,
+      status: "working" as const,
       requirePlanApproval: false,
       planApproved: false,
       claimedTasks: 0,
@@ -196,99 +198,93 @@ describe("team-registry", () => {
   // ---- notifyLeadIfTeamIdle tests ----
 
   describe("notifyLeadIfTeamIdle", () => {
-    function makeTeamWithCompletedTeammate() {
+    function makeTeamWithIdleTeammate() {
       const team = createTeam({
         teamName: "idle-test",
         leadSessionKey: "agent:lead",
         config: { notifyOnUnblock: true },
       });
+      updateTeamStatus(team.teamId, "working");
       addTeammate(team.teamId, {
         teammateId: "tm1",
         role: "worker",
         sessionKey: "agent:tm1",
-        status: "completed",
+        status: "idle",
         requirePlanApproval: false,
         planApproved: false,
         claimedTasks: 1,
         completedTasks: 1,
         createdAt: Date.now(),
       });
-      // All tasks done
-      mockListTasks.mockReturnValue({
-        tasks: [],
-        summary: { total: 1, pending: 0, blocked: 0, inProgress: 0, completed: 1, failed: 0 },
-      });
       return team;
     }
 
     beforeEach(() => {
-      mockSendMessage.mockClear();
       mockListTasks.mockReset();
+      mockAddTask.mockReset();
     });
 
-    it("sends a mailbox notification instead of transitioning team status", () => {
-      const team = makeTeamWithCompletedTeammate();
+    it("creates a terminal broadcast_answer task when all non-terminal work is done", () => {
+      const team = makeTeamWithIdleTeammate();
+      mockListTasks.mockReturnValue({
+        tasks: [
+          {
+            taskId: "task-1",
+            title: "work",
+            status: "completed",
+            assignee: "tm1",
+          },
+        ],
+      });
 
       notifyLeadIfTeamIdle(team.teamId);
 
-      // Team should still be active (not completed)
-      expect(getTeam(team.teamId)?.status).toBe("active");
-
-      // A notification should have been sent to the lead
-      expect(mockSendMessage).toHaveBeenCalledOnce();
-      expect(mockSendMessage).toHaveBeenCalledWith(
+      expect(mockAddTask).toHaveBeenCalledOnce();
+      expect(mockAddTask).toHaveBeenCalledWith(
+        team.teamId,
         expect.objectContaining({
-          teamId: team.teamId,
-          from: "system",
-          to: "lead",
+          title: "broadcast_answer",
+          assignTo: "lead",
         }),
       );
     });
 
-    it("only notifies once per idle window (idempotent)", () => {
-      const team = makeTeamWithCompletedTeammate();
-
-      notifyLeadIfTeamIdle(team.teamId);
-      notifyLeadIfTeamIdle(team.teamId);
-      notifyLeadIfTeamIdle(team.teamId);
-
-      expect(mockSendMessage).toHaveBeenCalledOnce();
-    });
-
-    it("does not notify when teammates are still active", () => {
+    it("does not create terminal task when teammates are still working", () => {
       const team = createTeam({
         teamName: "active-test",
         leadSessionKey: "agent:lead",
         config: { notifyOnUnblock: true },
       });
+      updateTeamStatus(team.teamId, "working");
       addTeammate(team.teamId, {
         teammateId: "tm1",
         role: "worker",
         sessionKey: "agent:tm1",
-        status: "active",
+        status: "working",
         requirePlanApproval: false,
         planApproved: false,
         claimedTasks: 0,
         completedTasks: 0,
         createdAt: Date.now(),
       });
+      mockListTasks.mockReturnValue({ tasks: [] });
 
       notifyLeadIfTeamIdle(team.teamId);
-
-      expect(mockSendMessage).not.toHaveBeenCalled();
+      expect(mockAddTask).not.toHaveBeenCalled();
     });
 
-    it("does not notify when incomplete tasks remain", () => {
+    it("does not create terminal task when incomplete non-terminal tasks remain", () => {
       const team = createTeam({
         teamName: "pending-test",
         leadSessionKey: "agent:lead",
         config: { notifyOnUnblock: true },
       });
+      updateTeamStatus(team.teamId, "working");
       addTeammate(team.teamId, {
         teammateId: "tm1",
         role: "worker",
         sessionKey: "agent:tm1",
-        status: "completed",
+        status: "idle",
         requirePlanApproval: false,
         planApproved: false,
         claimedTasks: 0,
@@ -296,48 +292,36 @@ describe("team-registry", () => {
         createdAt: Date.now(),
       });
       mockListTasks.mockReturnValue({
-        tasks: [],
-        summary: { total: 2, pending: 1, blocked: 0, inProgress: 0, completed: 1, failed: 0 },
+        tasks: [
+          {
+            taskId: "task-1",
+            title: "work",
+            status: "pending",
+            assignee: "tm1",
+          },
+        ],
       });
 
       notifyLeadIfTeamIdle(team.teamId);
 
-      expect(mockSendMessage).not.toHaveBeenCalled();
+      expect(mockAddTask).not.toHaveBeenCalled();
     });
 
-    it("re-notifies after resetIdleNotification is called", () => {
-      const team = makeTeamWithCompletedTeammate();
-
-      notifyLeadIfTeamIdle(team.teamId);
-      expect(mockSendMessage).toHaveBeenCalledOnce();
-
-      // Reset the guard (simulates new teammate spawn or task add)
-      resetIdleNotification(team.teamId);
-
-      notifyLeadIfTeamIdle(team.teamId);
-      expect(mockSendMessage).toHaveBeenCalledTimes(2);
-    });
-
-    it("resets idle notification when a new teammate is added", () => {
-      const team = makeTeamWithCompletedTeammate();
-
-      notifyLeadIfTeamIdle(team.teamId);
-      expect(mockSendMessage).toHaveBeenCalledOnce();
-      expect(getTeam(team.teamId)?.idleNotificationSent).toBe(true);
-
-      // Adding a teammate should reset the flag
-      addTeammate(team.teamId, {
-        teammateId: "tm2",
-        role: "analyst",
-        sessionKey: "agent:tm2",
-        status: "spawning",
-        requirePlanApproval: false,
-        planApproved: false,
-        claimedTasks: 0,
-        completedTasks: 0,
-        createdAt: Date.now(),
+    it("does not create duplicate terminal tasks when one is already open", () => {
+      const team = makeTeamWithIdleTeammate();
+      mockListTasks.mockReturnValue({
+        tasks: [
+          {
+            taskId: "terminal-1",
+            title: "broadcast_answer",
+            status: "pending",
+            assignee: "lead",
+          },
+        ],
       });
-      expect(getTeam(team.teamId)?.idleNotificationSent).toBe(false);
+
+      notifyLeadIfTeamIdle(team.teamId);
+      expect(mockAddTask).not.toHaveBeenCalled();
     });
   });
 });

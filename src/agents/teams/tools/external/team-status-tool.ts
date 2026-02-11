@@ -1,10 +1,9 @@
 import { Type } from "@sinclair/typebox";
-import type { AnyAgentTool } from "../../tools/common.js";
-import { loadConfig } from "../../../config/config.js";
-import { jsonResult, readStringParam } from "../../tools/common.js";
-import { cleanupExpiredMessages } from "../mailbox.js";
-import { listTasks } from "../task-list.js";
-import { getTeam, listActiveTeams, resolveCallerTeamContext } from "../team-registry.js";
+import type { AnyAgentTool } from "../../../tools/common.js";
+import { loadConfig } from "../../../../config/config.js";
+import { jsonResult, readStringParam } from "../../../tools/common.js";
+import { listTasks } from "../../task-list.js";
+import { getTeam, listActiveTeams, resolveCallerTeamContext } from "../../team-registry.js";
 
 const TeamStatusSchema = Type.Object({
   teamId: Type.String(),
@@ -62,21 +61,17 @@ export function createTeamStatusTool(opts?: { agentSessionKey?: string }): AnyAg
           requirePlanApproval: tm.requirePlanApproval,
           planApproved: tm.planApproved,
           model: tm.model,
+          isChore: tm.isChore ?? false,
         }));
 
         const taskResult = listTasks(team.teamId, { includeCompleted: true });
         const allTasks = taskResult.tasks;
         const taskSummary = taskResult.summary;
-
-        // Opportunistic TTL cleanup of old messages
-        if (opts?.agentSessionKey) {
-          try {
-            const ttlHours = cfg.gateway?.teams?.storage?.mailboxTTLHours ?? 24;
-            cleanupExpiredMessages({ teamId: team.teamId, ttlHours });
-          } catch {
-            // Ignore cleanup failures
-          }
-        }
+        const planTasks = allTasks.filter((task) => task.metadata?.excludedTaskClass !== true);
+        const taskClassSummary = {
+          primary: planTasks.filter((task) => task.taskClass === "primary").length,
+          secondary: planTasks.filter((task) => task.taskClass === "secondary").length,
+        };
 
         const isCreatorOnly =
           !!team.creatorSessionKey &&
@@ -92,6 +87,7 @@ export function createTeamStatusTool(opts?: { agentSessionKey?: string }): AnyAg
           createdAt: team.createdAt,
           updatedAt: team.updatedAt,
           taskSummary,
+          taskClassSummary,
         };
 
         response.leadStatus = team.leadStatus;

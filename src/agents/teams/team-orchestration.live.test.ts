@@ -13,8 +13,7 @@ import { isTruthyEnvValue } from "../../infra/env.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
 import { listTasks } from "./task-list.js";
 import { getTeam, listCreatorTeams } from "./team-registry.js";
-import { createTeamCleanupTool } from "./tools/team-cleanup-tool.js";
-import { createTeammateShutdownTool } from "./tools/teammate-shutdown-tool.js";
+import { createTeamCleanupTool } from "./tools/index.js";
 
 type TeamExample = {
   name: string;
@@ -139,7 +138,7 @@ async function waitForTeamIdle(params: { teamId: string; timeoutMs: number }) {
       return { ok: false, reason: "task list unavailable" };
     }
     const busy = Object.values(team.teammates).filter(
-      (tm) => tm.status === "active" || tm.status === "spawning",
+      (tm) => tm.status === "working" || tm.status === "init",
     );
     const hasIncomplete = summary.pending > 0 || summary.blocked > 0 || summary.inProgress > 0;
     if (busy.length === 0 && !hasIncomplete) {
@@ -281,18 +280,7 @@ describeCases("team orchestration (live)", () => {
           );
         }
 
-        const leadSessionKey = team.leadSessionKey;
-        const shutdownTool = createTeammateShutdownTool({ agentSessionKey: leadSessionKey });
-        const latest = getTeam(team.teamId) ?? team;
-        for (const teammate of Object.values(latest.teammates)) {
-          await shutdownTool.execute("live-shutdown", {
-            teamId: team.teamId,
-            teammateId: teammate.teammateId,
-            force: true,
-            reason: "live test cleanup",
-          });
-        }
-        const cleanupTool = createTeamCleanupTool({ agentSessionKey: leadSessionKey });
+        const cleanupTool = createTeamCleanupTool({ agentSessionKey: sessionKey });
         await cleanupTool.execute("live-cleanup", {
           teamId: team.teamId,
           confirm: true,

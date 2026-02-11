@@ -1,8 +1,8 @@
 import { Type } from "@sinclair/typebox";
-import type { AnyAgentTool } from "../../tools/common.js";
-import { loadConfig } from "../../../config/config.js";
-import { jsonResult } from "../../tools/common.js";
-import { listActiveTeams, resolveCallerTeamContext } from "../team-registry.js";
+import type { AnyAgentTool } from "../../../tools/common.js";
+import { loadConfig } from "../../../../config/config.js";
+import { jsonResult } from "../../../tools/common.js";
+import { listActiveTeams, resolveCallerTeamContext } from "../../team-registry.js";
 
 const TeamDiscoverSchema = Type.Object({
   filter: Type.Optional(
@@ -21,7 +21,7 @@ export function createTeamDiscoverTool(opts?: { agentSessionKey?: string }): Any
     label: "Teams",
     name: "team_discover",
     description:
-      "List active teams that you can potentially join. Use this to discover teams before requesting to join. Shows team name, ID, status, and description. Only sessions not yet in a team can use this.",
+      "List active teams for diagnostics. Shows team name, ID, status, and description. Only sessions not yet in a team can use this.",
     parameters: TeamDiscoverSchema,
     execute: async (_toolCallId, args) => {
       const cfg = loadConfig();

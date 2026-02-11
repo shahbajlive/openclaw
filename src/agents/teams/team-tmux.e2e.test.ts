@@ -8,12 +8,13 @@ import {
   getFreePort,
 } from "../../gateway/test-helpers.js";
 import { resolveTeamTmuxSessionName } from "./display-tmux.js";
-import { getTeam } from "./team-registry.js";
-import { createTeamBroadcastAnswerTool } from "./tools/team-broadcast-answer-tool.js";
-import { createTeamCleanupTool } from "./tools/team-cleanup-tool.js";
-import { createTeamCreateTool } from "./tools/team-create-tool.js";
-import { createTeammateShutdownTool } from "./tools/teammate-shutdown-tool.js";
-import { createTeammateSpawnTool } from "./tools/teammate-spawn-tool.js";
+import { getTeam, updateTeammateStatus } from "./team-registry.js";
+import {
+  createTeamBroadcastAnswerTool,
+  createTeamCleanupTool,
+  createTeamCreateTool,
+  createTeammateSpawnTool,
+} from "./tools/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -140,6 +141,8 @@ describe("teams tmux e2e", () => {
 
       expect(paneIds.length).toBeGreaterThanOrEqual(2);
 
+      updateTeammateStatus(teamId, teammateId, "idle");
+
       const broadcast = createTeamBroadcastAnswerTool({ agentSessionKey: leadSessionKey });
       const broadcastResult = await broadcast.execute("call-e2e-broadcast", {
         teamId,
@@ -149,18 +152,7 @@ describe("teams tmux e2e", () => {
         (broadcastResult as { details?: Record<string, unknown> }).details ?? {};
       expect(broadcastDetails.status).toBe("broadcasted");
 
-      const shutdown = createTeammateShutdownTool({ agentSessionKey: leadSessionKey });
-      const shutdownResult = await shutdown.execute("call-e2e-shutdown", {
-        teamId,
-        teammateId,
-        reason: "e2e cleanup",
-        force: true,
-      });
-      const shutdownDetails =
-        (shutdownResult as { details?: Record<string, unknown> }).details ?? {};
-      expect(shutdownDetails.status).toBe("terminated");
-
-      const cleanup = createTeamCleanupTool({ agentSessionKey: leadSessionKey });
+      const cleanup = createTeamCleanupTool({ agentSessionKey: "agent:main:main" });
       const cleanupResult = await cleanup.execute("call-e2e-cleanup", {
         teamId,
         confirm: true,

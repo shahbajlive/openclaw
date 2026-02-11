@@ -1,26 +1,26 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { loadConfig } from "../../../config/config.js";
-import { resetTeamRegistryForTests, listActiveTeams } from "../team-registry.js";
+import { loadConfig } from "../../../../config/config.js";
+import { resetTeamRegistryForTests, listActiveTeams } from "../../team-registry.js";
 import { createTeamCreateTool } from "./team-create-tool.js";
 
 // Mock config
-vi.mock("../../../config/config.js", () => ({
+vi.mock("../../../../config/config.js", () => ({
   loadConfig: vi.fn(),
 }));
 
 // Mock store to prevent disk I/O
-vi.mock("../team-registry.store.js", () => ({
+vi.mock("../../team-registry.store.js", () => ({
   resolveTeamBasePath: vi.fn().mockReturnValue("/tmp/openclaw-test-noop"),
   saveTeamToDisk: vi.fn(),
   loadAllTeamsFromDisk: vi.fn().mockReturnValue(new Map()),
 }));
 
 // Mock agent events
-vi.mock("../../../infra/agent-events.js", () => ({
+vi.mock("../../../../infra/agent-events.js", () => ({
   onAgentEvent: vi.fn().mockReturnValue(() => {}),
 }));
 
-vi.mock("../../../gateway/call.js", () => ({
+vi.mock("../../../../gateway/call.js", () => ({
   callGateway: vi.fn().mockResolvedValue({}),
 }));
 
@@ -47,6 +47,11 @@ describe("team-create-tool", () => {
           enabled: true,
           maxActiveTeams: 3,
           bootstrapMode: "none",
+        },
+      },
+      tools: {
+        agentToAgent: {
+          enabled: true,
         },
       },
     } as any);
@@ -95,6 +100,11 @@ describe("team-create-tool", () => {
           enabled: true,
           maxActiveTeams: 2,
           bootstrapMode: "none",
+        },
+      },
+      tools: {
+        agentToAgent: {
+          enabled: true,
         },
       },
     } as any);

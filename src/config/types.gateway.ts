@@ -218,8 +218,6 @@ export type TeamsStorageConfig = {
   basePath?: string;
   /** Task list storage format (default: "json"). */
   taskListFormat?: "json" | "jsonl";
-  /** Auto-delete read messages after this many hours (default: 24). */
-  mailboxTTLHours?: number;
 };
 
 export type TeamsTmuxConfig = {

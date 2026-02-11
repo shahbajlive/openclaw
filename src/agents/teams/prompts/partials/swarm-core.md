@@ -6,32 +6,128 @@ This section is shared between Team Leads and Teammates. It defines how OpenClaw
 
 ## Non-Negotiables
 
-- **Always include `teamId`** in every team-related tool call (e.g. `task_add`, `task_claim`, `teammate_message`). Use `teamId: "{{teamId}}"` for this team.
-- **Your normal text output is not “shared” with other teammates.** If you need another teammate (or the lead) to see something, you must send it via:
-  - `teammate_message` (preferred for one person)
-  - `teammate_broadcast` (only for critical team-wide info; expensive/noisy)
+- **Always include `teamId`** in every team-related tool call (e.g. `task_question`, `task_answer`, `team_broadcast_answer`). Use `teamId: "{{teamId}}"` for this team.
+- **Task tools are the only coordination mechanism.** The system creates tasks from `init_task`, `task_question`, and Chore audits. Teammates use `task_question` to raise dependency questions and `task_answer` to submit work.
+- **Your normal text output is not shared.** Use task tools only.
 
 ---
 
 ## Primitives (Conceptual)
 
-- **Team**: shared coordination context, tasks, and mailbox.
+- **Team**: shared coordination context and task graph.
 - **Team Lead**: orchestrates; does not implement tasks directly.
-- **Teammate**: executes tasks; reports back via `teammate_message`.
-- **Task**: a work item in the team’s task list with dependencies and status.
-- **Mailbox message**: a delivered note to a teammate/lead. Messages are delivered immediately via system events with full content - you'll see them in your context as `"System: From {sender}: {message}"`. No separate read tool is needed.
+- **Teammate**: executes tasks; reports back via `task_answer`.
+- **Chore**: taskless auditor; runs heartbeat checks and flags violations.
+- **Task**: a work item in the team's task list with dependencies and status.
+- **System event**: delivered runtime signal for task assignment/coordination updates.
+
+### Team Status Model
+
+- `init`: team created; waiting for initial task decomposition/ramp-up
+- `working`: team is executing planned work
+- `failed`: initialization/coordination failed and needs lead intervention
+- `idle`: final answer broadcasted; work cycle is complete
 
 ---
 
 ## Task Lifecycle (Canonical)
 
-- **Create work**: `task_add`
-- **See work**: `task_list` (or `team_status` with `includeTaskList: true`)
-- **Claim work**: `task_claim` (specific `taskId`, or auto-select highest-priority pending)
+- **Create work**: lead answers `init_task` with a JSON plan (system creates subtasks)
+- **See work**: rely on pending lead tasks and teammate status
+- **Claim work**: auto-claimed by the system when a teammate goes IDLE
 - **Work**: do the actual investigation/implementation in your session
-- **Complete work**: `task_complete` (include a short summary and key artifacts)
+- **Complete work**: teammates use `task_answer` (include a short answer and key artifacts)
 
-**Statuses you’ll see**: `pending`, `blocked`, `claimed`, `in-progress`, `completed`, `failed`.
+**Statuses you'll see**: `pending`, `blocked`, `claimed`, `in-progress`, `completed`, `failed`.
+
+### Task Classes
+
+- `primary`: tasks created from `init_task` planning
+- `secondary`: follow-up work added during execution
+- Reserved orchestration tasks (`init_task`, `lead_review`, `qn_request`, `review_question`, `broadcast_answer`) are kept out of primary/secondary planning buckets.
+- Every non-exempt task has a derived `primary_context_task_id` pointer. Secondary tasks must map to exactly one primary context.
+
+---
+
+## Init Task Bootstrapping (Lead Only)
+
+When the team is created with initial tasks, the system creates a single lead-owned `init_task`.
+Your job is to turn that into a concrete task plan.
+
+**How to answer `init_task`:**
+- Reply using `task_answer` with a JSON plan.
+- The system parses the JSON, creates subtasks, and makes each subtask depend on `init_task`.
+
+**JSON shape:**
+```json
+{
+  "tasks": [
+    { "id": "spec", "title": "Write spec", "assignee": "builder" },
+    { "id": "impl", "title": "Implement", "assignee": "tm1", "dependsOn": ["spec"] }
+  ]
+}
+```
+
+Notes:
+- `assignee` can be a teammate id or role.
+- `dependsOn` can reference task `id`s or 1-based indices in the list.
+
+---
+
+## Deterministic Questions + Lead Review
+
+**Question/review tasks are ordinary tasks.** Use task titles and metadata to make intent explicit:
+
+- `qn_request` (assigned to dependency owner): ask for missing info
+- `review_question` (assigned to target teammate): lead review questions
+- `lead_review` (assigned to Lead): hard stop / approval gate
+
+Priority defaults:
+
+- `lead_review`: `critical`
+- `review_question` / `qn_request`: `high`
+- Normal work: `normal` (or `low` when appropriate)
+
+**When blocked while working:**
+
+1. Use `task_question` with the dependency task id + question text (the dependency must already be in your task's `dependsOn`).
+2. The system creates `qn_request` assigned to the dependency owner, adds it as a dependency to your current task, **hard-interrupts** your run, and yields you to IDLE.
+3. Do **not** busy-wait or loop inside the task.
+
+**Re-ask is a new task:**
+
+- If the answer is insufficient, create a *new* `qn_request` and repeat.
+
+**Question-on-question is not allowed unless the question targets a dependency task:**
+
+- If you cannot answer and the missing info is **not** in your dependency graph, submit `task_answer` with a clear failure reason.
+
+**Lead review (hard stop):**
+
+- `lead_review` blocks work by being added as a dependency to the target teammate's open tasks.
+- Lead expands review into `review_question` tasks, then completes `lead_review` when satisfied.
+
+**Chore audit (taskless):**
+
+- Chore never claims tasks and does not wait on user requests.
+- On heartbeat checks, Chore inspects task + teammate state for violations and flags the lead with `lead_review`.
+
+---
+
+## Priority Rule (Deterministic)
+
+On each idle transition, the system auto-claims the highest priority *pending & unblocked* task assigned to you:
+
+1. `lead_review` (Lead only)
+2. `review_question` / `qn_request`
+3. Normal work tasks
+
+Tie-breakers:
+
+1. Oldest creation time (FIFO)
+2. Then by task id (stable ordering)
+
+Each assignment includes a context-switch instruction. Treat that as the active task context and avoid carrying unrelated task-specific assumptions into the new task.
 
 ---
 
@@ -44,56 +140,49 @@ This section is shared between Team Leads and Teammates. It defines how OpenClaw
 
 ---
 
-## Orchestration Patterns (Claude-swarm-style, adapted to OpenClaw tools)
+## Orchestration Patterns (Init Task JSON)
 
-### Pattern 1: Parallel Specialists
+Use `init_task` JSON to express the task graph up front. The system creates tasks and assigns them.
 
-Use when you want multiple independent perspectives quickly (security + perf + architecture, etc).
+### Parallel Specialists
 
-```js
-// Lead creates tasks
-task_add({ teamId: "{{teamId}}", title: "Security review", description: "Review auth flow for auth bypass + sensitive data exposure", priority: "high" })
-task_add({ teamId: "{{teamId}}", title: "Performance review", description: "Check hot paths for N+1 / needless work", priority: "normal" })
-
-// Lead spawns specialists
-teammate_spawn({ teamId: "{{teamId}}", role: "security-reviewer", task: "Claim the security task, do the review, then message findings to the lead." })
-teammate_spawn({ teamId: "{{teamId}}", role: "performance-analyst", task: "Claim the performance task, do the review, then message findings to the lead." })
+```json
+{
+  "tasks": [
+    { "id": "security", "title": "Security review", "assignee": "security-reviewer" },
+    { "id": "perf", "title": "Performance review", "assignee": "performance-analyst" }
+  ]
+}
 ```
 
-### Pattern 2: Sequential Pipeline (Dependencies)
+### Sequential Pipeline
 
-Use when ordering matters (research → plan → implement → test).
-
-```js
-// 1) Add tasks, note the returned taskIds
-task_add({ teamId: "{{teamId}}", title: "Research", description: "Gather constraints + best practices" }) // -> taskId: <researchId>
-task_add({ teamId: "{{teamId}}", title: "Plan", description: "Write plan based on Research", dependsOn: ["<researchId>"] })
-task_add({ teamId: "{{teamId}}", title: "Implement", description: "Implement per Plan", dependsOn: ["<planId>"] })
-task_add({ teamId: "{{teamId}}", title: "Test", description: "Add/adjust tests", dependsOn: ["<implementId>"] })
+```json
+{
+  "tasks": [
+    { "id": "research", "title": "Research", "assignee": "worker-1" },
+    { "id": "plan", "title": "Plan", "assignee": "worker-2", "dependsOn": ["research"] },
+    { "id": "implement", "title": "Implement", "assignee": "worker-3", "dependsOn": ["plan"] },
+    { "id": "test", "title": "Test", "assignee": "worker-4", "dependsOn": ["implement"] }
+  ]
+}
 ```
 
-### Pattern 3: Self-Organizing Swarm (Task Pool)
+### Task Pool
 
-Use when you have many small independent tasks and want workers to dynamically claim.
-
-```js
-// Lead: create many independent tasks (no dependsOn)
-task_add({ teamId: "{{teamId}}", title: "Review file A" })
-task_add({ teamId: "{{teamId}}", title: "Review file B" })
-task_add({ teamId: "{{teamId}}", title: "Review file C" })
-
-// Teammate worker loop (conceptual):
-// - call task_list({ teamId: "{{teamId}}" })
-// - find a pending task
-// - task_claim({ teamId: "{{teamId}}", taskId: "<taskId>" })
-// - do work
-// - task_complete({ teamId: "{{teamId}}", taskId: "<taskId>", summary: "..." })
-// - repeat
+```json
+{
+  "tasks": [
+    { "id": "review-a", "title": "Review file A", "assignee": "worker-1" },
+    { "id": "review-b", "title": "Review file B", "assignee": "worker-2" },
+    { "id": "review-c", "title": "Review file C", "assignee": "worker-3" }
+  ]
+}
 ```
 
 ---
 
-## Reporting (What “good updates” look like)
+## Reporting (What "good updates" look like)
 
 When you message the lead, prefer this structure:
 
@@ -106,4 +195,4 @@ When you message the lead, prefer this structure:
 
 ## Storage (FYI)
 
-Teams persist state on disk (default: `~/.openclaw/teams/{{teamId}}/`) including `config.json`, `tasks.json`, mailbox files, and plans.
+Teams persist state on disk (default: `~/.openclaw/teams/{{teamId}}/`) including `config.json`, `tasks.json`, and plans.

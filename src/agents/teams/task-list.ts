@@ -2,13 +2,30 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Task, TaskPriority, TaskStatus, TaskSummary } from "./types.js";
+import { loadConfig } from "../../config/config.js";
 import { loadJsonFile, saveJsonFile } from "../../infra/json-file.js";
+import { derivePrimaryContextTaskIdForNewTask } from "./task-context.js";
+import { withTaskClass } from "./task-taxonomy.js";
 import { resolveTeamBasePath } from "./team-registry.store.js";
 
 function scheduleLeadStatusRecompute(teamId: string) {
   queueMicrotask(() => {
     import("./team-registry.js")
-      .then((mod) => mod.recomputeLeadStatusFromTasks(teamId))
+      .then((mod) => {
+        mod.recomputeLeadStatusFromTasks(teamId);
+        mod.recomputeTeamStatusFromTasks(teamId);
+      })
+      .catch(() => {});
+  });
+}
+
+function scheduleIdleClaim(teamId: string) {
+  queueMicrotask(() => {
+    import("./team-registry.js")
+      .then((mod) => {
+        mod.autoClaimIdleTeammateTasks(teamId);
+        mod.dispatchLeadPendingTask(teamId);
+      })
       .catch(() => {});
   });
 }
@@ -54,6 +71,22 @@ export function addTask(
       return !dep || dep.status !== "completed";
     });
 
+    const { taskClass, metadata } = withTaskClass(params.title, params.metadata);
+    const derivedPrimaryContextTaskId = derivePrimaryContextTaskIdForNewTask({
+      taskClass,
+      dependsOn,
+      metadata,
+      existingTasks: Array.from(tasks.values()),
+    });
+    const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) };
+    if (taskClass === "primary") {
+      // Keep all non-exempt tasks on a single derived primary context chain.
+      // Primary tasks are their own context root.
+      nextMetadata.primary_context_task_id = taskId;
+    } else if (derivedPrimaryContextTaskId) {
+      nextMetadata.primary_context_task_id = derivedPrimaryContextTaskId;
+    }
+    const finalMetadata = Object.keys(nextMetadata).length > 0 ? nextMetadata : undefined;
     const task: Task = {
       taskId,
       title: params.title,
@@ -62,13 +95,15 @@ export function addTask(
       assignee: params.assignTo,
       dependsOn,
       priority: params.priority ?? "normal",
-      metadata: params.metadata,
+      taskClass,
+      metadata: finalMetadata,
       createdAt: now,
     };
 
     tasks.set(taskId, task);
     saveTasks(teamId, tasks);
     scheduleLeadStatusRecompute(teamId);
+    scheduleIdleClaim(teamId);
 
     return task;
   });
@@ -115,7 +150,10 @@ export function claimTask(
             return bPriority - aPriority;
           }
           // FIFO within same priority
-          return a.createdAt - b.createdAt;
+          if (a.createdAt !== b.createdAt) {
+            return a.createdAt - b.createdAt;
+          }
+          return a.taskId.localeCompare(b.taskId);
         });
 
       targetTask = candidates[0];
@@ -144,7 +182,7 @@ export function claimTask(
 /**
  * Complete a task.
  */
-export function completeTask(
+function completeTaskInternal(
   teamId: string,
   params: {
     taskId: string;
@@ -152,6 +190,7 @@ export function completeTask(
     summary?: string;
     artifacts?: string[];
   },
+  opts?: { allowNonClaimed?: boolean },
 ): { taskId: string; status: "completed" | "failed"; unblockedTasks: string[] } {
   return withTaskLock(teamId, () => {
     const tasks = loadTasks(teamId);
@@ -161,7 +200,7 @@ export function completeTask(
       throw new Error(`Task ${params.taskId} not found`);
     }
 
-    if (task.status !== "claimed" && task.status !== "in-progress") {
+    if (!opts?.allowNonClaimed && task.status !== "claimed" && task.status !== "in-progress") {
       throw new Error(
         `Task ${params.taskId} is not claimed or in-progress (status: ${task.status})`,
       );
@@ -179,9 +218,42 @@ export function completeTask(
 
     saveTasks(teamId, tasks);
     scheduleLeadStatusRecompute(teamId);
+    if (unblockedTasks.length > 0) {
+      scheduleIdleClaim(teamId);
+    }
 
     return { taskId: params.taskId, status: newStatus, unblockedTasks };
   });
+}
+
+/**
+ * Complete a task.
+ */
+export function completeTask(
+  teamId: string,
+  params: {
+    taskId: string;
+    result?: "success" | "failure";
+    summary?: string;
+    artifacts?: string[];
+  },
+): { taskId: string; status: "completed" | "failed"; unblockedTasks: string[] } {
+  return completeTaskInternal(teamId, params);
+}
+
+/**
+ * Complete a task even if it is pending or blocked.
+ */
+export function forceCompleteTask(
+  teamId: string,
+  params: {
+    taskId: string;
+    result?: "success" | "failure";
+    summary?: string;
+    artifacts?: string[];
+  },
+): { taskId: string; status: "completed" | "failed"; unblockedTasks: string[] } {
+  return completeTaskInternal(teamId, params, { allowNonClaimed: true });
 }
 
 /**
@@ -275,8 +347,10 @@ export function updateTask(
     assignee?: string;
     description?: string;
     dependsOn?: string[];
+    taskClass?: "primary" | "secondary";
     metadata?: Record<string, unknown>;
   },
+  opts?: { allowMissingDependencies?: boolean },
 ): Task {
   return withTaskLock(teamId, () => {
     const tasks = loadTasks(teamId);
@@ -304,15 +378,21 @@ export function updateTask(
     }
 
     if (updates.dependsOn !== undefined) {
-      // Validate dependencies exist
+      // Validate dependencies exist unless explicitly allowed (for audit escalation).
       for (const depId of updates.dependsOn) {
         if (!tasks.has(depId)) {
+          if (opts?.allowMissingDependencies) {
+            continue;
+          }
           throw new Error(`Dependency task ${depId} not found`);
         }
       }
 
       // Check for circular dependencies
       for (const depId of updates.dependsOn) {
+        if (!tasks.has(depId)) {
+          continue;
+        }
         if (wouldCreateCycle(taskId, depId, tasks)) {
           throw new Error(`Adding dependency ${depId} would create a circular dependency`);
         }
@@ -326,19 +406,33 @@ export function updateTask(
         return !dep || dep.status !== "completed";
       });
 
-      if (isNowBlocked && task.status === "pending") {
+      if (isNowBlocked && task.status !== "completed" && task.status !== "failed") {
         task.status = "blocked";
       } else if (!isNowBlocked && task.status === "blocked") {
         task.status = "pending";
       }
     }
 
+    if (updates.taskClass !== undefined) {
+      task.taskClass = updates.taskClass;
+    }
+
     if (updates.metadata !== undefined) {
       task.metadata = { ...task.metadata, ...updates.metadata };
+      if (updates.metadata.excludedTaskClass === true) {
+        task.taskClass = undefined;
+      } else if (
+        updates.metadata.excludedTaskClass === false &&
+        typeof updates.metadata.taskClass === "string" &&
+        (updates.metadata.taskClass === "primary" || updates.metadata.taskClass === "secondary")
+      ) {
+        task.taskClass = updates.metadata.taskClass;
+      }
     }
 
     saveTasks(teamId, tasks);
     scheduleLeadStatusRecompute(teamId);
+    scheduleIdleClaim(teamId);
 
     return task;
   });
@@ -444,7 +538,8 @@ function computeBlockedBy(task: Task, allTasks: Map<string, Task>): string[] {
  * Resolve the tasks.json path for a team.
  */
 function resolveTasksPath(teamId: string): string {
-  const basePath = resolveTeamBasePath();
+  const cfg = loadConfig();
+  const basePath = resolveTeamBasePath(cfg);
   return path.join(basePath, teamId, "tasks.json");
 }
 

@@ -205,7 +205,7 @@ export function createSessionsSendTool(opts?: {
         return jsonResult({
           runId: crypto.randomUUID(),
           status: "forbidden",
-          error: "Use team_message or teammate_message for team communication.",
+          error: "Use team_message or task tools for team communication.",
           sessionKey: displayKey,
         });
       }

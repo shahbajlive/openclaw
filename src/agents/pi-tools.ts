@@ -421,7 +421,7 @@ export function createOpenClawCodingTools(options?: {
   const sandboxPolicyExpanded = expandPolicyWithPluginGroups(sandbox?.tools, pluginGroups);
   const subagentPolicyExpanded = expandPolicyWithPluginGroups(subagentPolicy, pluginGroups);
 
-  // ---- TEAM POLICY ENFORCEMENT (lead coordination + plan approval) ----
+  // ---- TEAM POLICY ENFORCEMENT (lead coordination) ----
   // Resolve the team context once for both checks.
   // teamContext + creatorTeams already resolved above for tool allowlist handling.
 
@@ -437,22 +437,6 @@ export function createOpenClawCodingTools(options?: {
     pluginGroups,
   );
 
-  // Plan approval: if a teammate hasn't had their plan approved yet, deny
-  // implementation tools until the lead reviews and approves.
-  let planApprovalDenyPolicy: typeof subagentPolicy | undefined;
-  if (teamContext && !teamContext.isLead && teamContext.teammate) {
-    const tm = teamContext.teammate;
-    if (tm.requirePlanApproval && !tm.planApproved) {
-      planApprovalDenyPolicy = {
-        deny: [...expandToolGroups(["group:fs", "group:runtime"])],
-      };
-    }
-  }
-  const planApprovalPolicyExpanded = expandPolicyWithPluginGroups(
-    planApprovalDenyPolicy,
-    pluginGroups,
-  );
-
   // Team sessions should not use cross-session tools for coordination.
   let teamSessionPolicy: typeof subagentPolicy | undefined;
   if (teamContext) {
@@ -463,13 +447,17 @@ export function createOpenClawCodingTools(options?: {
         "sessions_send",
         "sessions_spawn",
         "session_status",
+        "team_create",
+        "team_message",
         "team_discover",
+        "team_cleanup",
         "group:messaging",
         "group:automation",
       ],
     };
     if (!teamContext.isLead) {
       teamSessionPolicy.deny.push("team_status");
+      teamSessionPolicy.deny.push("team_broadcast_answer");
     }
   }
   const teamSessionPolicyExpanded = expandPolicyWithPluginGroups(teamSessionPolicy, pluginGroups);
@@ -478,24 +466,7 @@ export function createOpenClawCodingTools(options?: {
   let creatorSessionPolicy: typeof subagentPolicy | undefined;
   if (creatorTeams.length > 0 && !teamContext?.isLead) {
     creatorSessionPolicy = {
-      deny: [
-        "teammate_spawn",
-        "teammate_shutdown",
-        "teammate_message",
-        "teammate_broadcast",
-        "teammate_join_request",
-        "teammate_join_approve",
-        "teammate_join_reject",
-        "task_add",
-        "task_claim",
-        "task_complete",
-        "task_list",
-        "plan_submit",
-        "plan_review",
-        "team_cleanup",
-        "team_complete",
-        "team_broadcast_answer",
-      ],
+      deny: ["teammate_spawn", "team_broadcast_answer"],
     };
   }
   const creatorSessionPolicyExpanded = expandPolicyWithPluginGroups(
@@ -511,21 +482,8 @@ export function createOpenClawCodingTools(options?: {
         "team_status",
         "team_message",
         "team_cleanup",
-        "team_complete",
         "team_broadcast_answer",
         "teammate_spawn",
-        "teammate_shutdown",
-        "teammate_message",
-        "teammate_broadcast",
-        "teammate_join_request",
-        "teammate_join_approve",
-        "teammate_join_reject",
-        "task_add",
-        "task_claim",
-        "task_complete",
-        "task_list",
-        "plan_submit",
-        "plan_review",
       ],
     };
   }
@@ -561,12 +519,9 @@ export function createOpenClawCodingTools(options?: {
   const delegateModeFiltered = delegateModePolicyExpanded
     ? filterToolsByPolicy(subagentFiltered, delegateModePolicyExpanded)
     : subagentFiltered;
-  const planApprovalFiltered = planApprovalPolicyExpanded
-    ? filterToolsByPolicy(delegateModeFiltered, planApprovalPolicyExpanded)
-    : delegateModeFiltered;
   const teamSessionFiltered = teamSessionPolicyExpanded
-    ? filterToolsByPolicy(planApprovalFiltered, teamSessionPolicyExpanded)
-    : planApprovalFiltered;
+    ? filterToolsByPolicy(delegateModeFiltered, teamSessionPolicyExpanded)
+    : delegateModeFiltered;
   const creatorFiltered = creatorSessionPolicyExpanded
     ? filterToolsByPolicy(teamSessionFiltered, creatorSessionPolicyExpanded)
     : teamSessionFiltered;

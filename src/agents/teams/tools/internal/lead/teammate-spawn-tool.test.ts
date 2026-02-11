@@ -1,28 +1,28 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { loadConfig } from "../../../config/config.js";
+import { loadConfig } from "../../../../../config/config.js";
 import {
   createTeam,
   resetTeamRegistryForTests,
   getTeam,
   initTeamRegistry,
-} from "../team-registry.js";
+} from "../../../team-registry.js";
 import { createTeammateSpawnTool } from "./teammate-spawn-tool.js";
 
 // Mock dependencies
-vi.mock("../../../config/config.js", () => ({
+vi.mock("../../../../../config/config.js", () => ({
   loadConfig: vi.fn(),
 }));
 
-vi.mock("../../../gateway/call.js", () => ({
+vi.mock("../../../../../gateway/call.js", () => ({
   callGateway: vi.fn(),
 }));
 
-vi.mock("../system-prompt.js", () => ({
+vi.mock("../../../system-prompt.js", () => ({
   buildTeammateSystemPrompt: vi.fn().mockReturnValue("mock system prompt"),
 }));
 
 // Mock store to prevent disk I/O
-vi.mock("../team-registry.store.js", () => ({
+vi.mock("../../../team-registry.store.js", () => ({
   resolveTeamBasePath: vi.fn().mockReturnValue("/tmp/openclaw-test-noop"),
   saveTeamToDisk: vi.fn(),
   loadAllTeamsFromDisk: vi.fn().mockReturnValue(new Map()),
@@ -32,7 +32,7 @@ vi.mock("../team-registry.store.js", () => ({
 // Mock agent events - we need a real implementation for the regression test
 // but we need to control it.
 let eventHandler: ((evt: any) => void) | undefined;
-vi.mock("../../../infra/agent-events.js", () => ({
+vi.mock("../../../../../infra/agent-events.js", () => ({
   onAgentEvent: vi.fn().mockImplementation((handler) => {
     eventHandler = handler;
     return () => {
@@ -94,7 +94,7 @@ describe("teammate-spawn-tool", () => {
   });
 
   it("spawns a teammate via callGateway", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
 
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
@@ -112,7 +112,7 @@ describe("teammate-spawn-tool", () => {
   });
 
   it("handles race condition: lifecycle event arrives during spawn", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
 
     // Mock gateway to emit "start" event immediately when called
     // This simulates the race condition where the process starts and reports back
@@ -149,13 +149,12 @@ describe("teammate-spawn-tool", () => {
     const teammate = team?.teammates[tmId];
 
     expect(teammate).toBeTruthy();
-    // CRITICAL ASSERTION: The status should be "active" because the start event was processed
-    // If the race condition exists (event ignored because teammate not yet in registry), this would be "spawning".
-    expect(teammate?.status).toBe("active");
+    // Start event should be processed, and spawn flow then normalizes teammate to idle.
+    expect(teammate?.status).toBe("idle");
   });
 
   it("removes teammate if gateway call fails", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockRejectedValue(new Error("Network fail"));
 
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
@@ -175,12 +174,12 @@ describe("teammate-spawn-tool", () => {
     // Depending on implementation, we might need to dig into how to verify removal based on ID.
     // The previous tests show checking teammates by ID.
     // We don't have the ID easily here as it was generated inside.
-    // But we know the team should have 0 teammates now (or same number as before).
-    expect(Object.keys(team?.teammates || {}).length).toBe(0);
+    // Spawn failure should not leave a dangling teammate entry.
+    expect(Object.keys(team?.teammates || {})).toEqual(["chore"]);
   });
 
   it("rejects when called by a non-lead", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:team-x:teammate:member" });
 
@@ -195,12 +194,12 @@ describe("teammate-spawn-tool", () => {
     expect(text.toLowerCase()).toContain("lead");
   });
 
-  it("rejects when teammate limit is reached", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+  it("continues spawning teammates when no hard limit is configured", async () => {
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
 
-    // Spawn 5 teammates (hitting the limit)
+    // Spawn 5 teammates
     for (let i = 0; i < 5; i++) {
       await tool.execute(`call-${i}`, {
         teamId,
@@ -209,16 +208,15 @@ describe("teammate-spawn-tool", () => {
       });
     }
 
-    // Try to spawn a 6th teammate
+    // Spawn a 6th teammate
     const result = await tool.execute("call-6", {
       teamId,
       role: "reviewer-6",
       task: "Review code",
     });
 
-    const text = resultText(result);
-    expect(text.toLowerCase()).toContain("error");
-    expect(text.toLowerCase()).toContain("max");
+    const details = resultDetails(result);
+    expect(details.status).toBe("spawned");
   });
 
   it("validates model against allowedModels", async () => {
@@ -237,7 +235,7 @@ describe("teammate-spawn-tool", () => {
   });
 
   it("accepts allowed models", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
 
@@ -253,9 +251,9 @@ describe("teammate-spawn-tool", () => {
   });
 
   it("uses AGENT_LANE_TEAM lane", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
-    const { AGENT_LANE_TEAM } = await import("../../lanes.js");
+    const { AGENT_LANE_TEAM } = await import("../../../../lanes.js");
 
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
 
@@ -275,7 +273,7 @@ describe("teammate-spawn-tool", () => {
   });
 
   it("registers teammate in registry", async () => {
-    const { callGateway } = await import("../../../gateway/call.js");
+    const { callGateway } = await import("../../../../../gateway/call.js");
     vi.mocked(callGateway).mockResolvedValue({ runId: "mock-run-id" });
     const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
 
@@ -290,10 +288,10 @@ describe("teammate-spawn-tool", () => {
     const tmId = details.teammateId as string;
     expect(team?.teammates[tmId]).toBeTruthy();
     expect(team?.teammates[tmId].role).toBe("reviewer");
-    // Status starts as "spawning" and transitions to "active" via lifecycle event.
+    // Status starts as "init" and transitions to "working" via lifecycle event.
     // The mapping is registered synchronously before the gateway call, and since
     // runId = idempotencyKey, lifecycle events will find the mapping correctly.
-    expect(team?.teammates[tmId].status).toBe("spawning");
+    expect(team?.teammates[tmId].status).toBe("idle");
   });
 
   it("rejects when teams are disabled", async () => {

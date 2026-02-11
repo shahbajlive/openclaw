@@ -39,18 +39,15 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   // Team coordination tools
   "group:teams": [
     "team_create",
+    "team_discover",
     "team_status",
     "team_message",
+    "team_broadcast_answer",
+    "team_cleanup",
     "teammate_spawn",
-    "teammate_message",
-    "teammate_broadcast",
-    "teammate_shutdown",
-    "task_add",
-    "task_claim",
-    "task_complete",
-    "task_list",
-    "plan_submit",
-    "plan_review",
+    "task_answer",
+    "task_question",
+    "task_get",
   ],
   // All OpenClaw native tools (excludes provider plugins).
   "group:openclaw": [
@@ -72,18 +69,15 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "web_fetch",
     "image",
     "team_create",
+    "team_discover",
     "team_status",
     "team_message",
+    "team_broadcast_answer",
+    "team_cleanup",
     "teammate_spawn",
-    "teammate_message",
-    "teammate_broadcast",
-    "teammate_shutdown",
-    "task_add",
-    "task_claim",
-    "task_complete",
-    "task_list",
-    "plan_submit",
-    "plan_review",
+    "task_answer",
+    "task_question",
+    "task_get",
   ],
 };
 
@@ -113,14 +107,8 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
       "group:runtime", // exec, process
       "group:memory", // memory_search, memory_get
       "group:web", // web_search, web_fetch
-      "task_claim",
-      "task_complete",
-      "task_list",
-      "task_add",
-      "teammate_message",
-      "teammate_broadcast",
-      "team_status",
-      "plan_submit",
+      "task_answer",
+      "task_question",
       "sessions_spawn",
       "image",
     ],
@@ -128,8 +116,6 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
       "team_create", // only lead can create teams
       "team_message", // only creator can message the lead
       "teammate_spawn", // only lead can spawn teammates
-      "teammate_shutdown", // only lead can shut down teammates
-      "plan_review", // only lead can review plans
       "group:automation", // no cron, no gateway tool
       "group:messaging", // no direct user messaging (message tool)
     ],

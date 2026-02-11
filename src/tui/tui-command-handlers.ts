@@ -278,12 +278,12 @@ export function createCommandHandlers(context: CommandHandlerContext) {
           lines.push(`Status: ${team.status} | ${team.teammateCount} teammate(s)`);
           for (const tm of team.teammates) {
             const statusIcon =
-              tm.status === "active"
+              tm.status === "working"
                 ? "●"
-                : tm.status === "completed"
-                  ? "✓"
-                  : tm.status === "failed"
-                    ? "✗"
+                : tm.status === "failed"
+                  ? "✗"
+                  : tm.status === "init"
+                    ? "~"
                     : "○";
             const model = tm.model ? ` [${tm.model}]` : "";
             const taskLabel = tm.currentTask ? ` · ${tm.currentTask}` : "";
@@ -345,7 +345,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
       const force = args.some((arg) => arg.toLowerCase() === "force");
       if (!teamIdArg) {
         chatLog.addSystem("Usage: /team remove <teamId|teamName> [force]");
-        chatLog.addSystem("This removes the team, tasks, mailbox, and tmux session.");
+        chatLog.addSystem("This removes the team, tasks, and tmux session.");
         return;
       }
       try {
@@ -420,12 +420,12 @@ export function createCommandHandlers(context: CommandHandlerContext) {
           ...selectedTeam.teammates.map((tm) => {
             const taskLabel = tm.currentTask ? ` · ${tm.currentTask}` : "";
             const statusIcon =
-              tm.status === "active"
+              tm.status === "working"
                 ? "●"
-                : tm.status === "completed"
-                  ? "✓"
-                  : tm.status === "failed"
-                    ? "✗"
+                : tm.status === "failed"
+                  ? "✗"
+                  : tm.status === "init"
+                    ? "~"
                     : "○";
 
             return {

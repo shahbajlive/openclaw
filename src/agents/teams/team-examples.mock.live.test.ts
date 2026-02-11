@@ -6,6 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.js";
 import type { Task } from "./types.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
+import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 
 let addTask: typeof import("./task-list.js").addTask;
 let listTasks: typeof import("./task-list.js").listTasks;
@@ -24,10 +25,13 @@ let runChoreCheckNow: typeof import("./chore-watch.js").runChoreCheckNow;
 let tempRoot = "";
 let graphPath = "";
 let historyPath = "";
+let graphArtifactsDir = "";
 let testBasePath = "";
 const previousEnv = {
   configPath: process.env.OPENCLAW_CONFIG_PATH,
   stateDir: process.env.OPENCLAW_STATE_DIR,
+  graphTrace: process.env.OPENCLAW_TEAM_GRAPH_TRACE,
+  graphTraceDir: process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR,
 };
 
 vi.mock("./team-registry.store.js", () => ({
@@ -51,6 +55,9 @@ const RESERVED_ORCHESTRATION_TITLES = new Set([
   "lead_review",
   "qn_request",
   "review_question",
+  "spot_check",
+  "pr_review",
+  "pr_revision_request",
   "broadcast_answer",
 ]);
 
@@ -249,8 +256,16 @@ describeLive("team examples (mock live)", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     testBasePath = path.join(stateDir, "teams");
     fs.mkdirSync(testBasePath, { recursive: true });
-    graphPath = path.join(process.cwd(), "test-graph.md");
-    historyPath = path.join(process.cwd(), "test-graph-history.md");
+    graphArtifactsDir = path.join(
+      process.cwd(),
+      ".artifacts",
+      "team-graphs",
+      "team-examples-mock-live",
+    );
+    fs.rmSync(graphArtifactsDir, { recursive: true, force: true });
+    fs.mkdirSync(graphArtifactsDir, { recursive: true });
+    graphPath = path.join(graphArtifactsDir, "test-graph-team-examples-mock.md");
+    historyPath = path.join(graphArtifactsDir, "test-graph-history-team-examples-mock.md");
     await fsp.writeFile(graphPath, "# Task Graph (Mock Team Examples)\n\n");
     await fsp.writeFile(historyPath, "# Task Graph History (Mock Team Examples)\n\n");
 
@@ -271,6 +286,8 @@ describeLive("team examples (mock live)", () => {
     const configPath = path.join(tempRoot, "openclaw.json");
     await fsp.writeFile(configPath, `${JSON.stringify(nextCfg, null, 2)}\n`);
     process.env.OPENCLAW_CONFIG_PATH = configPath;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = "1";
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = graphArtifactsDir;
 
     ({ addTask, listTasks, updateTask, claimTask } = await import("./task-list.js"));
     ({
@@ -289,13 +306,16 @@ describeLive("team examples (mock live)", () => {
   });
 
   afterAll(() => {
+    generateTeamTaskGraphDashboard();
     process.env.OPENCLAW_CONFIG_PATH = previousEnv.configPath;
     process.env.OPENCLAW_STATE_DIR = previousEnv.stateDir;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = previousEnv.graphTrace;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = previousEnv.graphTraceDir;
     const keepArtifacts = isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEAM_KEEP_ARTIFACTS);
     if (!keepArtifacts && tempRoot && fs.existsSync(tempRoot)) {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 300_000);
 
   it("covers sequential headcount", async () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "seq-headcount", size: 10 });
@@ -1339,6 +1359,296 @@ describeLive("team examples (mock live)", () => {
       teamId: team.teamId,
       label: "breakpoint-complete",
     });
+  });
+
+  it("covers mega parallel review loop", async () => {
+    const { team, teammates } = createTeamWithTeammates({ teamName: "mega-parallel", size: 8 });
+    const leadAnswer = createTaskAnswerTool({ agentSessionKey: team.leadSessionKey });
+    const questionToolIntegrator = createTaskQuestionTool({
+      agentSessionKey: teammates[2]!.sessionKey,
+    });
+    const questionToolOwner = createTaskQuestionTool({
+      agentSessionKey: teammates[1]!.sessionKey,
+    });
+
+    const foundation = addScenarioTask(team.teamId, {
+      title: "foundation",
+      description: "base decision",
+      assignTo: teammates[0]!.id,
+    });
+    const analysis = addScenarioTask(team.teamId, {
+      title: "analysis",
+      description: "depends on foundation",
+      assignTo: teammates[1]!.id,
+      dependsOn: [foundation.taskId],
+    });
+    const fan2 = addScenarioTask(team.teamId, {
+      title: "fan-2",
+      description: "parallel stream",
+      assignTo: teammates[3]!.id,
+    });
+    const fan3 = addScenarioTask(team.teamId, {
+      title: "fan-3",
+      description: "parallel stream",
+      assignTo: teammates[4]!.id,
+    });
+    const pipeline1 = addScenarioTask(team.teamId, {
+      title: "pipeline-1",
+      description: "stage 1",
+      assignTo: teammates[5]!.id,
+      dependsOn: [foundation.taskId],
+    });
+    const pipeline2 = addScenarioTask(team.teamId, {
+      title: "pipeline-2",
+      description: "stage 2",
+      assignTo: teammates[6]!.id,
+      dependsOn: [pipeline1.taskId],
+    });
+    const integrationPrep = addScenarioTask(team.teamId, {
+      title: "integration-prep",
+      description: "needs analysis details",
+      assignTo: teammates[2]!.id,
+      dependsOn: [analysis.taskId],
+    });
+    const integration = addScenarioTask(team.teamId, {
+      title: "integration",
+      description: "merge all streams",
+      assignTo: teammates[2]!.id,
+      dependsOn: [integrationPrep.taskId, fan2.taskId, fan3.taskId, pipeline2.taskId],
+    });
+    const spotCheck = addScenarioTask(team.teamId, {
+      title: "spot_check",
+      description: "self correction check",
+      assignTo: teammates[6]!.id,
+      dependsOn: [pipeline2.taskId],
+      metadata: { source: "chore" },
+    });
+    const risky = addScenarioTask(team.teamId, {
+      title: "risky-track",
+      description: "force chore escalation",
+      assignTo: teammates[6]!.id,
+    });
+    const submission = addScenarioTask(team.teamId, {
+      title: "submission",
+      description: "prepare PR submission",
+      assignTo: teammates[7]!.id,
+      dependsOn: [integration.taskId, spotCheck.taskId],
+    });
+    const prReview = addScenarioTask(team.teamId, {
+      title: "pr_review",
+      description: "review submitted branch",
+      assignTo: teammates[5]!.id,
+      dependsOn: [submission.taskId],
+      metadata: { source: "pr" },
+    });
+    const finalDelivery = addScenarioTask(team.teamId, {
+      title: "final-delivery",
+      description: "deliver after review approval",
+      assignTo: teammates[7]!.id,
+      dependsOn: [prReview.taskId],
+    });
+
+    writeGraphSnapshot({ graphPath, historyPath, teamId: team.teamId, label: "mega-initial" });
+
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: foundation,
+      sessionKey: teammates[0]!.sessionKey,
+      summary: "foundation-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: analysis,
+      sessionKey: teammates[1]!.sessionKey,
+      summary: "analysis-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: fan2,
+      sessionKey: teammates[3]!.sessionKey,
+      summary: "fan2-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: fan3,
+      sessionKey: teammates[4]!.sessionKey,
+      summary: "fan3-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: pipeline1,
+      sessionKey: teammates[5]!.sessionKey,
+      summary: "pipeline1-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: pipeline2,
+      sessionKey: teammates[6]!.sessionKey,
+      summary: "pipeline2-complete",
+    });
+
+    claimForSession({
+      teamId: team.teamId,
+      taskId: integrationPrep.taskId,
+      sessionKey: teammates[2]!.sessionKey,
+    });
+    const qnRequest = await questionToolIntegrator.execute("ask-analysis", {
+      teamId: team.teamId,
+      taskId: integrationPrep.taskId,
+      dependencyTaskId: analysis.taskId,
+      questionText: "Clarify analysis conclusion",
+    });
+    const qnRequestId = resultTaskId(qnRequest);
+
+    claimForSession({
+      teamId: team.teamId,
+      taskId: qnRequestId,
+      sessionKey: teammates[1]!.sessionKey,
+    });
+    const qnRequestUp = await questionToolOwner.execute("ask-foundation", {
+      teamId: team.teamId,
+      taskId: qnRequestId,
+      dependencyTaskId: foundation.taskId,
+      questionText: "Need upstream detail from foundation",
+    });
+    const qnRequestUpId = resultTaskId(qnRequestUp);
+
+    writeGraphSnapshot({
+      graphPath,
+      historyPath,
+      teamId: team.teamId,
+      label: "mega-qn-chain-created",
+    });
+
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: listTasks(team.teamId, { includeCompleted: true }).tasks.find(
+        (task) => task.taskId === qnRequestUpId,
+      )!,
+      sessionKey: teammates[0]!.sessionKey,
+      summary: "upstream-answer",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: listTasks(team.teamId, { includeCompleted: true }).tasks.find(
+        (task) => task.taskId === qnRequestId,
+      )!,
+      sessionKey: teammates[1]!.sessionKey,
+      summary: "dependency-answer",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: listTasks(team.teamId, { includeCompleted: true }).tasks.find(
+        (task) => task.taskId === integrationPrep.taskId,
+      )!,
+      sessionKey: teammates[2]!.sessionKey,
+      summary: "integration-prep-complete",
+    });
+
+    updateTask(team.teamId, risky.taskId, { status: "blocked" });
+    updateTeammateStatus(team.teamId, teammates[6]!.id, "working");
+    const choreResult = runChoreCheckNow(team.teamId);
+    expect(choreResult.violations.length).toBeGreaterThan(0);
+
+    const escalated = listTasks(team.teamId, { includeCompleted: true }).tasks;
+    const leadReview = escalated.find(
+      (task) => task.title === "lead_review" && task.metadata?.source === "chore",
+    );
+    const reviewQuestion = escalated.find(
+      (task) => task.title === "review_question" && task.metadata?.source === "chore",
+    );
+    expect(leadReview).toBeTruthy();
+    expect(reviewQuestion).toBeTruthy();
+    updateTask(team.teamId, submission.taskId, {
+      dependsOn: [integration.taskId, spotCheck.taskId, leadReview!.taskId],
+    });
+
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: reviewQuestion!,
+      sessionKey: teammates[6]!.sessionKey,
+      summary: "review-question-answered",
+    });
+    await leadAnswer.execute("answer-lead-review", {
+      teamId: team.teamId,
+      taskId: leadReview!.taskId,
+      answer: "approved",
+    });
+
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: integration,
+      sessionKey: teammates[2]!.sessionKey,
+      summary: "integration-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: spotCheck,
+      sessionKey: teammates[6]!.sessionKey,
+      summary: "spot-check-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: submission,
+      sessionKey: teammates[7]!.sessionKey,
+      summary: "submission-complete",
+    });
+
+    const prRevision = addScenarioTask(team.teamId, {
+      title: "pr_revision_request",
+      description: "review requested one revision",
+      assignTo: teammates[7]!.id,
+      dependsOn: [submission.taskId],
+      metadata: { source: "pr_review", context_task_id: submission.taskId },
+    });
+    updateTask(team.teamId, prReview.taskId, {
+      dependsOn: [submission.taskId, prRevision.taskId],
+    });
+
+    const blockedPrReview = listTasks(team.teamId, { includeCompleted: true }).tasks.find(
+      (task) => task.taskId === prReview.taskId,
+    );
+    expect(blockedPrReview?.status).toBe("blocked");
+
+    writeGraphSnapshot({
+      graphPath,
+      historyPath,
+      teamId: team.teamId,
+      label: "mega-pr-revision-loop",
+    });
+
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: prRevision,
+      sessionKey: teammates[7]!.sessionKey,
+      summary: "revision-complete",
+    });
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: prReview,
+      sessionKey: teammates[5]!.sessionKey,
+      summary: "review-approved",
+    });
+
+    const finalPending = listTasks(team.teamId, { includeCompleted: true }).tasks.find(
+      (task) => task.taskId === finalDelivery.taskId,
+    );
+    expectPendingOrClaimed(finalPending?.status);
+    await claimAndComplete({
+      teamId: team.teamId,
+      task: finalDelivery,
+      sessionKey: teammates[7]!.sessionKey,
+      summary: "final-delivered",
+    });
+
+    const finalTasks = listTasks(team.teamId, { includeCompleted: true }).tasks;
+    expect(finalTasks.find((task) => task.taskId === finalDelivery.taskId)?.status).toBe(
+      "completed",
+    );
+    expect(finalTasks.find((task) => task.taskId === prReview.taskId)?.status).toBe("completed");
+    expect(finalTasks.find((task) => task.taskId === prRevision.taskId)?.status).toBe("completed");
+
+    writeGraphSnapshot({ graphPath, historyPath, teamId: team.teamId, label: "mega-complete" });
   });
 
   it("covers chore watcher violation escalation", async () => {

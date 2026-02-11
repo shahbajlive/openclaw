@@ -18,6 +18,7 @@ import {
   updateTeammateStatus,
   updateTeamTmuxPanes,
 } from "../../../team-registry.js";
+import { ensureTeammateWorktree } from "../../../worktree.js";
 
 const TeammateSpawnSchema = Type.Object({
   teamId: Type.String(),
@@ -132,12 +133,14 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
         .replace(/[^a-z0-9]+/g, "-")
         .slice(0, 20);
       const sessionKey = `agent:${teamAgentId}:teammate:${roleSlug}-${teammateId.slice(0, 8)}`;
+      const worktree = await ensureTeammateWorktree({ team, teammateId });
 
       // 9. Create Teammate record
       const teammate: Teammate = {
         teammateId,
         role,
         sessionKey,
+        workspaceDir: worktree.workspaceDir,
         status: "init",
         model: resolvedModel,
         requirePlanApproval,
@@ -196,6 +199,7 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
             sessionKey,
             lane: AGENT_LANE_TEAM,
             extraSystemPrompt: childSystemPrompt,
+            workspaceDir: worktree.workspaceDir,
             deliver: false,
             timeout: timeout && timeout > 0 ? timeout : undefined,
             label: role,

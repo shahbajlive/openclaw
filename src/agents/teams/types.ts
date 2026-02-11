@@ -37,6 +37,7 @@ export type Team = {
   creatorSessionKey?: string; // session that created the team (may be outside the team)
   teamAgentId: string; // agent id backing the team workspace + sessions
   leadSessionKey: string;
+  leadWorkspaceDir?: string;
   status: TeamStatus;
   persistent: boolean; // false for auto-cleanup teams, true for persistent teams
   boundSessionKey?: string; // gateway session key for non-persistent teams (used for cleanup)
@@ -67,6 +68,7 @@ export type Teammate = {
   teammateId: string; // UUID
   role: string;
   sessionKey: string;
+  workspaceDir?: string;
   status: TeammateStatus;
   model?: string; // cross-model support
   isChore?: boolean;

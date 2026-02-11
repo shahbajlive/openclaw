@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { GatewayRequestHandlers } from "./types.js";
-import { listAgentIds } from "../../agents/agent-scope.js";
+import { listAgentIds, resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
+import { resolveTeamSessionWorkspace } from "../../agents/teams/team-registry.js";
 import { agentCommand } from "../../commands/agent.js";
 import { loadConfig } from "../../config/config.js";
 import {
@@ -16,6 +18,7 @@ import {
   resolveAgentOutboundTarget,
 } from "../../infra/outbound/agent-delivery.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
+import { isTeamSessionKey } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
@@ -63,6 +66,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       replyTo?: string;
       sessionId?: string;
       sessionKey?: string;
+      workspaceDir?: string;
       thinking?: string;
       deliver?: boolean;
       attachments?: Array<{
@@ -207,6 +211,56 @@ export const agentHandlers: GatewayRequestHandlers = {
       }
     }
     let resolvedSessionId = request.sessionId?.trim() || undefined;
+    let requestedWorkspaceDir: string | undefined;
+    const requestedWorkspaceDirRaw =
+      typeof request.workspaceDir === "string" ? request.workspaceDir.trim() : "";
+    const teamSessionKey =
+      requestedSessionKey && isTeamSessionKey(requestedSessionKey)
+        ? requestedSessionKey
+        : undefined;
+    const normalizeTeamWorkspaceDir = (candidate: string): string | undefined => {
+      if (!teamSessionKey) {
+        return undefined;
+      }
+      const teamWorkspaceRoot = path.resolve(
+        resolveAgentWorkspaceDir(cfg, resolveAgentIdFromSessionKey(teamSessionKey), teamSessionKey),
+      );
+      const resolved = path.resolve(candidate);
+      const isWithinTeamWorkspace =
+        resolved === teamWorkspaceRoot || resolved.startsWith(`${teamWorkspaceRoot}${path.sep}`);
+      return isWithinTeamWorkspace ? resolved : undefined;
+    };
+    if (requestedWorkspaceDirRaw) {
+      if (!teamSessionKey) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "invalid agent params: workspaceDir is only allowed for team sessions",
+          ),
+        );
+        return;
+      }
+      const workspaceDir = normalizeTeamWorkspaceDir(requestedWorkspaceDirRaw);
+      if (!workspaceDir) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "invalid agent params: workspaceDir must be inside the team workspace root",
+          ),
+        );
+        return;
+      }
+      requestedWorkspaceDir = workspaceDir;
+    } else if (teamSessionKey) {
+      const inferred = resolveTeamSessionWorkspace(teamSessionKey);
+      if (typeof inferred === "string" && inferred.trim()) {
+        requestedWorkspaceDir = normalizeTeamWorkspaceDir(inferred.trim());
+      }
+    }
     let sessionEntry: SessionEntry | undefined;
     let bestEffortDeliver = false;
     let cfgForAgent: ReturnType<typeof loadConfig> | undefined;
@@ -368,6 +422,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         to: resolvedTo,
         sessionId: resolvedSessionId,
         sessionKey: requestedSessionKey,
+        workspaceDir: requestedWorkspaceDir,
         thinking: request.thinking,
         deliver,
         deliveryTargetMode,

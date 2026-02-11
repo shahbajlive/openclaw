@@ -1,5 +1,6 @@
 .idea
 .opencode
+.artifacts
 pnpm-lock.yaml
 rough.md
 ~/

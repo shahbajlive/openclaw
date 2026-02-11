@@ -5,6 +5,7 @@ import type { Task, TaskPriority, TaskStatus, TaskSummary } from "./types.js";
 import { loadConfig } from "../../config/config.js";
 import { loadJsonFile, saveJsonFile } from "../../infra/json-file.js";
 import { derivePrimaryContextTaskIdForNewTask } from "./task-context.js";
+import { recordTeamTaskGraphFrame } from "./task-graph-trace.js";
 import { withTaskClass } from "./task-taxonomy.js";
 import { resolveTeamBasePath } from "./team-registry.store.js";
 
@@ -102,6 +103,11 @@ export function addTask(
 
     tasks.set(taskId, task);
     saveTasks(teamId, tasks);
+    recordTeamTaskGraphFrame({
+      teamId,
+      tasks: tasks.values(),
+      event: `task_added:${taskId.slice(0, 8)}`,
+    });
     scheduleLeadStatusRecompute(teamId);
     scheduleIdleClaim(teamId);
 
@@ -173,6 +179,11 @@ export function claimTask(
     targetTask.claimedAt = Date.now();
 
     saveTasks(teamId, tasks);
+    recordTeamTaskGraphFrame({
+      teamId,
+      tasks: tasks.values(),
+      event: `task_claimed:${targetTask.taskId.slice(0, 8)}`,
+    });
     scheduleLeadStatusRecompute(teamId);
 
     return { success: true, task: targetTask };
@@ -217,6 +228,11 @@ function completeTaskInternal(
     const unblockedTasks = onTaskComplete(params.taskId, tasks);
 
     saveTasks(teamId, tasks);
+    recordTeamTaskGraphFrame({
+      teamId,
+      tasks: tasks.values(),
+      event: `task_${newStatus}:${params.taskId.slice(0, 8)}`,
+    });
     scheduleLeadStatusRecompute(teamId);
     if (unblockedTasks.length > 0) {
       scheduleIdleClaim(teamId);
@@ -431,6 +447,11 @@ export function updateTask(
     }
 
     saveTasks(teamId, tasks);
+    recordTeamTaskGraphFrame({
+      teamId,
+      tasks: tasks.values(),
+      event: `task_updated:${taskId.slice(0, 8)}`,
+    });
     scheduleLeadStatusRecompute(teamId);
     scheduleIdleClaim(teamId);
 
@@ -457,6 +478,11 @@ export function removeTask(teamId: string, taskId: string): boolean {
 
     tasks.delete(taskId);
     saveTasks(teamId, tasks);
+    recordTeamTaskGraphFrame({
+      teamId,
+      tasks: tasks.values(),
+      event: `task_removed:${taskId.slice(0, 8)}`,
+    });
     scheduleLeadStatusRecompute(teamId);
 
     return true;

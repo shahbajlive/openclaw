@@ -6,6 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.js";
 import type { Task } from "./types.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
+import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 
 let addTask: typeof import("./task-list.js").addTask;
 let listTasks: typeof import("./task-list.js").listTasks;
@@ -23,10 +24,13 @@ let createTaskQuestionTool: typeof import("./tools/index.js").createTaskQuestion
 let tempRoot = "";
 let graphPath = "";
 let historyPath = "";
+let graphArtifactsDir = "";
 let testBasePath = "";
 const previousEnv = {
   configPath: process.env.OPENCLAW_CONFIG_PATH,
   stateDir: process.env.OPENCLAW_STATE_DIR,
+  graphTrace: process.env.OPENCLAW_TEAM_GRAPH_TRACE,
+  graphTraceDir: process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR,
 };
 
 vi.mock("./team-registry.store.js", () => ({
@@ -161,8 +165,16 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     testBasePath = path.join(stateDir, "teams");
     fs.mkdirSync(testBasePath, { recursive: true });
-    graphPath = path.join(process.cwd(), "test-graph.md");
-    historyPath = path.join(process.cwd(), "test-graph-history.md");
+    graphArtifactsDir = path.join(
+      process.cwd(),
+      ".artifacts",
+      "team-graphs",
+      "team-orchestration-mock-live",
+    );
+    fs.rmSync(graphArtifactsDir, { recursive: true, force: true });
+    fs.mkdirSync(graphArtifactsDir, { recursive: true });
+    graphPath = path.join(graphArtifactsDir, "test-graph-team-orchestration-mock.md");
+    historyPath = path.join(graphArtifactsDir, "test-graph-history-team-orchestration-mock.md");
     await fsp.writeFile(graphPath, "# Task Graph (Mock Live Test)\n\n");
     await fsp.writeFile(historyPath, "# Task Graph History (Mock Live Test)\n\n");
 
@@ -183,6 +195,8 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
     const configPath = path.join(tempRoot, "openclaw.json");
     await fsp.writeFile(configPath, `${JSON.stringify(nextCfg, null, 2)}\n`);
     process.env.OPENCLAW_CONFIG_PATH = configPath;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = "1";
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = graphArtifactsDir;
 
     ({ addTask, listTasks, claimTask, updateTask } = await import("./task-list.js"));
     ({
@@ -200,13 +214,16 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
   });
 
   afterAll(() => {
+    generateTeamTaskGraphDashboard();
     process.env.OPENCLAW_CONFIG_PATH = previousEnv.configPath;
     process.env.OPENCLAW_STATE_DIR = previousEnv.stateDir;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = previousEnv.graphTrace;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = previousEnv.graphTraceDir;
     const keepArtifacts = isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEAM_KEEP_ARTIFACTS);
     if (!keepArtifacts && tempRoot && fs.existsSync(tempRoot)) {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 180_000);
 
   it("routes deterministic questions + lead review with correct state transitions", async () => {
     const team = createTeam({

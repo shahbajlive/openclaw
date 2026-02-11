@@ -10,6 +10,7 @@ import { loadConfig } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
 import { getApiKeyForModel, requireApiKey } from "../model-auth.js";
+import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 import { addTask, listTasks, claimTask, updateTask } from "./task-list.js";
 import {
   addTeammate,
@@ -36,6 +37,7 @@ vi.mock("../../gateway/call.js", () => ({
 let tempRoot = "";
 let graphPath = "";
 let historyPath = "";
+let graphArtifactsDir = "";
 let testBasePath = "";
 let tempAgentDir = "";
 const previousEnv = {
@@ -43,6 +45,8 @@ const previousEnv = {
   stateDir: process.env.OPENCLAW_STATE_DIR,
   agentDir: process.env.OPENCLAW_AGENT_DIR,
   piAgentDir: process.env.PI_CODING_AGENT_DIR,
+  graphTrace: process.env.OPENCLAW_TEAM_GRAPH_TRACE,
+  graphTraceDir: process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR,
 };
 
 type ParsedModelRef = { provider: string; id: string };
@@ -253,8 +257,16 @@ describeLive("team orchestration real model (live)", () => {
       await fsp.copyFile(agentTeamPath, path.join(workspaceDir, "AGENT.team.md"));
     }
 
-    graphPath = path.join(process.cwd(), "test-graph.md");
-    historyPath = path.join(process.cwd(), "test-graph-history.md");
+    graphArtifactsDir = path.join(
+      process.cwd(),
+      ".artifacts",
+      "team-graphs",
+      "team-orchestration-real-live",
+    );
+    fs.rmSync(graphArtifactsDir, { recursive: true, force: true });
+    fs.mkdirSync(graphArtifactsDir, { recursive: true });
+    graphPath = path.join(graphArtifactsDir, "test-graph-team-orchestration-real.md");
+    historyPath = path.join(graphArtifactsDir, "test-graph-history-team-orchestration-real.md");
     await fsp.writeFile(graphPath, "# Task Graph (Real Live Test)\n\n");
     await fsp.writeFile(historyPath, "# Task Graph History (Real Live Test)\n\n");
 
@@ -294,20 +306,25 @@ describeLive("team orchestration real model (live)", () => {
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_AGENT_DIR = tempAgentDir;
     process.env.PI_CODING_AGENT_DIR = tempAgentDir;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = "1";
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = graphArtifactsDir;
 
     resetTeamRegistryForTests();
   });
 
   afterAll(() => {
+    generateTeamTaskGraphDashboard();
     process.env.OPENCLAW_CONFIG_PATH = previousEnv.configPath;
     process.env.OPENCLAW_STATE_DIR = previousEnv.stateDir;
     process.env.OPENCLAW_AGENT_DIR = previousEnv.agentDir;
     process.env.PI_CODING_AGENT_DIR = previousEnv.piAgentDir;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = previousEnv.graphTrace;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = previousEnv.graphTraceDir;
     const keepArtifacts = isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEAM_KEEP_ARTIFACTS);
     if (!keepArtifacts && tempRoot && fs.existsSync(tempRoot)) {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 180_000);
 
   it("runs deterministic question/review flow with real model answers", async () => {
     const modelRef = parseModelRef(MODEL as string);

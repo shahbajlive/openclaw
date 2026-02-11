@@ -17,9 +17,12 @@ import {
   registerLeadRun,
   getTeam,
   cleanupTeam,
+  setLeadWorkspace,
+  setTeammateWorkspace,
   updateLeadSessionKey,
   updateTeamTmuxPanes,
 } from "../../team-registry.js";
+import { ensureLeadWorktree, ensureTeammateWorktree } from "../../worktree.js";
 
 const TeamCreateSchema = Type.Object({
   teamName: Type.String(),
@@ -112,6 +115,15 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
         const leadSessionKey = `agent:${team.teamAgentId}:lead`;
         updateLeadSessionKey(team.teamId, leadSessionKey, !persistent ? leadSessionKey : undefined);
         team.leadSessionKey = leadSessionKey;
+        const leadWorktree = await ensureLeadWorktree(team);
+        setLeadWorkspace(team.teamId, leadWorktree.workspaceDir);
+        for (const teammate of Object.values(team.teammates)) {
+          const ensured = await ensureTeammateWorktree({
+            team,
+            teammateId: teammate.teammateId,
+          });
+          setTeammateWorkspace(team.teamId, teammate.teammateId, ensured.workspaceDir);
+        }
 
         const configuredBootstrapMode = cfg.gateway?.teams?.bootstrapMode ?? "minimal";
         const bootstrapMode =
@@ -182,6 +194,7 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
               sessionKey: leadSessionKey,
               lane: AGENT_LANE_TEAM,
               extraSystemPrompt: leadPrompt,
+              workspaceDir: leadWorktree.workspaceDir,
               deliver: false,
               idempotencyKey: leadRunId,
               label: "team-lead",

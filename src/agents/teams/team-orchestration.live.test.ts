@@ -5,12 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../config/types.js";
+import type { Task } from "./types.js";
 import { loadConfig } from "../../config/config.js";
 import { GatewayClient } from "../../gateway/client.js";
 import { startGatewayServer } from "../../gateway/server.js";
 import { getFreePort } from "../../gateway/test-helpers.server.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
+import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 import { listTasks } from "./task-list.js";
 import { getTeam, listCreatorTeams } from "./team-registry.js";
 import { createTeamCleanupTool } from "./tools/index.js";
@@ -106,6 +108,57 @@ function filterExamples(examples: TeamExample[]): TeamExample[] {
   return examples.filter((example) => allow.has(example.name.toLowerCase()));
 }
 
+function renderTaskGraph(tasks: Task[]): string[] {
+  const lines: string[] = [];
+  lines.push("```mermaid");
+  lines.push("graph TD");
+  for (const task of tasks) {
+    const shortId = task.taskId.slice(0, 8);
+    const safeTitle = task.title.replace(/\"/g, "'");
+    lines.push(`  t_${shortId}[\"${safeTitle} (${task.status})\"]`);
+  }
+  for (const task of tasks) {
+    const shortId = task.taskId.slice(0, 8);
+    for (const dep of task.dependsOn) {
+      lines.push(`  t_${dep.slice(0, 8)} --> t_${shortId}`);
+    }
+  }
+  lines.push("```");
+  return lines;
+}
+
+function writeGraphSnapshot(params: {
+  graphPath: string;
+  historyPath: string;
+  teamId: string;
+  label: string;
+}) {
+  let tasks: Task[] = [];
+  try {
+    ({ tasks } = listTasks(params.teamId, { includeCompleted: true }));
+  } catch {
+    return;
+  }
+  if (tasks.length === 0) {
+    return;
+  }
+  const graphLines = renderTaskGraph(tasks);
+  const now = new Date().toISOString();
+  const liveLines = [
+    "# Task Graph (Live Team Orchestration)",
+    "",
+    `Last updated: ${now}`,
+    `Snapshot: ${params.label}`,
+    "",
+    ...graphLines,
+    "",
+  ];
+  fs.writeFileSync(params.graphPath, `${liveLines.join("\n")}\n`);
+
+  const historyLines = [`## ${params.label} (${now})`, ...graphLines, ""];
+  fs.appendFileSync(params.historyPath, `${historyLines.join("\n")}\n`);
+}
+
 async function waitForTeamCreated(params: {
   creatorSessionKey: string;
   sinceMs: number;
@@ -166,6 +219,9 @@ describeCases("team orchestration (live)", () => {
   let client: GatewayClient | undefined;
   let server: Awaited<ReturnType<typeof startGatewayServer>> | undefined;
   let examples: TeamExample[] = [];
+  let graphArtifactsDir = "";
+  let graphPath = "";
+  let historyPath = "";
   const previousEnv = {
     configPath: process.env.OPENCLAW_CONFIG_PATH,
     stateDir: process.env.OPENCLAW_STATE_DIR,
@@ -174,6 +230,8 @@ describeCases("team orchestration (live)", () => {
     skipCron: process.env.OPENCLAW_SKIP_CRON,
     skipCanvas: process.env.OPENCLAW_SKIP_CANVAS_HOST,
     skipBrowser: process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER,
+    graphTrace: process.env.OPENCLAW_TEAM_GRAPH_TRACE,
+    graphTraceDir: process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR,
   };
 
   beforeAll(async () => {
@@ -188,6 +246,20 @@ describeCases("team orchestration (live)", () => {
     process.env.OPENCLAW_SKIP_CRON = "1";
     process.env.OPENCLAW_SKIP_CANVAS_HOST = "1";
     process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER = "1";
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = "1";
+    graphArtifactsDir = path.join(
+      process.cwd(),
+      ".artifacts",
+      "team-graphs",
+      "team-orchestration-live",
+    );
+    fs.rmSync(graphArtifactsDir, { recursive: true, force: true });
+    fs.mkdirSync(graphArtifactsDir, { recursive: true });
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = graphArtifactsDir;
+    graphPath = path.join(graphArtifactsDir, "test-graph-team-orchestration-live.md");
+    historyPath = path.join(graphArtifactsDir, "test-graph-history-team-orchestration-live.md");
+    await fsp.writeFile(graphPath, "# Task Graph (Live Team Orchestration)\n\n");
+    await fsp.writeFile(historyPath, "# Task Graph History (Live Team Orchestration)\n\n");
 
     const cfg = loadConfig();
     const nextCfg: OpenClawConfig = {
@@ -224,6 +296,7 @@ describeCases("team orchestration (live)", () => {
   }, 60_000);
 
   afterAll(async () => {
+    generateTeamTaskGraphDashboard();
     client?.stop();
     await server?.close();
     process.env.OPENCLAW_CONFIG_PATH = previousEnv.configPath;
@@ -233,7 +306,9 @@ describeCases("team orchestration (live)", () => {
     process.env.OPENCLAW_SKIP_CRON = previousEnv.skipCron;
     process.env.OPENCLAW_SKIP_CANVAS_HOST = previousEnv.skipCanvas;
     process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER = previousEnv.skipBrowser;
-  });
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE = previousEnv.graphTrace;
+    process.env.OPENCLAW_TEAM_GRAPH_TRACE_DIR = previousEnv.graphTraceDir;
+  }, 180_000);
 
   for (const example of examplesAtLoadFiltered) {
     it(
@@ -268,6 +343,12 @@ describeCases("team orchestration (live)", () => {
         if (!team) {
           return;
         }
+        writeGraphSnapshot({
+          graphPath,
+          historyPath,
+          teamId: team.teamId,
+          label: `${example.name} - created`,
+        });
 
         const idleResult = await waitForTeamIdle({
           teamId: team.teamId,
@@ -279,6 +360,12 @@ describeCases("team orchestration (live)", () => {
             `team did not reach idle (${idleResult.reason}) pending=${summary.pending} blocked=${summary.blocked} inProgress=${summary.inProgress}`,
           );
         }
+        writeGraphSnapshot({
+          graphPath,
+          historyPath,
+          teamId: team.teamId,
+          label: `${example.name} - idle`,
+        });
 
         const cleanupTool = createTeamCleanupTool({ agentSessionKey: sessionKey });
         await cleanupTool.execute("live-cleanup", {

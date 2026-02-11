@@ -391,6 +391,34 @@ export function updateTeammateStatus(
   }
 }
 
+export function setTeammateWorkspace(
+  teamId: string,
+  teammateId: string,
+  workspaceDir: string,
+): void {
+  const team = activeTeams.get(teamId);
+  if (!team) {
+    return;
+  }
+  const teammate = team.teammates[teammateId];
+  if (!teammate) {
+    return;
+  }
+  teammate.workspaceDir = workspaceDir;
+  team.updatedAt = Date.now();
+  persistTeam(team);
+}
+
+export function setLeadWorkspace(teamId: string, workspaceDir: string): void {
+  const team = activeTeams.get(teamId);
+  if (!team) {
+    return;
+  }
+  team.leadWorkspaceDir = workspaceDir;
+  team.updatedAt = Date.now();
+  persistTeam(team);
+}
+
 /**
  * Update a team's status.
  */
@@ -681,6 +709,17 @@ export function resolveCallerTeamContext(
   }
 
   return null;
+}
+
+export function resolveTeamSessionWorkspace(sessionKey: string): string | undefined {
+  const context = resolveCallerTeamContext(sessionKey);
+  if (!context) {
+    return undefined;
+  }
+  if (context.isLead) {
+    return context.team.leadWorkspaceDir;
+  }
+  return context.teammate?.workspaceDir;
 }
 
 /**

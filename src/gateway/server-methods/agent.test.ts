@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayRequestContext } from "./types.js";
 import { agentHandlers } from "./agent.js";
 
@@ -7,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   updateSessionStore: vi.fn(),
   agentCommand: vi.fn(),
   registerAgentRunContext: vi.fn(),
+  resolveTeamSessionWorkspace: vi.fn(),
   loadConfigReturn: {} as Record<string, unknown>,
 }));
 
@@ -18,10 +20,17 @@ vi.mock("../../config/sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../config/sessions.js")>(
     "../../config/sessions.js",
   );
+  const resolveAgentIdFromSessionKey = (sessionKey?: string) => {
+    if (typeof sessionKey !== "string") {
+      return "main";
+    }
+    const match = /^agent:([^:]+)/.exec(sessionKey.trim());
+    return match?.[1] || "main";
+  };
   return {
     ...actual,
     updateSessionStore: mocks.updateSessionStore,
-    resolveAgentIdFromSessionKey: () => "main",
+    resolveAgentIdFromSessionKey,
     resolveExplicitAgentSessionKey: () => undefined,
     resolveAgentMainSessionKey: () => "agent:main:main",
   };
@@ -37,6 +46,11 @@ vi.mock("../../config/config.js", () => ({
 
 vi.mock("../../agents/agent-scope.js", () => ({
   listAgentIds: () => ["main"],
+  resolveAgentWorkspaceDir: () => "/tmp/team-root",
+}));
+
+vi.mock("../../agents/teams/team-registry.js", () => ({
+  resolveTeamSessionWorkspace: mocks.resolveTeamSessionWorkspace,
 }));
 
 vi.mock("../../infra/agent-events.js", () => ({
@@ -66,6 +80,12 @@ const makeContext = (): GatewayRequestContext =>
   }) as unknown as GatewayRequestContext;
 
 describe("gateway agent handler", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveTeamSessionWorkspace.mockReset();
+    mocks.loadConfigReturn = {};
+  });
+
   it("preserves cliSessionIds from existing session entry", async () => {
     const existingCliSessionIds = { "claude-cli": "abc-123-def" };
     const existingClaudeCliSessionId = "abc-123-def";
@@ -212,5 +232,71 @@ describe("gateway agent handler", () => {
     // Should be undefined, not cause an error
     expect(capturedEntry?.cliSessionIds).toBeUndefined();
     expect(capturedEntry?.claudeCliSessionId).toBeUndefined();
+  });
+
+  it("rejects workspaceDir for non-team sessions", async () => {
+    mocks.loadSessionEntry.mockReturnValue({
+      cfg: {},
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "existing-session-id", updatedAt: Date.now() },
+      canonicalKey: "agent:main:main",
+    });
+    const respond = vi.fn();
+
+    await agentHandlers.agent({
+      params: {
+        message: "test",
+        sessionKey: "agent:main:main",
+        workspaceDir: "/tmp/forbidden",
+        idempotencyKey: "test-workspace-non-team",
+      },
+      respond,
+      context: makeContext(),
+      req: { type: "req", id: "4", method: "agent" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: expect.stringContaining("workspaceDir is only allowed for team sessions"),
+      }),
+    );
+  });
+
+  it("auto-resolves workspaceDir from team session registry", async () => {
+    mocks.resolveTeamSessionWorkspace.mockReturnValue("/tmp/team-root/.worktrees/reviewer");
+    mocks.loadSessionEntry.mockReturnValue({
+      cfg: {},
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "existing-session-id", updatedAt: Date.now() },
+      canonicalKey: "agent:team-alpha:teammate:reviewer-1234",
+    });
+    mocks.updateSessionStore.mockResolvedValue(undefined);
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    const respond = vi.fn();
+    await agentHandlers.agent({
+      params: {
+        message: "test",
+        sessionKey: "agent:team-alpha:teammate:reviewer-1234",
+        idempotencyKey: "test-workspace-team",
+      },
+      respond,
+      context: makeContext(),
+      req: { type: "req", id: "5", method: "agent" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
+    const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as { workspaceDir?: string };
+    expect(callArgs.workspaceDir).toBe(path.resolve("/tmp/team-root/.worktrees/reviewer"));
   });
 });

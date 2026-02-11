@@ -95,7 +95,8 @@ export async function agentCommand(
   }
   const agentCfg = cfg.agents?.defaults;
   const sessionAgentId = agentIdOverride ?? resolveAgentIdFromSessionKey(opts.sessionKey?.trim());
-  const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, sessionAgentId, opts.sessionKey);
+  const workspaceDirRaw =
+    opts.workspaceDir?.trim() || resolveAgentWorkspaceDir(cfg, sessionAgentId, opts.sessionKey);
   const agentDir = resolveAgentDir(cfg, sessionAgentId);
   const isTeamAgent = sessionAgentId.startsWith("team-");
   const workspace = await ensureAgentWorkspace({

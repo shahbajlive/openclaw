@@ -10,6 +10,9 @@ import {
   resolveCallerTeamContext,
   resetTeamRegistryForTests,
   notifyLeadIfTeamIdle,
+  resolveTeamSessionWorkspace,
+  setLeadWorkspace,
+  setTeammateWorkspace,
   updateTeamStatus,
 } from "./team-registry.js";
 
@@ -198,6 +201,33 @@ describe("team-registry", () => {
   it("returns null for unknown session key", () => {
     const ctx = resolveCallerTeamContext("agent:main:unknown");
     expect(ctx).toBeNull();
+  });
+
+  it("resolves lead and teammate workspace from session keys", () => {
+    const team = createTeam({
+      teamName: "workspace-test",
+      leadSessionKey: "agent:team-workspace:lead",
+      config: { notifyOnUnblock: true },
+    });
+    addTeammate(team.teamId, {
+      teammateId: "tm1",
+      role: "reviewer",
+      sessionKey: "agent:team-workspace:teammate:reviewer-tm1",
+      status: "idle",
+      requirePlanApproval: false,
+      planApproved: false,
+      claimedTasks: 0,
+      completedTasks: 0,
+      createdAt: Date.now(),
+    });
+    setLeadWorkspace(team.teamId, "/tmp/lead-worktree");
+    setTeammateWorkspace(team.teamId, "tm1", "/tmp/tm1-worktree");
+
+    expect(resolveTeamSessionWorkspace("agent:team-workspace:lead")).toBe("/tmp/lead-worktree");
+    expect(resolveTeamSessionWorkspace("agent:team-workspace:teammate:reviewer-tm1")).toBe(
+      "/tmp/tm1-worktree",
+    );
+    expect(resolveTeamSessionWorkspace("agent:team-workspace:teammate:unknown")).toBeUndefined();
   });
 
   // ---- notifyLeadIfTeamIdle tests ----

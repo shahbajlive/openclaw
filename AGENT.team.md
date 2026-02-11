@@ -1,9 +1,9 @@
-# Agent Swarm - Deterministic Questions + Lead Review
+# Agent Swarm - Deterministic Questions + Self Revision + Team-Branch PR Gate
 
 Exactly three diagrams:
 
 1. State transition (teammate lifecycle)
-2. Communication flow (question, upstream, re-ask, chore halt/review)
+2. Communication flow (cross-question, spot check, lead review, PR review)
 3. Whole task graph (dependencies at a glance)
 
 ---
@@ -15,107 +15,136 @@ stateDiagram-v2
     [*] --> IDLE : poll tasks
 
     IDLE --> WORKING : system auto-claims next assigned task
-    WORKING --> COMPLETE : task_answer(answer)
+
+    %% Completion only when gate is satisfied
+    WORKING --> COMPLETE : task_submit (gate satisfied)
     COMPLETE --> IDLE : next poll
 
-    %% Deterministic interruption
-    WORKING --> IDLE : add dependency (qn_request or lead_review)
+    %% Deterministic interruption / blocking
+    WORKING --> IDLE : add dependency (qn_request / spot_check / lead_review / pr_review / pr_revision_request)
 
-    %% Answer/review tasks are normal work
-    IDLE --> WORKING : claim qn_request / review_question
+    %% Primary submission creates PR review dependency (not complete yet)
+    WORKING --> IDLE : task_submit(primary task) + create pr_review dependency (PR -> team_branch)
+
+    %% Answer/review/revision tasks are normal work
+    IDLE --> WORKING : claim qn_request / spot_check / review_question / pr_review / pr_revision_request
 ```
 
 ### State diagram semantics (leave nothing implicit)
 
 **States**
 
-* **IDLE**: teammate is not holding a task. The system **auto-claims** the next assigned pending task and delivers it.
-* **WORKING**: teammate has **claimed** a task and is producing an answer/artifact.
-* **COMPLETE**: teammate has called `task_answer(...)` on the currently claimed task.
+* **IDLE**: teammate is not holding a task. The system auto-claims the next assigned pending task and delivers it.
+* **WORKING**: teammate has claimed a task and is producing an answer/artifact.
+* **COMPLETE**: the system has marked the task done.
+
+**Single submit tool**
+
+* Use `task_submit(...)` for all task submissions.
 
 **Transitions**
 
 * `IDLE -> WORKING (system auto-claim)`
 
-  * System finds the highest-priority **pending and unblocked** task assigned to the teammate.
-  * The system claims it deterministically and sends it to the teammate.
-* `WORKING -> COMPLETE (task_answer)`
+  * System finds the highest-priority pending and unblocked task assigned to the teammate.
+  * System claims it deterministically and sends it to the teammate.
 
-  * Teammate finishes the work and calls `task_answer`.
-  * The system records the answer and marks the task done.
+* `WORKING -> COMPLETE (task_submit, gate satisfied)`
+
+  * For non-primary tasks (`qn_request`, `spot_check`, `review_question`, `pr_review`, `pr_revision_request`), submit normally completes the task.
+  * For primary tasks, completion requires internal PR merge into `team_branch`.
+
+* `WORKING -> IDLE (task_submit on primary task before merge)`
+
+  * System records submission artifact.
+  * System opens/updates PR from task branch into `team_branch`.
+  * System creates `pr_review` dependency on the primary task.
+  * Primary task remains blocked until that PR is merged.
+
 * `COMPLETE -> IDLE (next poll)`
 
-  * After completion, teammate does not "auto-continue" anything.
-  * They return to IDLE and poll again.
+  * After completion, teammate does not auto-continue anything.
+  * Teammate returns to IDLE and polls again.
 
 **Deterministic interruption (WORKING -> IDLE: add dependency + yield)**
-This is the key "no waiting inside a task" rule.
 
-* When the teammate discovers they cannot proceed (missing info, under review), they **force the current task to become BLOCKED** by adding a dependency and immediately yield.
-* Two interruption types:
+* When the teammate cannot proceed (missing info, under review, correction required), they force the current task to become BLOCKED by adding a dependency and immediately yield.
+* Interruption types:
 
-  1. **Question needed**: use `task_question` (system creates `qn_request@DependencyOwner` and adds it as a dependency of the current task).
-  2. **Lead review needed**: `lead_review@Lead` is added as a dependency to the teammate's open tasks (done by chore).
-* After the dependency is added, the current task becomes `blocked`, and the teammate goes IDLE.
-* **Idle callback**: when a teammate transitions to IDLE, the system checks for ready tasks assigned to them and notifies them immediately.
+  1. **Cross-question**: `task_question` creates `qn_request@DependencyOwner` and adds it as a dependency of current task.
+  2. **Spot check**: Chore creates `spot_check@SameTeammate` and adds it as a dependency.
+  3. **Lead review**: Chore adds `lead_review@Lead` as dependency to affected open tasks.
+  4. **PR review loop**: system/reviewer creates `pr_review` and possibly `pr_revision_request` dependencies.
+
+* After dependency is added, the current task becomes blocked and teammate goes IDLE.
+* Idle callback: on transition to IDLE, system checks for ready tasks assigned to teammate and notifies immediately.
+
+**Core policy: cross-question allowed, self-question disallowed**
+
+* `qn_request` is for cross-owner context only.
+* Teammates do not create self-question tasks against their own primary task.
+* Self-correction is triggered externally via `spot_check`, `review_question`, or `pr_revision_request`.
+
+**Team branch + PR completion contract (no new task states)**
+
+* Every team run has one integration branch: `team_branch` (example: `codex/team/<run_id>`).
+* One primary task maps to one canonical task branch: `task_id -> canonical_branch`.
+* `task_submit(primary)` always submits work for that mapped task branch.
+* Primary task is marked COMPLETE only when its internal PR (`canonical_branch -> team_branch`) is merged.
+* If internal PR is closed unmerged, primary task remains incomplete and blocked by review dependency rules.
+* Agents do not merge task branches directly to final target branch.
+
+**Canonical + temp branch lifecycle (per teammate)**
+
+* Canonical task branch (long-lived per primary task): `codex/task/<task_id>-<slug>`.
+* Temp branch (short-lived per work/revision round): `codex/tmp/<task_id>-r<round>-<teammate_id>`.
+* Teammate works on temp branch, then integrates temp -> canonical.
+* PR reviewer reviews/merges canonical -> `team_branch`.
+* After merge, temp branch can be deleted; canonical remains as task record branch.
+
+**Parallel execution safety (worktree per teammate)**
+
+* Each teammate has its own worktree path; no shared checkout across active teammates.
+* A teammate executes only inside its own worktree.
+* Parallelism comes from dependency graph: any pending and unblocked task can run concurrently with other unblocked tasks.
+
+**Worktree lifecycle (required)**
+
+* Team lead creates one worktree per active teammate at team start.
+* Recommended path pattern: `.worktrees/<team_id>/<teammate_id>`.
+* Reserved system teammates also get worktrees: `chore` and `pr_reviewer`.
+* A teammate never switches branches in another teammate's worktree.
+* Canonical and temp branches for a task are created and used only in the assignee's worktree.
+* On teammate reassignment, task branch ownership moves to the new assignee worktree before new commits.
+* After task completion into `team_branch`, temp branches can be deleted; worktree remains for next tasks.
 
 **Chore teammate always runs (taskless auditor)**
 
-* Every team must include a **Chore** teammate. This is not optional and does not depend on the user request.
-* Chore is **taskless**: it does not claim or complete tasks.
-* Chore runs a **heartbeat audit loop** and inspects active teammates + task state for violations.
-* When a violation is found, Chore **flags the lead**, creates `lead_review`, and blocks affected tasks.
+* Every team includes a Chore teammate.
+* Chore is taskless: it does not claim/complete tasks.
+* Chore runs heartbeat audit loop and inspects teammates + task state for deterministic violations.
+* Chore can create `spot_check` or escalate to `lead_review` based on objective violations.
 
-**"Answer tasks are normal work"**
+**PR reviewer teammate (fresh-eye self revision trigger)**
 
-* `qn_request` and `review_question` tasks are treated exactly like any other task.
-* Teammates do not enter a special "answering mode" -- they receive auto-claimed tasks and complete them.
+* PR reviewer is external to the submitter.
+* PR reviewer handles `pr_review` tasks and can request `pr_revision_request`.
+* Submitter never self-approves own PR review task.
+* PR reviewer merges approved task PRs into `team_branch`.
 
 **Reserved-task primary-context resolution (idle caller only)**
 
-* Context resolution is centralized in the idle caller / dispatch path, not in Chore.
-* For `lead_review` and `review_question`, caller reads the pointed task (`context_task_id`), then traverses to derive the primary task context.
-* For `qn_request`, caller uses the asked-about task pointer (`prev_task_id` / `context_task_id`), then traverses to derive the primary task context.
-* If no pointer resolves to a primary task, context is `none` for that dispatch.
-
-**Design assumption**
-
-* Each teammate, when working across tasks, has full context of all the tasks they worked on.
-
-**Heartbeat timers (lead, teammates, chore)**
-
-* Lead, teammates, and Chore all respond to heartbeat polls.
-* **Teammate heartbeat action**: if idle and no task arrives, respond `HEARTBEAT_OK`.
-* **Lead heartbeat action**: handle any queued `lead_review` work; if nothing is pending, reply `HEARTBEAT_OK`.
-* **Chore heartbeat action**: run audit checks and escalate if violations are found; otherwise `HEARTBEAT_OK`.
-
-**Init task bootstrapping (lead only)**
-
-* When a team is created with initial tasks, the system creates a lead-owned `init_task`.
-* Lead answers `init_task` with a JSON task plan.
-* The system parses the JSON, creates subtasks, and makes each subtask depend on `init_task`.
-* `dependsOn` may reference task `id`s or 1-based indices from the JSON list.
-
-**Chore audit checks (deterministic, no guessing)**
-
-Chore flags only objective, state-based violations:
-
-* **Stalled claimed task**: `claimedAt` exceeds stall threshold without completion.
-* **Blocked but active**: task is `blocked` while assignee teammate is still `active`.
-* **Missing dependency**: task depends on a task id that does not exist.
-* **Invalid assignee**: task assigned to a teammate id not present in the team.
-* **Stale lead_review**: lead_review pending/blocked beyond threshold.
-* **Backlog overflow**: pending task count exceeds configured limit.
-
-When any violation is found:
-
-* Chore creates `lead_review@Lead` with violation metadata and context pointers only (no primary-context resolution in Chore).
-* Chore creates `review_question@Teammate` when a responsible teammate exists.
-* Chore adds `lead_review` as a dependency to the affected task(s).
+* Context resolution is centralized in idle caller/dispatch path, not in Chore.
+* For `lead_review`, `review_question`, `spot_check`, `pr_review`, and `pr_revision_request`, caller reads pointed task (`context_task_id`) and traverses to derive primary task context.
+* For `qn_request`, caller uses asked-about pointer (`prev_task_id` / `context_task_id`) then traverses to primary task context.
+* If no pointer resolves to primary task, context is `none` for that dispatch.
 
 **Fail-early / policy guardrails**
 
-* If a teammate cannot answer without violating policy (e.g., "question-on-question"), they must submit `task_answer` with a clear failure reason.
+* If teammate cannot respond without violating policy, submit failure explicitly:
+
+  * `task_submit(task, answer="FAILED: <reason>")`
+
 * No silent guessing and no indefinite waiting.
 
 ---
@@ -125,160 +154,111 @@ When any violation is found:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Y as Y
-    participant Lead as Lead
-    participant X as X
+    participant Y as WorkerY
+    participant X as OwnerX
     participant Chore as Chore
-    participant T as T
+    participant Lead as Lead
+    participant PRR as PRReviewer
 
-    Note over Y: Y works on curr_task and needs info
+    Note over Y: WorkerY needs dependency info
     Y->>Y: task_question(curr_task, prev_task, questionText)
-    Note over Y: system creates qn_request@X + blocks curr_task; Y yields to IDLE
+    Note over Y: system creates qn_request for OwnerX and blocks curr_task
+    Note over Y: WorkerY yields to IDLE
 
-    Note over X: X receives auto-claimed qn_request
     X->>X: work on qn_request
-    X->>X: task_answer(qn_request)
-    Note over Y: curr_task unblocks and Y later resumes
+    X->>X: task_submit(qn_request)
+    Note over Y: curr_task unblocks and WorkerY resumes later
 
-    opt Upstream needed by X
-        X->>X: task_question(qn_request, upstream_task, questionText)
-        Note over X: system creates qn_request_up@Z and blocks qn_request
+    opt Chore spot check during work
+        Chore->>Y: system creates spot_check for WorkerY and blocks curr_task
+        Y->>Y: work on spot_check (self-correction)
+        Y->>Y: task_submit(spot_check)
     end
 
-    opt Re-ask by Y
-        Y->>Y: task_question(curr_task, prev_task, questionText)
-        Note over Y: system creates qn_request_2@X
+    opt Y submits primary task
+        Y->>Y: task_submit(curr_task)
+        Note over Y,PRR: system opens or updates PR task branch to team_branch
+        Note over Y,PRR: system creates pr_review and blocks curr_task
+        PRR->>PRR: work on pr_review
+        PRR->>Y: if revision needed create pr_revision_request for WorkerY
+        Y->>Y: update branch and task_submit(pr_revision_request)
+        PRR->>PRR: re-check pr_review until approved
+        PRR->>PRR: merge internal PR into team_branch and task_submit(pr_review)
+        Note over Y: curr_task completion gate satisfied and system marks COMPLETE
     end
 
-    opt Chore halts teammate T
-        Chore->>Lead: system creates lead_review + blocks T tasks
-        Chore->>T: system creates review_question (if needed)
-        T->>T: work on review_question (auto-claimed)
-        T->>T: task_answer(review_question)
-        Lead->>Lead: task_answer(lead_review)
+    opt Chore escalates to lead
+        Chore->>Lead: system creates lead_review and blocks target tasks
+        Lead->>Y: system creates review_question for WorkerY (if needed)
+        Y->>Y: task_submit(review_question)
+        Lead->>Lead: task_submit(lead_review)
+    end
+
+    opt Team done
+        Lead->>Lead: open final PR (team_branch -> target branch)
+        Note over Lead: human reviews full team output before final merge
     end
 ```
 
 ### Communication flow semantics (every step + edge cases)
 
-This diagram intentionally shows **no direct lead->teammate coordination** except creating tasks. Teammates discover tasks by polling.
+#### A. Cross-question flow (`qn_request`) is context unblock only
 
-#### A. Base question flow (Y asks, lead routes, X answers)
+* Trigger: Y needs info from dependency owner.
+* Y calls `task_question(curr_task_id, prev_task_id, questionText)`.
+* System creates `qn_request@X`, blocks `curr_task`, and interrupts Y to IDLE.
+* X completes with `task_submit(qn_request, answer="...")`.
+* Completion of `qn_request` unblocks `curr_task`.
+* `qn_request` does not force resubmission of primary answer.
 
-**A1. Y raises a question deterministically**
+#### B. Self revision flow is external-triggered only
 
-* Trigger: Y is working on `curr_task` and needs information that must come from work history (e.g., `prev_task`).
-* Y uses **one tool action**:
+* Self-question by same worker is not allowed.
+* Only external actors can trigger correction tasks:
 
-  1. `task_question(curr_task_id, prev_task_id, questionText)`
+  * Chore -> `spot_check`
+  * Lead -> `review_question`
+  * PR reviewer -> `pr_revision_request`
 
-     * Minimal metadata should include:
+* These tasks may request correction of work, behavior, or artifacts.
+* Worker performs the correction and submits the revision task.
 
-       * `curr_task_id`
-       * `prev_task_id` or a pointer to the upstream task/context
-       * `questionText`
-       * optional: expected answer format (bullet list, code snippet, file path, etc.)
-* The system then **deterministically**:
+#### C. Chore spot check behavior
 
-  * Creates `qn_request@X` where X is the current owner of `prev_task`.
-  * Adds `qn_request` as a dependency of `curr_task` (blocking it).
-  * **Hard-interrupts** Y (ESC-style) and transitions Y to **IDLE** immediately.
-* `task_question` only targets **dependency tasks**: `prev_task_id` must already be listed in `curr_task.dependsOn`.
+* If Chore spot-check finds objective concern, Chore creates `spot_check@Worker` as dependency of current primary task.
+* Worker is interrupted to IDLE and then auto-claims high-priority `spot_check`.
+* Worker completes `spot_check` via `task_submit(spot_check)`.
+* Primary task then resumes if no other blockers remain.
+* Chore can escalate directly to `lead_review` for stronger intervention.
 
-**A2. Dependency owner answers (deterministic)**
+#### D. Lead review behavior
 
-* X claims/handles `qn_request` directly:
+* Chore can create `lead_review@Lead` and block affected tasks.
+* Lead may create `review_question@Worker` tasks for clarification or correction.
+* Worker submits `review_question`; Lead submits `lead_review` to finalize.
+* Finalization either unblocks tasks or replaces/reassigns teammate tasks.
 
-  1. Call `task_answer(qn_request, answer="<actual answer>")`.
-  2. The system marks `qn_request` completed.
-  3. Completion of `qn_request` unblocks `curr_task`.
+#### E. PR review loop controls primary-task completion
 
-**A3. X answers by polling**
+* On `task_submit(primary_task)`, system opens/updates internal PR (`canonical_branch -> team_branch`) and creates `pr_review` dependency.
+* PR reviewer decides:
 
-* X idle loop sees `qn_request` as pending and high priority.
-* System auto-claims `qn_request` for X; X answers, attaches artifacts if needed, and completes it.
-* Completion of `qn_request` automatically unblocks `curr_task`.
+  * **Approve/merge**: merge internal PR into `team_branch`, submit `pr_review`, primary task completes.
+  * **Request revision**: create `pr_revision_request@Worker`; worker revises branch and submits revision; reviewer re-checks.
 
-**A4. Y resumes later**
+* Loop continues until merge gate is satisfied.
+* No new task state is introduced; dependency graph handles blocking and retries.
 
-* Y does not "wait". Y returns to IDLE, and on the next poll sees `curr_task` unblocked and continues.
+#### F. Final human review after team completion
 
-#### B. Upstream chaining (X is blocked answering)
+* After all primary tasks complete into `team_branch`, Lead opens one final PR from `team_branch` to final target branch.
+* Human can review full team output in one place and decide final merge timing.
+* This final PR does not change task-level completion semantics; it is a team-level release/review gate.
 
-**Rule: Lead does not decide upstream; X does.**
+#### G. No new task states rule
 
-* If X cannot answer `qn_request` without information from `prev_prev_task`, X performs the same deterministic pattern:
-
-  1. `task_question(qn_request_id, prev_prev_task_id, questionText)`
-  2. System creates `qn_request_up@Z`, blocks `qn_request`, and returns X to IDLE.
-* When upstream answer completes, it unblocks X's `qn_request`, then that unblocks Y's `curr_task`.
-
-This produces a clean dependency chain:
-
-* `qn_request_up@Z -> qn_request@X -> curr_task@Y`
-
-No cycles and no hidden coordination.
-
-#### C. Re-ask loop (answer not satisfactory)
-
-**Rule: Y controls satisfaction; re-ask is a new question.**
-
-#### D. Chore always runs (taskless audit)
-
-* The Chore teammate is always present, **even without user request**.
-* Chore does not claim tasks. It runs a heartbeat audit loop over teammates + tasks.
-* If Chore detects issues, it triggers `lead_review` and blocks affected tasks as shown in the sequence diagram.
-
-* If Y finds X's answer insufficient, Y repeats the exact same pattern via `task_question`:
-
-  * Ask again with improved question text / acceptance criteria
-  * System creates a new `qn_request` and re-blocks `curr_task`
-* History is preserved: the old `qn_request` remains completed; new one becomes the blocker.
-
-#### D. No question-on-question (outside the dependency graph)
-
-* If X thinks the question is unclear and the missing info is **not** a dependency task, X must either:
-
-  * Answer based on best available context from `prev_task`, OR
-  * Fail the task: `task_answer(qn_request, answer="FAILED: <reason>")`
-* X must not create a "clarify question" task back to Y unless it targets a dependency task.
-
-#### E. Multiple blockers in parallel
-
-* If `curr_task` needs multiple missing inputs, Y can create multiple question requests.
-* `curr_task` stays blocked until **all** linked `qn_request*` tasks complete.
-
-#### F. Chore halt + lead review (hard stop)
-
-Your rule: **Chore can halt operation deterministically** through task/dependency changes only.
-
-**F1. Chore triggers review**
-
-* Chore does two things:
-
-  1. Deterministic halt via graph:
-
-     * System creates `lead_review@Lead` with `{target:T, reason}`
-     * System adds `lead_review` as a dependency to each open task of T
-* Result: T's tasks become blocked; T goes IDLE and sees they are "under review" because tasks are blocked by `lead_review`.
-
-**F2. Lead conducts review using review_question tasks**
-
-* The system creates one or more `review_question@T` tasks when needed.
-* `lead_review` depends on the `review_question*` tasks.
-* T answers each `review_question` normally (auto-claim -> complete).
-
-**F3. Lead finalization**
-
-* When all `review_question*` complete, `lead_review` becomes unblocked.
-* Lead then:
-
-  * completes `lead_review` (accept/unblock), OR
-  * fires/replaces T and recreates/reassigns T's blocked tasks.
-
-**Fail-early in review**
-
-* If T does not respond or responses are unusable, lead can complete `lead_review` with failure and proceed to replacement.
+* Existing states remain `IDLE`, `WORKING`, `COMPLETE`.
+* Review/revision lifecycle is represented only via dependencies and `task_submit` events.
 
 ---
 
@@ -286,40 +266,44 @@ Your rule: **Chore can halt operation deterministically** through task/dependenc
 
 ### Why priority exists
 
-When a teammate X has multiple tasks (e.g., A->X, B->X, C->X) plus question/review work, we want X to prefer tasks that unblock others.
+When teammate X has multiple tasks (normal work + question/review/revision), prioritize correction and review before normal execution.
 
 ### Deterministic selection policy
 
-On each idle transition (and idle heartbeat), the system auto-claims the highest-priority *pending & unblocked* task:
+On each idle transition (and idle heartbeat), system auto-claims highest-priority pending and unblocked task.
+
+Worker queues follow your required precedence:
+
+* `spot_check > pr_review > normal work`
 
 1. **lead_review (Lead only)**
 
-   * Blocks multiple tasks and is safety-critical.
-2. **review_question / qn_request**
+   * safety-critical and can unblock many tasks
 
-   * Unblocks other teammates' work (reduces global blockage).
-3. **Normal work tasks (A/B/C)**
+2. **spot_check / review_question / pr_revision_request**
 
-   * Progress local deliverables.
+   * external self-revision and correction blockers
+
+3. **pr_review (PR reviewer only)**
+
+   * final completion gate for primary tasks
+
+4. **qn_request**
+
+   * cross-question context unblock
+
+5. **normal work tasks**
+
+   * local deliverables
 
 ### Tie-breakers (deterministic)
 
-If multiple tasks share the same priority, break ties by:
+If multiple tasks share same priority:
 
 1. oldest creation time (FIFO)
 2. then by task id (stable ordering)
 
 This guarantees predictable behavior and avoids starvation.
-
----
-
-## Priority Rule
-
-Deterministic pick order when multiple tasks exist:
-
-1. lead_review (highest)
-2. review_question / qn_request (high)
-3. normal work tasks (lower)
 
 ---
 
@@ -330,18 +314,26 @@ graph TD
     curr["curr_task (Y)"]
     qnr["qn_request (X)"]
     qnr2["qn_request_up (Z)"]
+    spot["spot_check (Y)"]
     leadrev["lead_review (Lead)"]
-    reviewq["review_question (T)"]
-    ttask["open_task (T)"]
+    reviewq["review_question (Y)"]
+    prr["pr_review (PRR)"]
+    prrev["pr_revision_request (Y)"]
 
     qnr --> curr
     qnr2 --> qnr
 
-    leadrev --> ttask
+    spot --> curr
+    leadrev --> curr
     reviewq --> leadrev
+
+    prr --> curr
+    prrev --> prr
 ```
 
 Legend:
 
 - Solid arrows are real dependencies.
-- `qn_request` is the real blocking task and answer artifact.
+- `qn_request` is cross-owner context unblock.
+- `spot_check`, `review_question`, and `pr_revision_request` are external-triggered self-revision tasks.
+- `pr_review` is the completion gate dependency for primary task merge into `team_branch`.

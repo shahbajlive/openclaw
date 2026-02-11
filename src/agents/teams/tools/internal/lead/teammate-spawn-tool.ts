@@ -7,6 +7,7 @@ import { callGateway } from "../../../../../gateway/call.js";
 import { resolveAgentIdFromSessionKey } from "../../../../../routing/session-key.js";
 import { AGENT_LANE_TEAM } from "../../../../lanes.js";
 import { jsonResult, readStringParam } from "../../../../tools/common.js";
+import { CHORE_ROLE, PR_REVIEWER_ROLE, PR_REVIEWER_TEAMMATE_ID } from "../../../chore-watch.js";
 import { createTeamTmuxView, resolveTeamDisplayMode } from "../../../display-tmux.js";
 import { buildTeammateSystemPrompt } from "../../../system-prompt.js";
 import {
@@ -58,10 +59,17 @@ export function createTeammateSpawnTool(opts?: { agentSessionKey?: string }): An
       const teamId = readStringParam(params, "teamId", { required: true });
       const role = readStringParam(params, "role", { required: true });
       const task = readStringParam(params, "task", { required: true });
-      if (role.trim().toLowerCase() === "chore") {
+      const roleNormalized = role.trim().toLowerCase();
+      if (roleNormalized === CHORE_ROLE) {
         return jsonResult({
           status: "error",
           error: "Chore teammate is system-managed and cannot be spawned manually.",
+        });
+      }
+      if (roleNormalized === PR_REVIEWER_ROLE || roleNormalized === PR_REVIEWER_TEAMMATE_ID) {
+        return jsonResult({
+          status: "error",
+          error: "PR reviewer teammate is system-managed and cannot be spawned manually.",
         });
       }
       const modelOverride = readStringParam(params, "model");

@@ -45,6 +45,32 @@ const LIVE =
   isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEST);
 const describeLive = LIVE ? describe : describe.skip;
 
+const RESERVED_ORCHESTRATION_TITLES = new Set([
+  "init_task",
+  "lead_review",
+  "qn_request",
+  "review_question",
+  "broadcast_answer",
+]);
+
+function isReservedOrchestrationTitle(title: string): boolean {
+  return RESERVED_ORCHESTRATION_TITLES.has(title) || title.startsWith("qn_request_");
+}
+
+function addScenarioTask(teamId: string, params: Parameters<typeof addTask>[1]): Task {
+  const metadata: Record<string, unknown> = { ...(params.metadata ?? {}) };
+  const hasTaskClass = metadata.taskClass === "primary" || metadata.taskClass === "secondary";
+  const dependencyCount = params.dependsOn?.length ?? 0;
+  const shouldPromoteToPrimary = dependencyCount === 0 || dependencyCount > 1;
+  if (!hasTaskClass && shouldPromoteToPrimary && !isReservedOrchestrationTitle(params.title)) {
+    metadata.taskClass = "primary";
+  }
+  return addTask(teamId, {
+    ...params,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+  });
+}
+
 function renderTaskGraph(tasks: Task[]): string[] {
   const lines: string[] = [];
   lines.push("```mermaid");
@@ -246,14 +272,14 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
     const answerToolT = createTaskAnswerTool({ agentSessionKey: tSessionKey });
     const answerToolLead = createTaskAnswerTool({ agentSessionKey: leadSessionKey });
 
-    const prevTask = addTask(teamId, {
+    const prevTask = addScenarioTask(teamId, {
       title: "prev_task",
       description: "Upstream work",
       priority: "normal",
       assignTo: "x",
     });
 
-    const currTask = addTask(teamId, {
+    const currTask = addScenarioTask(teamId, {
       title: "curr_task",
       description: "Needs upstream info",
       priority: "normal",
@@ -305,15 +331,15 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
       answer: "done",
     });
 
-    const leadReview = addTask(teamId, {
+    const leadReview = addScenarioTask(teamId, {
       title: "lead_review",
       description: "Chore halt",
       assignTo: "lead",
-      metadata: { target: "t", reason: "check output" },
+      metadata: { target: "t", reason: "check output", context_task_id: currTask.taskId },
     });
     const leadReviewId = leadReview.taskId;
 
-    const tOpen = addTask(teamId, {
+    const tOpen = addScenarioTask(teamId, {
       title: "t_open_task",
       description: "Work item",
       priority: "normal",
@@ -321,11 +347,11 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
     });
     updateTask(teamId, tOpen.taskId, { dependsOn: [leadReviewId] });
 
-    const reviewQ = addTask(teamId, {
+    const reviewQ = addScenarioTask(teamId, {
       title: "review_question",
       description: "Explain approach",
       assignTo: "t",
-      metadata: { questionText: "Explain approach" },
+      metadata: { questionText: "Explain approach", context_task_id: currTask.taskId },
     });
     const reviewQId = reviewQ.taskId;
     updateTask(teamId, leadReviewId, { dependsOn: [reviewQId] });

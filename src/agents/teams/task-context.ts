@@ -153,7 +153,12 @@ export function derivePrimaryContextTaskIdForNewTask(params: {
     }
   }
 
+  const isReservedTask = params.metadata?.reservedTask === true;
   if (candidates.size > 1) {
+    if (isReservedTask) {
+      // Reserved orchestration tasks may fan across contexts; dispatch resolves context later.
+      return undefined;
+    }
     const sorted = Array.from(candidates).toSorted();
     throw new Error(
       `Task derives from multiple primary contexts (${sorted.join(", ")}). Secondary tasks must map to exactly one primary context.`,
@@ -161,6 +166,10 @@ export function derivePrimaryContextTaskIdForNewTask(params: {
   }
   const resolved = Array.from(candidates)[0];
   if (params.taskClass === "secondary" && !resolved) {
+    if (isReservedTask) {
+      // Reserved orchestration tasks may start without task context.
+      return undefined;
+    }
     throw new Error("Secondary tasks must derive exactly one primary context.");
   }
   return resolved;

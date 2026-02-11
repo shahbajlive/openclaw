@@ -58,6 +58,11 @@ describe("team-registry", () => {
       status: "idle",
       isChore: true,
     });
+    expect(team.teammates.pr_reviewer).toMatchObject({
+      teammateId: "pr_reviewer",
+      role: "pr_reviewer",
+      status: "idle",
+    });
     expect(getTeam(team.teamId)).toEqual(team);
   });
 

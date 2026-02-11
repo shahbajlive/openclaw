@@ -175,7 +175,7 @@ describe("teammate-spawn-tool", () => {
     // The previous tests show checking teammates by ID.
     // We don't have the ID easily here as it was generated inside.
     // Spawn failure should not leave a dangling teammate entry.
-    expect(Object.keys(team?.teammates || {})).toEqual(["chore"]);
+    expect(Object.keys(team?.teammates || {}).sort()).toEqual(["chore", "pr_reviewer"]);
   });
 
   it("rejects when called by a non-lead", async () => {
@@ -314,6 +314,20 @@ describe("teammate-spawn-tool", () => {
     const text = resultText(result);
     expect(text.toLowerCase()).toContain("error");
     expect(text.toLowerCase()).toContain("not enabled");
+  });
+
+  it("rejects spawning the system-managed pr_reviewer teammate", async () => {
+    const tool = createTeammateSpawnTool({ agentSessionKey: "agent:main:main" });
+
+    const result = await tool.execute("call-1", {
+      teamId,
+      role: "pr_reviewer",
+      task: "Review PRs",
+    });
+
+    const text = resultText(result);
+    expect(text.toLowerCase()).toContain("error");
+    expect(text.toLowerCase()).toContain("system-managed");
   });
 
   it("rejects when team not found", async () => {

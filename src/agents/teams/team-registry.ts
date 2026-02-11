@@ -13,7 +13,10 @@ import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { setCommandLaneConcurrency } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
 import {
+  CHORE_TEAMMATE_ID,
   ensureChoreTeammate,
+  PR_REVIEWER_TEAMMATE_ID,
+  ensurePrReviewerTeammate,
   startChoreWatcher,
   stopAllChoreWatchers,
   stopChoreWatcher,
@@ -236,6 +239,11 @@ function recomputeTeamLaneConcurrency(): void {
   setCommandLaneConcurrency(CommandLane.Team, totalMembers > 0 ? totalMembers : 1);
 }
 
+function ensureSystemTeammates(team: Team): void {
+  ensureChoreTeammate(team);
+  ensurePrReviewerTeammate(team);
+}
+
 /**
  * Create a new team.
  * Uses teamName as teamId (with numeric prefix on collision).
@@ -276,7 +284,7 @@ export function createTeam(params: {
     answerBroadcasted: false,
   };
 
-  ensureChoreTeammate(team);
+  ensureSystemTeammates(team);
   activeTeams.set(teamId, team);
   persistTeam(team);
   recomputeTeamLaneConcurrency();
@@ -341,6 +349,9 @@ export function addTeammate(teamId: string, teammate: Teammate): void {
 export function removeTeammate(teamId: string, teammateId: string): void {
   const team = activeTeams.get(teamId);
   if (!team) {
+    return;
+  }
+  if (teammateId === CHORE_TEAMMATE_ID || teammateId === PR_REVIEWER_TEAMMATE_ID) {
     return;
   }
 
@@ -1221,7 +1232,7 @@ function restoreTeamsOnce(): void {
       }
 
       activeTeams.set(teamId, team);
-      ensureChoreTeammate(team);
+      ensureSystemTeammates(team);
       recomputeLeadStatusFromTasks(teamId);
       startChoreWatcher(teamId);
       dispatchLeadPendingTask(teamId);

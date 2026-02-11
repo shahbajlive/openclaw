@@ -7,6 +7,8 @@ import { getTeam, resetIdleNotification, transitionTeammateToIdle } from "./team
 
 export const CHORE_TEAMMATE_ID = "chore";
 export const CHORE_ROLE = "chore";
+export const PR_REVIEWER_TEAMMATE_ID = "pr_reviewer";
+export const PR_REVIEWER_ROLE = "pr_reviewer";
 
 // Chore runs on the same heartbeat as idle-claim (3 Hz).
 const DEFAULT_CHORE_INTERVAL_MS = 333;
@@ -116,6 +118,26 @@ export function ensureChoreTeammate(team: Team): void {
     status: "idle",
     model: undefined,
     isChore: true,
+    requirePlanApproval: false,
+    planApproved: true,
+    currentTask: undefined,
+    currentTaskId: undefined,
+    claimedTasks: 0,
+    completedTasks: 0,
+    createdAt: Date.now(),
+  };
+}
+
+export function ensurePrReviewerTeammate(team: Team): void {
+  if (team.teammates[PR_REVIEWER_TEAMMATE_ID]) {
+    return;
+  }
+  team.teammates[PR_REVIEWER_TEAMMATE_ID] = {
+    teammateId: PR_REVIEWER_TEAMMATE_ID,
+    role: PR_REVIEWER_ROLE,
+    sessionKey: `agent:${team.teamAgentId}:teammate:pr-reviewer`,
+    status: "idle",
+    model: undefined,
     requirePlanApproval: false,
     planApproved: true,
     currentTask: undefined,
@@ -241,7 +263,6 @@ function escalateViolation(params: { team: Team; tasks: Task[]; violation: Chore
   if (existing) {
     return { leadReviewId: existing.taskId };
   }
-  const contextTaskId = violation.taskIds?.[0];
 
   const leadReview = addTask(team.teamId, {
     title: TASK_LEAD_REVIEW,
@@ -254,7 +275,6 @@ function escalateViolation(params: { team: Team; tasks: Task[]; violation: Chore
       violationKey: violation.violationKey,
       targetTaskIds: violation.taskIds,
       targetTeammateId: violation.teammateId,
-      context_task_id: contextTaskId,
     },
   });
 
@@ -271,7 +291,7 @@ function escalateViolation(params: { team: Team; tasks: Task[]; violation: Chore
         source: "chore",
         violationKey: violation.violationKey,
         questionText: violation.message,
-        context_task_id: contextTaskId,
+        targetTaskIds: violation.taskIds,
       },
     });
     reviewQuestionId = reviewQuestion.taskId;

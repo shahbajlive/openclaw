@@ -161,7 +161,11 @@ export function createTeamCreateTool(opts?: { agentSessionKey?: string }): AnyAg
         // 6. Spawn lead agent session
         const leadPrompt = buildTeamLeadSystemPrompt({
           team,
-          teammatesList: [],
+          teammatesList: Object.values(team.teammates).map((teammate) => ({
+            role: teammate.role,
+            status: teammate.status,
+            currentTask: teammate.currentTask,
+          })),
         });
         const leadInitMessage =
           tasks && tasks.length > 0

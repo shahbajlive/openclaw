@@ -46,6 +46,32 @@ const LIVE =
   isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEST);
 const describeLive = LIVE ? describe : describe.skip;
 
+const RESERVED_ORCHESTRATION_TITLES = new Set([
+  "init_task",
+  "lead_review",
+  "qn_request",
+  "review_question",
+  "broadcast_answer",
+]);
+
+function isReservedOrchestrationTitle(title: string): boolean {
+  return RESERVED_ORCHESTRATION_TITLES.has(title) || title.startsWith("qn_request_");
+}
+
+function addScenarioTask(teamId: string, params: Parameters<typeof addTask>[1]): Task {
+  const metadata: Record<string, unknown> = { ...(params.metadata ?? {}) };
+  const hasTaskClass = metadata.taskClass === "primary" || metadata.taskClass === "secondary";
+  const dependencyCount = params.dependsOn?.length ?? 0;
+  const shouldPromoteToPrimary = dependencyCount === 0 || dependencyCount > 1;
+  if (!hasTaskClass && shouldPromoteToPrimary && !isReservedOrchestrationTitle(params.title)) {
+    metadata.taskClass = "primary";
+  }
+  return addTask(teamId, {
+    ...params,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+  });
+}
+
 function renderTaskGraph(tasks: Task[]): string[] {
   const lines: string[] = [];
   lines.push("```mermaid");
@@ -101,6 +127,7 @@ function createTeamWithTeammates(params: { teamName: string; size: number }) {
     leadSessionKey: `agent:${params.teamName}:lead`,
     config: { notifyOnUnblock: false },
   });
+  updateTeamStatus(team.teamId, "working");
   ensureTeamDir(team.teamId);
   const teammates: { id: string; sessionKey: string }[] = [];
   for (let i = 1; i <= params.size; i += 1) {
@@ -275,7 +302,7 @@ describeLive("team examples (mock live)", () => {
     const tasks: Task[] = [];
     let prev: string | undefined;
     for (let i = 1; i <= 10; i += 1) {
-      const task = addTask(team.teamId, {
+      const task = addScenarioTask(team.teamId, {
         title: `count-${i}`,
         description: `headcount ${i}`,
         assignTo: teammates[i - 1]?.id,
@@ -285,7 +312,7 @@ describeLive("team examples (mock live)", () => {
       prev = task.taskId;
     }
     const summaryTeammate = teammates[teammates.length - 1]!;
-    const summary = addTask(team.teamId, {
+    const summary = addScenarioTask(team.teamId, {
       title: "headcount-summary",
       description: "Report total count",
       assignTo: summaryTeammate.id,
@@ -330,7 +357,7 @@ describeLive("team examples (mock live)", () => {
     let prev: string | undefined;
     for (let i = 1; i <= 10; i += 1) {
       const teammate = teammates[(i - 1) % teammates.length]!;
-      const task = addTask(team.teamId, {
+      const task = addScenarioTask(team.teamId, {
         title: `ring-${i}`,
         description: `pass ${i}`,
         assignTo: teammate.id,
@@ -340,7 +367,7 @@ describeLive("team examples (mock live)", () => {
       prev = task.taskId;
     }
     const summaryTeammate = teammates[0]!;
-    const summary = addTask(team.teamId, {
+    const summary = addScenarioTask(team.teamId, {
       title: "ring-summary",
       description: "final ring pass",
       assignTo: summaryTeammate.id,
@@ -373,14 +400,14 @@ describeLive("team examples (mock live)", () => {
   it("covers fan out and fan in", async () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "fan-out", size: 4 });
     const tasks = teammates.map((teammate, index) =>
-      addTask(team.teamId, {
+      addScenarioTask(team.teamId, {
         title: `fan-task-${index + 1}`,
         description: "subtask",
         assignTo: teammate.id,
       }),
     );
     const summaryTeammate = teammates[0]!;
-    const summary = addTask(team.teamId, {
+    const summary = addScenarioTask(team.teamId, {
       title: "fan-in-summary",
       description: "aggregate",
       assignTo: summaryTeammate.id,
@@ -437,18 +464,18 @@ describeLive("team examples (mock live)", () => {
 
   it("covers pipeline", async () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "pipeline", size: 3 });
-    const stage1 = addTask(team.teamId, {
+    const stage1 = addScenarioTask(team.teamId, {
       title: "pipeline-stage-1",
       description: "draft input",
       assignTo: teammates[0]!.id,
     });
-    const stage2 = addTask(team.teamId, {
+    const stage2 = addScenarioTask(team.teamId, {
       title: "pipeline-stage-2",
       description: "transform",
       assignTo: teammates[1]!.id,
       dependsOn: [stage1.taskId],
     });
-    const stage3 = addTask(team.teamId, {
+    const stage3 = addScenarioTask(team.teamId, {
       title: "pipeline-stage-3",
       description: "validate",
       assignTo: teammates[2]!.id,
@@ -481,17 +508,17 @@ describeLive("team examples (mock live)", () => {
 
   it("covers debate then judge", async () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "debate-judge", size: 3 });
-    const argA = addTask(team.teamId, {
+    const argA = addScenarioTask(team.teamId, {
       title: "argument-a",
       description: "argue A",
       assignTo: teammates[0]!.id,
     });
-    const argB = addTask(team.teamId, {
+    const argB = addScenarioTask(team.teamId, {
       title: "argument-b",
       description: "argue B",
       assignTo: teammates[1]!.id,
     });
-    const judge = addTask(team.teamId, {
+    const judge = addScenarioTask(team.teamId, {
       title: "judge",
       description: "decide with reasons",
       assignTo: teammates[2]!.id,
@@ -533,7 +560,7 @@ describeLive("team examples (mock live)", () => {
     const tasks: Task[] = [];
     let prev: string | undefined;
     for (let i = 1; i <= 5; i += 1) {
-      const task = addTask(team.teamId, {
+      const task = addScenarioTask(team.teamId, {
         title: `relay-${i}`,
         description: "timed relay",
         assignTo: teammates[i - 1]!.id,
@@ -567,12 +594,12 @@ describeLive("team examples (mock live)", () => {
 
   it("covers chore teammate always runs", async () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "chore-always", size: 2 });
-    const userTask = addTask(team.teamId, {
+    const userTask = addScenarioTask(team.teamId, {
       title: "user-task",
       description: "requested work",
       assignTo: teammates[0]!.id,
     });
-    const blocker = addTask(team.teamId, {
+    const blocker = addScenarioTask(team.teamId, {
       title: "blocker-task",
       description: "dependency",
       assignTo: teammates[1]!.id,
@@ -606,12 +633,12 @@ describeLive("team examples (mock live)", () => {
     const { team, teammates } = createTeamWithTeammates({ teamName: "qn-prev", size: 2 });
     const questionToolY = createTaskQuestionTool({ agentSessionKey: teammates[1]!.sessionKey });
 
-    const prevTask = addTask(team.teamId, {
+    const prevTask = addScenarioTask(team.teamId, {
       title: "prev_task",
       description: "upstream decision",
       assignTo: teammates[0]!.id,
     });
-    const currTask = addTask(team.teamId, {
+    const currTask = addScenarioTask(team.teamId, {
       title: "curr_task",
       description: "needs upstream detail",
       assignTo: teammates[1]!.id,
@@ -678,18 +705,18 @@ describeLive("team examples (mock live)", () => {
     const questionToolY = createTaskQuestionTool({ agentSessionKey: teammates[1]!.sessionKey });
     const questionToolX = createTaskQuestionTool({ agentSessionKey: teammates[0]!.sessionKey });
 
-    const upstreamTask = addTask(team.teamId, {
+    const upstreamTask = addScenarioTask(team.teamId, {
       title: "upstream_task",
       description: "earlier decision",
       assignTo: teammates[2]!.id,
     });
-    const prevTask = addTask(team.teamId, {
+    const prevTask = addScenarioTask(team.teamId, {
       title: "prev_task",
       description: "downstream decision",
       assignTo: teammates[0]!.id,
       dependsOn: [upstreamTask.taskId],
     });
-    const currTask = addTask(team.teamId, {
+    const currTask = addScenarioTask(team.teamId, {
       title: "curr_task",
       description: "needs upstream detail",
       assignTo: teammates[1]!.id,
@@ -790,7 +817,7 @@ describeLive("team examples (mock live)", () => {
       size: 3,
     });
 
-    const delivery = addTask(team.teamId, {
+    const delivery = addScenarioTask(team.teamId, {
       title: "blocked-delivery",
       description: "waiting on chore review",
       assignTo: teammates[0]!.id,
@@ -873,7 +900,7 @@ describeLive("team examples (mock live)", () => {
       });
       const leadAnswer = createTaskAnswerTool({ agentSessionKey: team.leadSessionKey });
       const tasks = [0, 1, 2].map((index) =>
-        addTask(team.teamId, {
+        addScenarioTask(team.teamId, {
           title: `backlog-${index + 1}`,
           description: "queued work",
           assignTo: teammates[index]!.id,
@@ -937,63 +964,70 @@ describeLive("team examples (mock live)", () => {
     const questionToolY = createTaskQuestionTool({ agentSessionKey: teammates[1]!.sessionKey });
 
     const fanTasks = [0, 1, 2].map((index) =>
-      addTask(team.teamId, {
+      addScenarioTask(team.teamId, {
         title: `fan-task-${index + 1}`,
         description: "parallel work",
         assignTo: teammates[index]!.id,
       }),
     );
-    const pipeline1 = addTask(team.teamId, {
+    const pipeline1 = addScenarioTask(team.teamId, {
       title: "pipe-1",
       description: "draft",
       assignTo: teammates[3]!.id,
       dependsOn: [fanTasks[0]!.taskId],
     });
-    const pipeline2 = addTask(team.teamId, {
+    const pipeline2 = addScenarioTask(team.teamId, {
       title: "pipe-2",
       description: "transform",
       assignTo: teammates[4]!.id,
       dependsOn: [pipeline1.taskId],
     });
-    const pipeline3 = addTask(team.teamId, {
+    const pipeline3 = addScenarioTask(team.teamId, {
       title: "pipe-3",
       description: "validate",
       assignTo: teammates[5]!.id,
       dependsOn: [pipeline2.taskId],
     });
 
-    const integration = addTask(team.teamId, {
+    const integration = addScenarioTask(team.teamId, {
       title: "integration",
       description: "combine fan work",
       assignTo: teammates[1]!.id,
       dependsOn: [fanTasks[0]!.taskId, fanTasks[1]!.taskId, fanTasks[2]!.taskId],
     });
 
-    const choreTask = addTask(team.teamId, {
+    const choreTask = addScenarioTask(team.teamId, {
       title: "chore-ops",
       description: "maintenance",
       assignTo: teammates[4]!.id,
       priority: "high",
     });
 
-    const leadReview = addTask(team.teamId, {
+    const leadReview = addScenarioTask(team.teamId, {
       title: "lead_review",
       description: "final check",
       assignTo: "lead",
-      metadata: { target: teammates[5]!.id, reason: "risk check" },
+      metadata: {
+        target: teammates[5]!.id,
+        reason: "risk check",
+        context_task_id: choreTask.taskId,
+      },
     });
     const leadReviewId = leadReview.taskId;
-    const reviewQuestion = addTask(team.teamId, {
+    const reviewQuestion = addScenarioTask(team.teamId, {
       title: "review_question",
       description: "Explain validation",
       assignTo: teammates[5]!.id,
-      metadata: { questionText: "Explain validation" },
+      metadata: {
+        questionText: "Explain validation",
+        context_task_id: choreTask.taskId,
+      },
     });
     const reviewQuestionId = reviewQuestion.taskId;
     updateTask(team.teamId, leadReviewId, { dependsOn: [reviewQuestionId] });
     updateTask(team.teamId, reviewQuestionId, { dependsOn: [choreTask.taskId] });
 
-    const finalTask = addTask(team.teamId, {
+    const finalTask = addScenarioTask(team.teamId, {
       title: "finalize",
       description: "final delivery",
       assignTo: teammates[5]!.id,
@@ -1110,45 +1144,45 @@ describeLive("team examples (mock live)", () => {
     const answerLead = createTaskAnswerTool({ agentSessionKey: team.leadSessionKey });
 
     const fanTasks = [0, 1, 2].map((index) =>
-      addTask(team.teamId, {
+      addScenarioTask(team.teamId, {
         title: `fan-task-${index + 1}`,
         description: "fan-out work",
         assignTo: teammates[index]!.id,
       }),
     );
-    const pipeline1 = addTask(team.teamId, {
+    const pipeline1 = addScenarioTask(team.teamId, {
       title: "pipe-1",
       description: "draft",
       assignTo: teammates[3]!.id,
       dependsOn: [fanTasks[0]!.taskId],
     });
-    const pipeline2 = addTask(team.teamId, {
+    const pipeline2 = addScenarioTask(team.teamId, {
       title: "pipe-2",
       description: "transform",
       assignTo: teammates[4]!.id,
       dependsOn: [pipeline1.taskId],
     });
-    const pipeline3 = addTask(team.teamId, {
+    const pipeline3 = addScenarioTask(team.teamId, {
       title: "pipe-3",
       description: "validate",
       assignTo: teammates[5]!.id,
       dependsOn: [pipeline2.taskId],
     });
 
-    const integration = addTask(team.teamId, {
+    const integration = addScenarioTask(team.teamId, {
       title: "integration",
       description: "combine fan work",
       assignTo: teammates[1]!.id,
       dependsOn: [fanTasks[0]!.taskId, fanTasks[1]!.taskId, fanTasks[2]!.taskId],
     });
-    const finalTask = addTask(team.teamId, {
+    const finalTask = addScenarioTask(team.teamId, {
       title: "final-delivery",
       description: "final delivery",
       assignTo: teammates[6]!.id,
       dependsOn: [pipeline3.taskId, integration.taskId],
     });
 
-    const riskyTask = addTask(team.teamId, {
+    const riskyTask = addScenarioTask(team.teamId, {
       title: "risky-task",
       description: "chore flagged risk",
       assignTo: teammates[0]!.id,
@@ -1310,7 +1344,7 @@ describeLive("team examples (mock live)", () => {
   it("covers chore watcher violation escalation", async () => {
     const { team } = createTeamWithTeammates({ teamName: "chore-watch", size: 1 });
     updateTeamStatus(team.teamId, "working");
-    const ghostTask = addTask(team.teamId, {
+    const ghostTask = addScenarioTask(team.teamId, {
       title: "ghost-task",
       description: "assigned to missing teammate",
       assignTo: "ghost",

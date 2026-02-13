@@ -448,17 +448,10 @@ export function createOpenClawCodingTools(options?: {
         "sessions_spawn",
         "session_status",
         "team_create",
-        "team_message",
-        "team_discover",
-        "team_cleanup",
         "group:messaging",
         "group:automation",
       ],
     };
-    if (!teamContext.isLead) {
-      teamSessionPolicy.deny.push("team_status");
-      teamSessionPolicy.deny.push("team_broadcast_answer");
-    }
   }
   const teamSessionPolicyExpanded = expandPolicyWithPluginGroups(teamSessionPolicy, pluginGroups);
 
@@ -466,7 +459,7 @@ export function createOpenClawCodingTools(options?: {
   let creatorSessionPolicy: typeof subagentPolicy | undefined;
   if (creatorTeams.length > 0 && !teamContext?.isLead) {
     creatorSessionPolicy = {
-      deny: ["teammate_spawn", "team_broadcast_answer"],
+      deny: ["ask_question", "task_submit"],
     };
   }
   const creatorSessionPolicyExpanded = expandPolicyWithPluginGroups(
@@ -478,13 +471,7 @@ export function createOpenClawCodingTools(options?: {
   let nonTeamPolicy: typeof subagentPolicy | undefined;
   if (!teamContext && creatorTeams.length === 0) {
     nonTeamPolicy = {
-      deny: [
-        "team_status",
-        "team_message",
-        "team_cleanup",
-        "team_broadcast_answer",
-        "teammate_spawn",
-      ],
+      deny: ["ask_question", "task_submit"],
     };
   }
   const nonTeamPolicyExpanded = expandPolicyWithPluginGroups(nonTeamPolicy, pluginGroups);

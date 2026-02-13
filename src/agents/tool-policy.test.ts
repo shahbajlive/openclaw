@@ -30,29 +30,23 @@ describe("tool-policy", () => {
   it("includes team tools in group:teams", () => {
     const group = TOOL_GROUPS["group:teams"];
     expect(group).toContain("team_create");
-    expect(group).toContain("task_answer");
-    expect(group).toContain("teammate_spawn");
-    expect(group).toContain("team_broadcast_answer");
-    expect(group).toContain("task_question");
+    expect(group).toContain("task_submit");
+    expect(group).toContain("ask_question");
   });
 
   it("includes team tools in group:openclaw", () => {
     const group = TOOL_GROUPS["group:openclaw"];
     expect(group).toContain("team_create");
-    expect(group).toContain("teammate_spawn");
-    expect(group).toContain("task_answer");
-    expect(group).toContain("team_status");
-    expect(group).toContain("task_question");
+    expect(group).toContain("task_submit");
+    expect(group).toContain("ask_question");
   });
 
   it("teammate profile allows task tools and denies lead tools", () => {
     const profile = resolveToolProfilePolicy("teammate");
     expect(profile).toBeDefined();
-    expect(profile?.allow).toContain("task_answer");
-    expect(profile?.allow).toContain("task_question");
-    expect(profile?.allow).not.toContain("team_status");
+    expect(profile?.allow).toContain("task_submit");
+    expect(profile?.allow).toContain("ask_question");
     expect(profile?.deny).toContain("team_create");
-    expect(profile?.deny).toContain("teammate_spawn");
   });
 
   it("teammate profile denies automation and messaging", () => {
@@ -73,7 +67,7 @@ describe("tool-policy", () => {
     const expanded = expandToolGroups(["group:teams"]);
     const set = new Set(expanded);
     expect(set.has("team_create")).toBe(true);
-    expect(set.has("teammate_spawn")).toBe(true);
-    expect(set.has("task_answer")).toBe(true);
+    expect(set.has("task_submit")).toBe(true);
+    expect(set.has("ask_question")).toBe(true);
   });
 });

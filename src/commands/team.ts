@@ -5,7 +5,7 @@ import {
   resolveTeamTmuxSessionName,
 } from "../agents/teams/display-tmux.js";
 import { listTasks } from "../agents/teams/task-list.js";
-import { initTeamRegistry, listActiveTeams } from "../agents/teams/team-registry.js";
+import { listActiveTeams } from "../agents/teams/team-registry.js";
 import { loadConfig } from "../config/config.js";
 import { renderTable, type TableColumn } from "../terminal/table.js";
 
@@ -19,8 +19,6 @@ export async function teamStatusCommand(options: { team?: string; json?: boolean
     console.error("Teams are not enabled. Set gateway.teams.enabled: true in config.");
     process.exit(1);
   }
-
-  initTeamRegistry();
 
   if (options.team) {
     // Show specific team status
@@ -63,8 +61,6 @@ export async function teamAttachCommand(options: { team: string }) {
     console.error("Teams are not enabled.");
     process.exit(1);
   }
-
-  initTeamRegistry();
 
   if (!(await isTmuxAvailable())) {
     console.error("tmux is not installed or not available in PATH.");
@@ -117,7 +113,7 @@ function printTeamStatus(team: Team) {
       { key: "completed", header: "Completed", align: "right", minWidth: 10 },
     ];
     const teammatesRows = teammates.map((tm) => ({
-      role: tm.role,
+      role: tm.role ?? tm.teammateId,
       status: tm.status,
       currentTask: tm.currentTask ?? "-",
       claimed: String(tm.claimedTasks),
@@ -157,7 +153,7 @@ function printTeamStatus(team: Team) {
       title: task.title.length > 25 ? `${task.title.slice(0, 22)}...` : task.title,
       status: task.status,
       assignee: task.assignee ?? "-",
-      priority: task.priority,
+      priority: String(task.priority),
     }));
     console.log(
       renderTable({

@@ -1,157 +1,122 @@
-// src/agents/teams/types.ts
+export const TEAM_STATUS = {
+  INIT: "init",
+  WORKING: "working",
+  FAILED: "failed",
+  IDLE: "idle",
+} as const;
 
-// ---- Coordination Mode ----
+export const RESERVED_MATE_ID = {
+  LEAD: "lead",
+  CHORE: "chore",
+  PR_REVIEWER: "pr_reviewer",
+} as const;
 
-// ---- Lead Status Constants ----
+export const MATE_STATUS = {
+  INIT: "init",
+  IDLE: "idle",
+  WORKING: "working",
+  FAILED: "failed",
+} as const;
 
-export const LEAD_STATUS_INIT = "init";
-export const LEAD_STATUS_IDLE = "idle";
-export const LEAD_STATUS_WORKING = "working";
-export const LEAD_STATUS_FAILED = "failed";
+export const PRIORITY_ORDER = {
+  critical: 4,
+  high: 3,
+  normal: 2,
+  low: 1,
+} as const;
 
-export type LeadStatus =
-  | typeof LEAD_STATUS_INIT
-  | typeof LEAD_STATUS_IDLE
-  | typeof LEAD_STATUS_WORKING
-  | typeof LEAD_STATUS_FAILED;
+export type TaskPriority = number;
 
-// ---- Teammate Status Constants ----
+export const TASK_STATUS = {
+  PENDING: "pending",
+  BLOCKED: "blocked",
+  CLAIMED: "claimed",
+  IN_PROGRESS: "in-progress",
+  COMPLETED: "completed",
+  FAILED: "failed",
+} as const;
 
-export const TEAMMATE_STATUS_INIT = "init";
-export const TEAMMATE_STATUS_IDLE = "idle";
-export const TEAMMATE_STATUS_WORKING = "working";
-export const TEAMMATE_STATUS_FAILED = "failed";
+export type TeamStatus = (typeof TEAM_STATUS)[keyof typeof TEAM_STATUS];
+export type MateStatus = (typeof MATE_STATUS)[keyof typeof MATE_STATUS];
+export type TaskStatus = (typeof TASK_STATUS)[keyof typeof TASK_STATUS];
+export type TaskClass = "primary" | "secondary";
 
-// ---- Team ----
-
-export type TeamConfig = {
-  notifyOnUnblock: boolean;
-};
-
-export type TeamStatus = "init" | "working" | "failed" | "idle";
-
-export type Team = {
-  teamId: string; // UUID
-  teamName: string; // human-readable
-  description?: string;
-  creatorSessionKey?: string; // session that created the team (may be outside the team)
-  teamAgentId: string; // agent id backing the team workspace + sessions
-  leadSessionKey: string;
-  leadWorkspaceDir?: string;
-  status: TeamStatus;
-  persistent: boolean; // false for auto-cleanup teams, true for persistent teams
-  boundSessionKey?: string; // gateway session key for non-persistent teams (used for cleanup)
+export type Teammate = {
+  teammateId: string;
+  status: MateStatus;
+  model?: string;
   createdAt: number;
   updatedAt: number;
-  teammates: Record<string, Teammate>; // keyed by teammateId
-  config: TeamConfig;
+  currentTaskId?: string;
+};
+
+export type Team = {
+  teamId: string;
+  teamName: string;
+  instruction: string;
+  creatorSessionKey?: string;
+  teamAgentId: string;
+  status: TeamStatus;
+  createdAt: number;
+  updatedAt: number;
+  teammates: Record<string, Teammate>;
   tmuxPanes?: {
     sessionName: string;
     leadPaneId?: string;
     teammatePaneIds: Record<string, string>;
     updatedAt: number;
   };
-  // Guard: only send idle-notification to the lead once per idle window.
-  // Reset when a new teammate is spawned or a new task is added.
-  idleNotificationSent?: boolean;
-  // Lead status tracking
-  leadStatus?: LeadStatus;
-  leadRunId?: string;
-  answerBroadcasted?: boolean;
 };
-
-// ---- Teammate ----
-
-export type TeammateStatus = "init" | "idle" | "working" | "failed";
-
-export type Teammate = {
-  teammateId: string; // UUID
-  role: string;
-  sessionKey: string;
-  workspaceDir?: string;
-  status: TeammateStatus;
-  model?: string; // cross-model support
-  isChore?: boolean;
-  requirePlanApproval: boolean;
-  planApproved: boolean; // false until lead approves
-  currentTask?: string;
-  currentTaskId?: string;
-  claimedTasks: number;
-  completedTasks: number;
-  createdAt: number;
-  timeout?: number; // seconds before auto-termination
-};
-
-// ---- Task ----
-
-export type TaskStatus = "pending" | "blocked" | "claimed" | "in-progress" | "completed" | "failed";
-export type TaskPriority = "low" | "normal" | "high" | "critical";
-export type TaskClass = "primary" | "secondary";
 
 export type Task = {
   taskId: string;
   title: string;
-  description?: string;
+  instruction: string;
+  submit: string;
   status: TaskStatus;
-  assignee?: string; // teammateId
-  dependsOn: string[]; // task IDs
+  assignee: string;
+  contextSessionKey: string;
+  dependsOn: string[];
   priority: TaskPriority;
-  taskClass?: TaskClass;
-  metadata?: Record<string, unknown>;
-  result?: "success" | "failure";
-  summary?: string;
-  artifacts?: string[];
+  taskClass: TaskClass;
   createdAt: number;
-  claimedAt?: number;
-  completedAt?: number;
+  claimedAt: number;
+  completedAt: number;
+  commitId?: string;
+  clones: number;
+  onSubmit?: (taskId: string, reply: string) => void;
 };
 
-// ---- Team Message ----
+// ---- Swarm ----
 
-export type MessagePriority = "normal" | "urgent";
+export type SwarmTask = Task;
 
-export type TeamMessage = {
-  messageId: string;
-  teamId: string;
-  from: string; // teammateId | "lead" | "creator"
-  to: string; // teammateId or "all" for broadcast
-  message: string;
-  priority: MessagePriority;
-  createdAt: number;
+export type SwarmTaskNode = {
+  taskId: string;
+  assignee: string;
+  status: TaskStatus;
 };
 
-// ---- Plan (for plan approval workflow) ----
+export type SwarmAskMode = "read" | "edit";
 
-export type PlanStatus = "pending" | "approved" | "rejected" | "revision-requested";
-
-export type PlanStep = {
-  description: string;
-  estimatedTokens?: number;
-  tools?: string[];
+export type SwarmAddTaskParams = {
+  title: string;
+  assignTo?: string;
+  priority?: Task["priority"] | keyof typeof PRIORITY_ORDER;
+  dependsOn?: string[];
+  instruction?: string;
+  taskClass?: Task["taskClass"];
+  status?: Task["status"];
+  contextSessionKey?: string;
+  onSubmit?: (taskId: string, reply: string) => void;
 };
 
-export type TeammatePlan = {
+export type SwarmTeamMember = Teammate;
+
+export type SwarmTeamContext = {
+  isLead: boolean;
   teammateId: string;
-  teamId: string;
-  status: PlanStatus;
-  plan: {
-    summary: string;
-    steps: PlanStep[];
-    risks?: string[];
-    alternatives?: string[];
-  };
-  feedback?: string;
-  submittedAt: number;
-  reviewedAt?: number;
+  task: SwarmTask;
 };
 
-// ---- Task Summary (used by team_status) ----
-
-export type TaskSummary = {
-  total: number;
-  pending: number;
-  blocked: number;
-  inProgress: number;
-  completed: number;
-  failed: number;
-};
+export type SwarmTeamRecord = Team;

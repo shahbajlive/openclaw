@@ -6,8 +6,8 @@ This section is shared between Team Leads and Teammates. It defines how OpenClaw
 
 ## Non-Negotiables
 
-- **Always include `teamId`** in every team-related tool call (e.g. `task_question`, `task_answer`, `team_broadcast_answer`). Use `teamId: "{{teamId}}"` for this team.
-- **Task tools are the only coordination mechanism.** The system creates tasks from `init_task`, `task_question`, and Chore audits. Teammates use `task_question` to raise dependency questions and `task_answer` to submit work.
+- **Always include `teamId`** in every team-related tool call (e.g. `ask_question`, `task_submit`). Use `teamId: "{{teamId}}"` for this team.
+- **Task tools are the only coordination mechanism.** The system creates tasks from `init_task`, `ask_question`, and audits. Teammates use `ask_question` to raise dependency questions and `task_submit` to submit work.
 - **Your normal text output is not shared.** Use task tools only.
 
 ---
@@ -16,7 +16,7 @@ This section is shared between Team Leads and Teammates. It defines how OpenClaw
 
 - **Team**: shared coordination context and task graph.
 - **Team Lead**: orchestrates; does not implement tasks directly.
-- **Teammate**: executes tasks; reports back via `task_answer`.
+- **Teammate**: executes tasks; reports back via `task_submit`.
 - **Chore**: taskless auditor; runs heartbeat checks and flags violations.
 - **Task**: a work item in the team's task list with dependencies and status.
 - **System event**: delivered runtime signal for task assignment/coordination updates.
@@ -36,7 +36,7 @@ This section is shared between Team Leads and Teammates. It defines how OpenClaw
 - **See work**: rely on pending lead tasks and teammate status
 - **Claim work**: auto-claimed by the system when a teammate goes IDLE
 - **Work**: do the actual investigation/implementation in your session
-- **Complete work**: teammates use `task_answer` (include a short answer and key artifacts)
+- **Complete work**: teammates use `task_submit` (include a short answer and key artifacts)
 
 **Statuses you'll see**: `pending`, `blocked`, `claimed`, `in-progress`, `completed`, `failed`.
 
@@ -55,10 +55,12 @@ When the team is created with initial tasks, the system creates a single lead-ow
 Your job is to turn that into a concrete task plan.
 
 **How to answer `init_task`:**
-- Reply using `task_answer` with a JSON plan.
+
+- Reply using `task_submit` with a JSON plan.
 - The system parses the JSON, creates subtasks, and makes each subtask depend on `init_task`.
 
 **JSON shape:**
+
 ```json
 {
   "tasks": [
@@ -69,6 +71,7 @@ Your job is to turn that into a concrete task plan.
 ```
 
 Notes:
+
 - `assignee` can be a teammate id or role.
 - `dependsOn` can reference task `id`s or 1-based indices in the list.
 
@@ -90,17 +93,17 @@ Priority defaults:
 
 **When blocked while working:**
 
-1. Use `task_question` with the dependency task id + question text (the dependency must already be in your task's `dependsOn`).
+1. Use `ask_question` with the dependency task id + question text (the dependency must already be in your task's `dependsOn`).
 2. The system creates `qn_request` assigned to the dependency owner, adds it as a dependency to your current task, **hard-interrupts** your run, and yields you to IDLE.
 3. Do **not** busy-wait or loop inside the task.
 
 **Re-ask is a new task:**
 
-- If the answer is insufficient, create a *new* `qn_request` and repeat.
+- If the answer is insufficient, create a _new_ `qn_request` and repeat.
 
 **Question-on-question is not allowed unless the question targets a dependency task:**
 
-- If you cannot answer and the missing info is **not** in your dependency graph, submit `task_answer` with a clear failure reason.
+- If you cannot answer and the missing info is **not** in your dependency graph, submit `task_submit` with a clear failure reason.
 
 **Lead review (hard stop):**
 
@@ -116,7 +119,7 @@ Priority defaults:
 
 ## Priority Rule (Deterministic)
 
-On each idle transition, the system auto-claims the highest priority *pending & unblocked* task assigned to you:
+On each idle transition, the system auto-claims the highest priority _pending & unblocked_ task assigned to you:
 
 1. `lead_review` (Lead only)
 2. `review_question` / `qn_request`

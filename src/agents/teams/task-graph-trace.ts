@@ -40,19 +40,38 @@ function resolveTraceDir(): string {
 
 function renderTaskGraph(tasks: Task[]): string[] {
   const lines: string[] = [];
+  const edgeSet = new Set<string>();
   lines.push("```mermaid");
   lines.push("graph TD");
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
     const safeTitle = task.title.replace(/\"/g, "'");
-    lines.push(`  t_${shortId}[\"${safeTitle} (${task.status})\"]`);
+    const assigneeSuffix = task.assignee ? ` @${task.assignee}` : "";
+    lines.push(`  t_${shortId}[\"${safeTitle}${assigneeSuffix} (${task.status})\"]`);
   }
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
     for (const dep of task.dependsOn) {
-      lines.push(`  t_${dep.slice(0, 8)} --> t_${shortId}`);
+      edgeSet.add(`  t_${dep.slice(0, 8)} --> t_${shortId}`);
     }
   }
+  const broadcastTasks = tasks.filter((task) => task.title === "broadcast_answer");
+  for (const broadcast of broadcastTasks) {
+    if (broadcast.dependsOn.length > 0) {
+      continue;
+    }
+    const broadcastShortId = broadcast.taskId.slice(0, 8);
+    for (const source of tasks) {
+      if (source.taskId === broadcast.taskId || source.title === "broadcast_answer") {
+        continue;
+      }
+      if (source.status !== "completed" && source.status !== "failed") {
+        continue;
+      }
+      edgeSet.add(`  t_${source.taskId.slice(0, 8)} --> t_${broadcastShortId}`);
+    }
+  }
+  lines.push(...edgeSet);
   lines.push("```");
   return lines;
 }

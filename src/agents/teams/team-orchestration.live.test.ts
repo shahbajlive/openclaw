@@ -14,8 +14,7 @@ import { isTruthyEnvValue } from "../../infra/env.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
 import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 import { listTasks } from "./task-list.js";
-import { getTeam, listCreatorTeams } from "./team-registry.js";
-import { createTeamCleanupTool } from "./tools/index.js";
+import { cleanupTeam, getTeam, listCreatorTeams } from "./team-registry.js";
 
 type TeamExample = {
   name: string;
@@ -367,11 +366,7 @@ describeCases("team orchestration (live)", () => {
           label: `${example.name} - idle`,
         });
 
-        const cleanupTool = createTeamCleanupTool({ agentSessionKey: sessionKey });
-        await cleanupTool.execute("live-cleanup", {
-          teamId: team.teamId,
-          confirm: true,
-        });
+        cleanupTeam(team.teamId);
       },
       DEFAULT_TIMEOUT_MS + 60_000,
     );

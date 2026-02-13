@@ -37,18 +37,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   // Nodes + device tools
   "group:nodes": ["nodes"],
   // Team coordination tools
-  "group:teams": [
-    "team_create",
-    "team_discover",
-    "team_status",
-    "team_message",
-    "team_broadcast_answer",
-    "team_cleanup",
-    "teammate_spawn",
-    "task_answer",
-    "task_question",
-    "task_get",
-  ],
+  "group:teams": ["team_create", "task_submit", "ask_question"],
   // All OpenClaw native tools (excludes provider plugins).
   "group:openclaw": [
     "browser",
@@ -69,15 +58,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "web_fetch",
     "image",
     "team_create",
-    "team_discover",
-    "team_status",
-    "team_message",
-    "team_broadcast_answer",
-    "team_cleanup",
-    "teammate_spawn",
-    "task_answer",
-    "task_question",
-    "task_get",
+    "task_submit",
+    "ask_question",
   ],
 };
 
@@ -107,15 +89,13 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
       "group:runtime", // exec, process
       "group:memory", // memory_search, memory_get
       "group:web", // web_search, web_fetch
-      "task_answer",
-      "task_question",
+      "task_submit",
+      "ask_question",
       "sessions_spawn",
       "image",
     ],
     deny: [
       "team_create", // only lead can create teams
-      "team_message", // only creator can message the lead
-      "teammate_spawn", // only lead can spawn teammates
       "group:automation", // no cron, no gateway tool
       "group:messaging", // no direct user messaging (message tool)
     ],

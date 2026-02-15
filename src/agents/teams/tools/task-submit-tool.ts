@@ -1,19 +1,21 @@
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "../../tools/common.js";
-import { AgentSwarm, type AgentSwarmOptions } from "../agent-swarm.js";
+import type { TaskSubmitToolOptions } from "../types.js";
+import { AgentSwarm } from "../agent-swarm.js";
 
 const TaskSubmitSchema = Type.Object({
-  teamId: Type.String(),
-  teammateId: Type.String(),
-  taskId: Type.String({ description: "Task id." }),
+  revisionId: Type.Optional(
+    Type.String({ description: "Revision id seen by assignee (for stale-submit guard)." }),
+  ),
   answer: Type.String({ description: "Task submission payload." }),
-  errorText: Type.Optional(Type.String({ description: "Failure reason for a failed task." })),
-  error: Type.Optional(Type.String({ description: "Failure reason for a failed task." })),
+  errorText: Type.Optional(
+    Type.String({ description: "Set only when failed: human-readable failure reason." }),
+  ),
+  error: Type.Optional(Type.String({ description: "Legacy alias for errorText." })),
 });
 
-export type TaskSubmitToolOptions = AgentSwarmOptions & {
-  swarm?: AgentSwarm;
-};
+export type { TaskSubmitToolOptions } from "../types.js";
 
 export function createTaskSubmitTool(opts?: TaskSubmitToolOptions): AnyAgentTool {
   const swarm = opts?.swarm ?? new AgentSwarm({ agentSessionKey: opts?.agentSessionKey });
@@ -22,7 +24,8 @@ export function createTaskSubmitTool(opts?: TaskSubmitToolOptions): AnyAgentTool
     name: "task_submit",
     description: "Submit your task result and advance dependency state.",
     parameters: TaskSubmitSchema,
-    execute: (toolCallId, args) => swarm.taskSubmit(toolCallId, args),
+    execute: async (toolCallId, args): Promise<AgentToolResult<unknown>> =>
+      (await swarm.taskSubmit(toolCallId, args)) as AgentToolResult<unknown>,
   };
 }
 

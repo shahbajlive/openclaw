@@ -1,7 +1,18 @@
 import Handlebars from "handlebars";
 import fs from "node:fs";
 import path from "node:path";
-import type { Team, Teammate } from "./types.js";
+
+type PromptTeam = {
+  teamId: string;
+  teamName: string;
+  teamAgentId: string;
+  description?: string;
+};
+
+type PromptTeammate = {
+  teammateId: string;
+  role?: string;
+};
 
 const PROMPTS_DIR = path.join(import.meta.dirname, "prompts");
 const PROMPT_PARTIALS_DIR = path.join(PROMPTS_DIR, "partials");
@@ -35,52 +46,59 @@ function loadTemplate(filename: string): HandlebarsTemplateDelegate {
   return template;
 }
 
+function readOptionalStringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = (value as Record<string, unknown>)[key];
+  if (typeof raw !== "string") return undefined;
+  const text = raw.trim();
+  return text || undefined;
+}
+
 /**
- * Build the system prompt injected into the Team Lead's session.
- * This gives the lead awareness of the team, its mode, and available tools.
+ * Build a unified team system prompt.
+ * Lead/teammate sessions share the same prompt contract.
  */
 export function buildTeamLeadSystemPrompt(params: {
-  team: Team;
+  team: PromptTeam;
   teammatesList: Array<{ role: string; status: string; currentTask?: string }>;
   sessionType?: string;
   sessionId?: string;
 }): string {
-  const template = loadTemplate("team-lead.md");
+  const template = loadTemplate("team.md");
+  const description = readOptionalStringField(params.team, "description");
+  const teamSize = params.teammatesList.length;
 
   return template({
     teamId: params.team.teamId,
     teamName: params.team.teamName,
-    description: params.team.description,
-    persistent: params.team.persistent,
-    teammates: params.teammatesList,
+    teamSize,
+    description,
     sessionType: params.sessionType || "unknown",
     sessionId: params.sessionId || "unknown",
   });
 }
 
 /**
- * Build the system prompt injected into a Teammate's session.
- * This gives the teammate awareness of its role, the team, and available tools.
+ * Build the unified team system prompt for a teammate session.
  */
 export function buildTeammateSystemPrompt(params: {
-  team: Team;
-  teammate: Teammate;
+  team: PromptTeam;
+  teammate: PromptTeammate;
   otherTeammates: Array<{ role: string; teammateId: string }>;
   sessionType?: string;
   sessionId?: string;
 }): string {
-  const template = loadTemplate("teammate.md");
+  const template = loadTemplate("team.md");
+  const description = readOptionalStringField(params.team, "description");
+  const role = readOptionalStringField(params.teammate, "role") ?? params.teammate.teammateId;
+  const teamSize = params.otherTeammates.length + 1;
 
   return template({
     teamId: params.team.teamId,
     teamName: params.team.teamName,
-    description: params.team.description,
-    teammateId: params.teammate.teammateId,
-    role: params.teammate.role,
-    leadSessionKey: params.team.leadSessionKey,
-    otherTeammates: params.otherTeammates,
-    requirePlanApproval: params.teammate.requirePlanApproval,
-    planApproved: params.teammate.planApproved,
+    description,
+    role,
+    teamSize,
     sessionType: params.sessionType || "unknown",
     sessionId: params.sessionId || "unknown",
   });

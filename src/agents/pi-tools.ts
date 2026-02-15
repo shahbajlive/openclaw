@@ -459,7 +459,7 @@ export function createOpenClawCodingTools(options?: {
   let creatorSessionPolicy: typeof subagentPolicy | undefined;
   if (creatorTeams.length > 0 && !teamContext?.isLead) {
     creatorSessionPolicy = {
-      deny: ["ask_question", "task_submit"],
+      deny: ["ask_question", "task_submit", "task_plan", "taskSearch"],
     };
   }
   const creatorSessionPolicyExpanded = expandPolicyWithPluginGroups(
@@ -471,7 +471,7 @@ export function createOpenClawCodingTools(options?: {
   let nonTeamPolicy: typeof subagentPolicy | undefined;
   if (!teamContext && creatorTeams.length === 0) {
     nonTeamPolicy = {
-      deny: ["ask_question", "task_submit"],
+      deny: ["ask_question", "task_submit", "task_plan", "taskSearch"],
     };
   }
   const nonTeamPolicyExpanded = expandPolicyWithPluginGroups(nonTeamPolicy, pluginGroups);

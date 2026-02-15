@@ -45,9 +45,9 @@ function renderTaskGraph(tasks: Task[]): string[] {
   lines.push("graph TD");
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
-    const safeTitle = task.title.replace(/\"/g, "'");
+    const safeTitle = task.title.replace(/"/g, "'");
     const assigneeSuffix = task.assignee ? ` @${task.assignee}` : "";
-    lines.push(`  t_${shortId}[\"${safeTitle}${assigneeSuffix} (${task.status})\"]`);
+    lines.push(`  t_${shortId}["${safeTitle}${assigneeSuffix} (${task.status})"]`);
   }
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
@@ -55,20 +55,20 @@ function renderTaskGraph(tasks: Task[]): string[] {
       edgeSet.add(`  t_${dep.slice(0, 8)} --> t_${shortId}`);
     }
   }
-  const broadcastTasks = tasks.filter((task) => task.title === "broadcast_answer");
-  for (const broadcast of broadcastTasks) {
-    if (broadcast.dependsOn.length > 0) {
+  const endTasks = tasks.filter((task) => task.title === "end_task");
+  for (const endTask of endTasks) {
+    if (endTask.dependsOn.length > 0) {
       continue;
     }
-    const broadcastShortId = broadcast.taskId.slice(0, 8);
+    const endTaskShortId = endTask.taskId.slice(0, 8);
     for (const source of tasks) {
-      if (source.taskId === broadcast.taskId || source.title === "broadcast_answer") {
+      if (source.taskId === endTask.taskId || source.title === "end_task") {
         continue;
       }
       if (source.status !== "completed" && source.status !== "failed") {
         continue;
       }
-      edgeSet.add(`  t_${source.taskId.slice(0, 8)} --> t_${broadcastShortId}`);
+      edgeSet.add(`  t_${source.taskId.slice(0, 8)} --> t_${endTaskShortId}`);
     }
   }
   lines.push(...edgeSet);

@@ -1,31 +1,31 @@
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "../../tools/common.js";
-import { AgentSwarm, type AgentSwarmOptions } from "../agent-swarm.js";
+import type { AskQuestionToolOptions } from "../types.js";
+import { optionalStringEnum } from "../../schema/typebox.js";
+import { AgentSwarm } from "../agent-swarm.js";
 
 const AskQuestionSchema = Type.Object({
-  teamId: Type.String(),
-  teammateId: Type.String(),
-  taskId: Type.String({
-    description: "Current task id.",
-  }),
   dependencyTaskId: Type.String({
     description: "Task id for the dependency you need context from.",
   }),
   questionText: Type.String({ description: "Question for the dependency owner." }),
-  mode: Type.Optional(Type.String({ description: "Question mode: read (default) or edit." })),
+  mode: optionalStringEnum(["read", "edit"] as const, {
+    description:
+      "Question mode. read (default) asks for clarification; edit requests dependency rework.",
+  }),
 });
 
-export type AskQuestionToolOptions = AgentSwarmOptions & {
-  swarm?: AgentSwarm;
-};
+export type { AskQuestionToolOptions } from "../types.js";
 
 export function createTaskQuestionTool(opts?: AskQuestionToolOptions): AnyAgentTool {
   const swarm = opts?.swarm ?? new AgentSwarm({ agentSessionKey: opts?.agentSessionKey });
   return {
     label: "Teams",
     name: "ask_question",
-    description: "Ask a teammate question and block current work until it is answered.",
+    description: "Ask a dependency question and block current work until answered.",
     parameters: AskQuestionSchema,
-    execute: (toolCallId, args) => swarm.askQuestion(toolCallId, args),
+    execute: async (toolCallId, args): Promise<AgentToolResult<unknown>> =>
+      (await swarm.askQuestion(toolCallId, args)) as AgentToolResult<unknown>,
   };
 }

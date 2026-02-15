@@ -1,15 +1,15 @@
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "../../tools/common.js";
-import { AgentSwarm, type AgentSwarmOptions } from "../agent-swarm.js";
+import type { TeamCreateToolOptions } from "../types.js";
+import { AgentSwarm } from "../agent-swarm.js";
 
 const TeamCreateSchema = Type.Object({
   teamName: Type.String(),
   instruction: Type.String(),
 });
 
-export type TeamCreateToolOptions = AgentSwarmOptions & {
-  swarm?: AgentSwarm;
-};
+export type { TeamCreateToolOptions } from "../types.js";
 
 export function createTeamCreateTool(opts?: TeamCreateToolOptions): AnyAgentTool {
   const swarm = opts?.swarm ?? new AgentSwarm({ agentSessionKey: opts?.agentSessionKey });
@@ -18,6 +18,7 @@ export function createTeamCreateTool(opts?: TeamCreateToolOptions): AnyAgentTool
     name: "team_create",
     description: "Create a team with an initial instruction task.",
     parameters: TeamCreateSchema,
-    execute: (toolCallId, args) => swarm.teamCreate(toolCallId, args),
+    execute: async (toolCallId, args): Promise<AgentToolResult<unknown>> =>
+      (await swarm.teamCreate(toolCallId, args)) as AgentToolResult<unknown>,
   };
 }

@@ -37,7 +37,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   // Nodes + device tools
   "group:nodes": ["nodes"],
   // Team coordination tools
-  "group:teams": ["team_create", "task_submit", "ask_question"],
+  "group:teams": ["team_create", "task_plan", "task_submit", "ask_question", "taskSearch"],
   // All OpenClaw native tools (excludes provider plugins).
   "group:openclaw": [
     "browser",
@@ -58,8 +58,10 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "web_fetch",
     "image",
     "team_create",
+    "task_plan",
     "task_submit",
     "ask_question",
+    "taskSearch",
   ],
 };
 
@@ -91,6 +93,8 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
       "group:web", // web_search, web_fetch
       "task_submit",
       "ask_question",
+      "task_plan",
+      "taskSearch",
       "sessions_spawn",
       "image",
     ],

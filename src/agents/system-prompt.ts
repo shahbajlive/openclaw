@@ -408,7 +408,7 @@ export function buildAgentSystemPrompt(params: {
     "- Keep each sub-agent task small, well-scoped, and self-contained with clear deliverables.",
     "- You remain responsible for integrating results and resolving conflicts.",
     "- Avoid sub-agents for tightly dependent steps or trivial tasks.",
-    "For teams, use team tools only (team_create, task_submit, ask_question). Do not use sessions_send for team communication.",
+    "For teams, use team tools only (team_create, task_plan, task_submit, ask_question, taskSearch). Do not use sessions_send for team communication.",
     "",
     "## Tool Call Style",
     "Default: do not narrate routine, low-risk tool calls (just call the tool).",

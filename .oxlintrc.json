@@ -7,7 +7,7 @@
     "suspicious": "error"
   },
   "rules": {
-    "curly": "error",
+    "curly": ["error", "multi-line"],
     "eslint-plugin-unicorn/prefer-array-find": "off",
     "eslint/no-await-in-loop": "off",
     "eslint/no-new": "off",

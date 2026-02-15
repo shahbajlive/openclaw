@@ -1,12 +1,9 @@
-import crypto from "node:crypto";
 import type { OpenClawConfig } from "../config/config.js";
 import type { GatewayMessageChannel } from "../utils/message-channel.js";
 import type { AnyAgentTool } from "./tools/common.js";
-import { callGateway } from "../gateway/call.js";
 import { resolvePluginTools } from "../plugins/tools.js";
-import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { resolveSessionAgentId } from "./agent-scope.js";
-import { AGENT_LANE_NESTED } from "./lanes.js";
+import { createOpenClawSwarmPlatform } from "./openclaw-swarm-platform.js";
 import { AgentSwarm } from "./teams/agent-swarm.js";
 import { createAgentSwarmTools } from "./teams/tools/index.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
@@ -28,72 +25,6 @@ import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 
 const TEAM_BOOTSTRAP_WAIT_FLOOR_MS = 30_000;
 const TEAM_BOOTSTRAP_WAIT_CEIL_MS = 30 * 60_000;
-
-function buildBootstrapMessage(params: {
-  teamId: string;
-  teammateId: string;
-  taskId: string;
-  title: string;
-  instruction: string;
-}): string {
-  return [
-    `Team: ${params.teamId}`,
-    `Teammate: ${params.teammateId}`,
-    `Task: ${params.taskId}`,
-    `Title: ${params.title}`,
-    "",
-    "Instruction:",
-    params.instruction,
-    "",
-    "When done, call task_submit with teamId, teammateId, taskId, and answer.",
-    "If you fail (token/network/runtime), call task_submit with errorText and a short answer.",
-  ].join("\n");
-}
-
-function normalizeBootstrapFailure(params: { status?: string; error?: unknown }): string {
-  const status = typeof params.status === "string" ? params.status.trim().toLowerCase() : "";
-  const raw =
-    params.error instanceof Error
-      ? params.error.message
-      : typeof params.error === "string"
-        ? params.error
-        : "";
-  const text = raw.trim();
-  const lower = text.toLowerCase();
-
-  if (status === "timeout") {
-    return text || "Teammate run timed out before task completion.";
-  }
-  if (
-    lower.includes("token") ||
-    lower.includes("context length") ||
-    lower.includes("max tokens") ||
-    lower.includes("maximum context")
-  ) {
-    return text ? `Token limit: ${text}` : "Teammate run hit token/context limit.";
-  }
-  if (
-    lower.includes("network") ||
-    lower.includes("econn") ||
-    lower.includes("socket") ||
-    lower.includes("dns") ||
-    lower.includes("timed out") ||
-    lower.includes("connection") ||
-    lower.includes("503") ||
-    lower.includes("502") ||
-    lower.includes("429")
-  ) {
-    return text
-      ? `Network/provider error: ${text}`
-      : "Teammate run failed due to network/provider error.";
-  }
-  if (text) {
-    return text;
-  }
-  return status === "error"
-    ? "Teammate run failed due to execution error."
-    : "Teammate run failed before task submission.";
-}
 
 export function createOpenClawTools(options?: {
   sandboxBrowserBridgeUrl?: string;
@@ -237,129 +168,25 @@ export function createOpenClawTools(options?: {
   const submitBootstrapFailure = async (
     params: {
       teamId: string;
-      teammateId: string;
       taskId: string;
     },
     errorText: string,
   ) => {
     await bootstrapFailureSwarm?.taskSubmit("team-bootstrap-auto-failure", {
       teamId: params.teamId,
-      teammateId: params.teammateId,
       taskId: params.taskId,
       answer: "bootstrap_failed",
       errorText,
     });
   };
 
-  const teamSessionHooks = {
-    sendBootstrap: async (params: {
-      teamId: string;
-      teammateId: string;
-      taskId: string;
-      sessionKey: string;
-      title: string;
-      instruction: string;
-    }) => {
-      const sessionKey = params.sessionKey.trim();
-      if (!sessionKey) {
-        await submitBootstrapFailure(params, "Missing teammate session key for bootstrap.");
-        return;
-      }
-      const idempotencyKey = crypto.randomUUID();
-      const bootstrapMessage = buildBootstrapMessage(params);
-      try {
-        const accepted = await callGateway<{ runId?: string }>({
-          method: "agent",
-          params: {
-            message: bootstrapMessage,
-            sessionKey,
-            idempotencyKey,
-            deliver: false,
-            channel: INTERNAL_MESSAGE_CHANNEL,
-            lane: AGENT_LANE_NESTED,
-          },
-          timeoutMs: 10_000,
-        });
-        const runId =
-          typeof accepted?.runId === "string" && accepted.runId.trim()
-            ? accepted.runId
-            : idempotencyKey;
-        const wait = await callGateway<{ status?: string; error?: string }>({
-          method: "agent.wait",
-          params: {
-            runId,
-            timeoutMs: bootstrapWaitMs,
-          },
-          timeoutMs: bootstrapWaitMs + 10_000,
-        });
-        const waitStatus = typeof wait?.status === "string" ? wait.status.trim().toLowerCase() : "";
-        if (waitStatus === "ok") {
-          return;
-        }
-        const failureText = normalizeBootstrapFailure({
-          status: waitStatus,
-          error: wait?.error,
-        });
-        await submitBootstrapFailure(params, failureText);
-      } catch (err) {
-        const failureText = normalizeBootstrapFailure({
-          status: "error",
-          error: err,
-        });
-        await submitBootstrapFailure(params, failureText);
-      }
-    },
-    appendSessionNote: async (params: { teamId: string; sessionKey: string; note: string }) => {
-      const sessionKey = params.sessionKey.trim();
-      const note = params.note.trim();
-      if (!sessionKey || !note) {
-        return;
-      }
-      await callGateway({
-        method: "chat.inject",
-        params: {
-          sessionKey,
-          message: note,
-          label: "teams",
-        },
-        timeoutMs: 10_000,
-      });
-    },
-    interruptSession: async (params: {
-      teamId: string;
-      teammateId: string;
-      sessionKey: string;
-      reason: string;
-    }) => {
-      const sessionKey = params.sessionKey.trim();
-      if (!sessionKey) {
-        return;
-      }
-      await callGateway({
-        method: "chat.abort",
-        params: {
-          sessionKey,
-        },
-        timeoutMs: 10_000,
-      });
-      const reason = params.reason.trim();
-      if (!reason) {
-        return;
-      }
-      await callGateway({
-        method: "chat.inject",
-        params: {
-          sessionKey,
-          message: reason,
-          label: "teams",
-        },
-        timeoutMs: 10_000,
-      });
-    },
-  };
+  const teamPlatform = createOpenClawSwarmPlatform({
+    bootstrapWaitMs,
+    submitBootstrapFailure,
+  });
   bootstrapFailureSwarm = new AgentSwarm({
     agentSessionKey: options?.agentSessionKey,
-    sessionHooks: teamSessionHooks,
+    platform: teamPlatform,
   });
 
   // Add team tools
@@ -368,7 +195,7 @@ export function createOpenClawTools(options?: {
     agentChannel: options?.agentChannel,
     sandboxed: options?.sandboxed,
     config: options?.config,
-    sessionHooks: teamSessionHooks,
+    platform: teamPlatform,
   };
 
   const teamTools: AnyAgentTool[] = createAgentSwarmTools(teamToolOpts);

@@ -1,108 +1,132 @@
 import { describe, expect, it } from "vitest";
 import {
-  isTeamSessionKey,
-  parseTeamSessionKey,
-  buildTeammateSessionKey,
-  buildTeamLeadSessionKey,
+  deriveSessionChatType,
+  getSubagentDepth,
+  isCronSessionKey,
+} from "../sessions/session-key-utils.js";
+import {
+  classifySessionKeyShape,
+  isValidAgentId,
+  parseAgentSessionKey,
+  toAgentStoreSessionKey,
 } from "./session-key.js";
 
-describe("session-key", () => {
-  describe("team session keys", () => {
-    it("isTeamSessionKey recognizes team keys", () => {
-      expect(isTeamSessionKey("agent:team-abc:lead")).toBe(true);
-      expect(isTeamSessionKey("agent:team-abc:teammate:reviewer-uuid")).toBe(true);
-      expect(isTeamSessionKey("agent:main:subagent:xyz")).toBe(false);
-      expect(isTeamSessionKey("agent:main:main")).toBe(false);
-    });
+describe("classifySessionKeyShape", () => {
+  it("classifies empty keys as missing", () => {
+    expect(classifySessionKeyShape(undefined)).toBe("missing");
+    expect(classifySessionKeyShape("   ")).toBe("missing");
+  });
 
-    it("parseTeamSessionKey extracts components", () => {
-      const parsed = parseTeamSessionKey("agent:team-abc123:teammate:security-reviewer-uuid");
-      expect(parsed).toEqual({
-        agentId: "team-abc123",
-        teamId: "abc123",
-        role: "security-reviewer-uuid",
-        isLead: false,
-        teammateId: "security-reviewer-uuid",
-      });
-    });
+  it("classifies valid agent keys", () => {
+    expect(classifySessionKeyShape("agent:main:main")).toBe("agent");
+    expect(classifySessionKeyShape("agent:research:subagent:worker")).toBe("agent");
+  });
 
-    it("parseTeamSessionKey identifies lead", () => {
-      const parsed = parseTeamSessionKey("agent:team-abc123:lead");
-      expect(parsed?.isLead).toBe(true);
-      expect(parsed?.role).toBe("lead");
-    });
+  it("classifies malformed agent keys", () => {
+    expect(classifySessionKeyShape("agent::broken")).toBe("malformed_agent");
+    expect(classifySessionKeyShape("agent:main")).toBe("malformed_agent");
+  });
 
-    it("parseTeamSessionKey returns null for non-team keys", () => {
-      expect(parseTeamSessionKey("agent:main:main")).toBeNull();
-      expect(parseTeamSessionKey("agent:main:subagent:xyz")).toBeNull();
-      expect(parseTeamSessionKey("invalid")).toBeNull();
-    });
+  it("treats non-agent legacy or alias keys as non-malformed", () => {
+    expect(classifySessionKeyShape("main")).toBe("legacy_or_alias");
+    expect(classifySessionKeyShape("custom-main")).toBe("legacy_or_alias");
+    expect(classifySessionKeyShape("subagent:worker")).toBe("legacy_or_alias");
+  });
+});
 
-    it("buildTeammateSessionKey produces correct format", () => {
-      const key = buildTeammateSessionKey({
-        teamAgentId: "team-abc",
-        role: "reviewer",
-      });
-      expect(key).toBe("agent:team-abc:teammate:reviewer");
-    });
+describe("session key backward compatibility", () => {
+  it("classifies legacy :dm: session keys as valid agent keys", () => {
+    // Legacy session keys use :dm: instead of :direct:
+    // Both should be recognized as valid agent keys
+    expect(classifySessionKeyShape("agent:main:telegram:dm:123456")).toBe("agent");
+    expect(classifySessionKeyShape("agent:main:whatsapp:dm:+15551234567")).toBe("agent");
+    expect(classifySessionKeyShape("agent:main:discord:dm:user123")).toBe("agent");
+  });
 
-    it("buildTeammateSessionKey sanitizes role", () => {
-      const key = buildTeammateSessionKey({
-        teamAgentId: "team-abc",
-        role: "Security Reviewer!",
-      });
-      expect(key).toBe("agent:team-abc:teammate:security-reviewer-");
-    });
+  it("classifies new :direct: session keys as valid agent keys", () => {
+    expect(classifySessionKeyShape("agent:main:telegram:direct:123456")).toBe("agent");
+    expect(classifySessionKeyShape("agent:main:whatsapp:direct:+15551234567")).toBe("agent");
+    expect(classifySessionKeyShape("agent:main:discord:direct:user123")).toBe("agent");
+  });
+});
 
-    it("buildTeammateSessionKey normalizes agentId", () => {
-      const key = buildTeammateSessionKey({
-        teamAgentId: "MyAgent",
-        role: "reviewer",
-      });
-      expect(key).toBe("agent:myagent:teammate:reviewer");
-    });
+describe("getSubagentDepth", () => {
+  it("returns 0 for non-subagent session keys", () => {
+    expect(getSubagentDepth("agent:main:main")).toBe(0);
+    expect(getSubagentDepth("main")).toBe(0);
+    expect(getSubagentDepth(undefined)).toBe(0);
+  });
 
-    it("buildTeamLeadSessionKey produces correct format", () => {
-      const key = buildTeamLeadSessionKey({
-        teamAgentId: "team-abc123",
-      });
-      expect(key).toBe("agent:team-abc123:lead");
-    });
+  it("returns 2 for nested subagent session keys", () => {
+    expect(getSubagentDepth("agent:main:subagent:parent:subagent:child")).toBe(2);
+  });
+});
 
-    it("buildTeamLeadSessionKey normalizes inputs", () => {
-      const key = buildTeamLeadSessionKey({
-        teamAgentId: "MyAgent",
-      });
-      expect(key).toBe("agent:myagent:lead");
-    });
+describe("isCronSessionKey", () => {
+  it("matches base and run cron agent session keys", () => {
+    expect(isCronSessionKey("agent:main:cron:job-1")).toBe(true);
+    expect(isCronSessionKey("agent:main:cron:job-1:run:run-1")).toBe(true);
+  });
 
-    it("parseTeamSessionKey handles mixed case", () => {
-      const parsed = parseTeamSessionKey("AGENT:TEAM-ABC:LEAD");
-      expect(parsed).toEqual({
-        agentId: "team-abc",
-        teamId: "abc",
-        role: "lead",
-        isLead: true,
-      });
-    });
+  it("does not match non-cron sessions", () => {
+    expect(isCronSessionKey("agent:main:main")).toBe(false);
+    expect(isCronSessionKey("agent:main:subagent:worker")).toBe(false);
+    expect(isCronSessionKey("cron:job-1")).toBe(false);
+    expect(isCronSessionKey(undefined)).toBe(false);
+  });
+});
 
-    it("isTeamSessionKey handles null and undefined", () => {
-      expect(isTeamSessionKey(null)).toBe(false);
-      expect(isTeamSessionKey(undefined)).toBe(false);
-      expect(isTeamSessionKey("")).toBe(false);
-    });
+describe("deriveSessionChatType", () => {
+  it("detects canonical direct/group/channel session keys", () => {
+    expect(deriveSessionChatType("agent:main:discord:direct:user1")).toBe("direct");
+    expect(deriveSessionChatType("agent:main:telegram:group:g1")).toBe("group");
+    expect(deriveSessionChatType("agent:main:discord:channel:c1")).toBe("channel");
+  });
 
-    it("parseTeamSessionKey extracts complex role", () => {
-      const parsed = parseTeamSessionKey(
-        "agent:team-xyz789:teammate:backend-security-reviewer-a1b2c3",
-      );
-      expect(parsed).toEqual({
-        agentId: "team-xyz789",
-        teamId: "xyz789",
-        role: "backend-security-reviewer-a1b2c3",
-        isLead: false,
-        teammateId: "backend-security-reviewer-a1b2c3",
-      });
+  it("detects legacy direct markers", () => {
+    expect(deriveSessionChatType("agent:main:telegram:dm:123456")).toBe("direct");
+    expect(deriveSessionChatType("telegram:dm:123456")).toBe("direct");
+  });
+
+  it("detects legacy discord guild channel keys", () => {
+    expect(deriveSessionChatType("discord:acc-1:guild-123:channel-456")).toBe("channel");
+  });
+
+  it("returns unknown for main or malformed session keys", () => {
+    expect(deriveSessionChatType("agent:main:main")).toBe("unknown");
+    expect(deriveSessionChatType("agent:main")).toBe("unknown");
+    expect(deriveSessionChatType("")).toBe("unknown");
+  });
+});
+
+describe("session key canonicalization", () => {
+  it("parses agent keys case-insensitively and returns lowercase tokens", () => {
+    expect(parseAgentSessionKey("AGENT:Main:Hook:Webhook:42")).toEqual({
+      agentId: "main",
+      rest: "hook:webhook:42",
     });
+  });
+
+  it("does not double-prefix already-qualified agent keys", () => {
+    expect(
+      toAgentStoreSessionKey({
+        agentId: "main",
+        requestKey: "agent:main:main",
+      }),
+    ).toBe("agent:main:main");
+  });
+});
+
+describe("isValidAgentId", () => {
+  it("accepts valid agent ids", () => {
+    expect(isValidAgentId("main")).toBe(true);
+    expect(isValidAgentId("my-research_agent01")).toBe(true);
+  });
+
+  it("rejects malformed agent ids", () => {
+    expect(isValidAgentId("")).toBe(false);
+    expect(isValidAgentId("Agent not found: xyz")).toBe(false);
+    expect(isValidAgentId("../../../etc/passwd")).toBe(false);
+    expect(isValidAgentId("a".repeat(65))).toBe(false);
   });
 });

@@ -62,6 +62,7 @@ function highlightCode(code: string, lang?: string): string[] {
 
 export const theme = {
   fg: fg(palette.text),
+  assistantText: (text: string) => text,
   dim: fg(palette.dim),
   accent: fg(palette.accent),
   accentSoft: fg(palette.accentSoft),
@@ -103,7 +104,7 @@ export const markdownTheme: MarkdownTheme = {
   highlightCode,
 };
 
-export const selectListTheme: SelectListTheme = {
+const baseSelectListTheme: SelectListTheme = {
   selectedPrefix: (text) => fg(palette.accent)(text),
   selectedText: (text) => chalk.bold(fg(palette.accent)(text)),
   description: (text) => fg(palette.dim)(text),
@@ -111,8 +112,10 @@ export const selectListTheme: SelectListTheme = {
   noMatch: (text) => fg(palette.dim)(text),
 };
 
+export const selectListTheme: SelectListTheme = baseSelectListTheme;
+
 export const filterableSelectListTheme = {
-  ...selectListTheme,
+  ...baseSelectListTheme,
   filterLabel: (text: string) => fg(palette.dim)(text),
 };
 
@@ -131,11 +134,7 @@ export const editorTheme: EditorTheme = {
 };
 
 export const searchableSelectListTheme: SearchableSelectListTheme = {
-  selectedPrefix: (text) => fg(palette.accent)(text),
-  selectedText: (text) => chalk.bold(fg(palette.accent)(text)),
-  description: (text) => fg(palette.dim)(text),
-  scrollInfo: (text) => fg(palette.dim)(text),
-  noMatch: (text) => fg(palette.dim)(text),
+  ...baseSelectListTheme,
   searchPrompt: (text) => fg(palette.accentSoft)(text),
   searchInput: (text) => fg(palette.text)(text),
   matchHighlight: (text) => chalk.bold(fg(palette.accent)(text)),

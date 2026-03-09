@@ -393,6 +393,77 @@ export type AgentsFilesSetResult = {
   file: AgentFileEntry;
 };
 
+export type WorkspaceAgentRow = {
+  id: string;
+  name?: string;
+  title?: string | null;
+  reportsTo?: string | null;
+  directReports?: string[];
+  soulPath?: string | null;
+  color?: string | null;
+  emoji?: string | null;
+  tools?: string[];
+  description?: string | null;
+};
+
+export type WorkspaceAgentsListResult = {
+  workspaceDir: string;
+  registryPath: string | null;
+  defaultId: string;
+  agents: WorkspaceAgentRow[];
+};
+
+export type WorkspaceConversationSummary = {
+  agentId: string;
+  lastActivity: number | null;
+  preview: string;
+  unread: number;
+  online: boolean;
+};
+
+export type WorkspaceFileEntry = {
+  id: string;
+  label: string;
+  relativePath: string;
+  missing: boolean;
+  size?: number;
+  updatedAtMs?: number;
+  content?: string;
+};
+
+export type WorkspaceFilesListResult = {
+  agentId: string;
+  workspace: string;
+  files: WorkspaceFileEntry[];
+};
+
+export type WorkspaceFilesGetResult = {
+  agentId: string;
+  workspace: string;
+  file: WorkspaceFileEntry;
+};
+
+export type WorkspaceKanbanListResult = {
+  workspace: string;
+  tickets: import("./workspace-kanban.ts").WorkspaceTicket[];
+};
+
+export type WorkspaceKanbanCreateResult = {
+  workspace: string;
+  ticket: import("./workspace-kanban.ts").WorkspaceTicket;
+};
+
+export type WorkspaceKanbanUpdateResult = {
+  workspace: string;
+  ticket: import("./workspace-kanban.ts").WorkspaceTicket;
+};
+
+export type WorkspaceKanbanDeleteResult = {
+  workspace: string;
+  ticketId: string;
+  ok: true;
+};
+
 export type GatewaySessionRow = {
   key: string;
   kind: "direct" | "group" | "global" | "unknown";

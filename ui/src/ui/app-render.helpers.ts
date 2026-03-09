@@ -7,7 +7,7 @@ import type { AppViewState } from "./app-view-state.ts";
 import { OpenClawApp } from "./app.ts";
 import { ChatState, loadChatHistory } from "./controllers/chat.ts";
 import { icons } from "./icons.ts";
-import { iconForTab, pathForTab, titleForTab, type Tab } from "./navigation.ts";
+import { iconForTab, isWorkspaceTab, pathForTab, titleForTab, type Tab } from "./navigation.ts";
 import type { ThemeTransitionContext } from "./theme-transition.ts";
 import type { ThemeMode } from "./theme.ts";
 import type { SessionsListResult } from "./types.ts";
@@ -35,6 +35,10 @@ function resolveSidebarChatSessionKey(state: AppViewState): string {
 function resetChatStateForSessionSwitch(state: AppViewState, sessionKey: string) {
   state.sessionKey = sessionKey;
   state.chatMessage = "";
+  state.chatMentionQuery = null;
+  state.chatMentionStart = null;
+  state.chatMentionEnd = null;
+  state.chatMentionSelectedIndex = 0;
   state.chatStream = null;
   (state as unknown as OpenClawApp).chatStreamStartedAt = null;
   state.chatRunId = null;
@@ -49,6 +53,12 @@ function resetChatStateForSessionSwitch(state: AppViewState, sessionKey: string)
 
 export function renderTab(state: AppViewState, tab: Tab) {
   const href = pathForTab(tab, state.basePath);
+  const badge =
+    tab === "workspace-messages" && state.workspaceUnreadTotal > 0
+      ? state.workspaceUnreadTotal > 9
+        ? "9+"
+        : String(state.workspaceUnreadTotal)
+      : null;
   return html`
     <a
       href=${href}
@@ -62,6 +72,9 @@ export function renderTab(state: AppViewState, tab: Tab) {
           event.shiftKey ||
           event.altKey
         ) {
+          return;
+        }
+        if (isWorkspaceTab(tab)) {
           return;
         }
         event.preventDefault();
@@ -78,6 +91,7 @@ export function renderTab(state: AppViewState, tab: Tab) {
     >
       <span class="nav-item__icon" aria-hidden="true">${icons[iconForTab(tab)]}</span>
       <span class="nav-item__text">${titleForTab(tab)}</span>
+      ${badge ? html`<span class="nav-item__badge">${badge}</span>` : html``}
     </a>
   `;
 }
@@ -182,6 +196,10 @@ export function renderChatControls(state: AppViewState) {
             const next = (e.target as HTMLSelectElement).value;
             state.sessionKey = next;
             state.chatMessage = "";
+            state.chatMentionQuery = null;
+            state.chatMentionStart = null;
+            state.chatMentionEnd = null;
+            state.chatMentionSelectedIndex = 0;
             state.chatStream = null;
             (state as unknown as OpenClawApp).chatStreamStartedAt = null;
             state.chatRunId = null;

@@ -110,6 +110,25 @@ describe("message-normalizer", () => {
 
       expect(result.content[0].args).toEqual({ foo: "bar" });
     });
+
+    it("maps inter-session user messages to peer speaker metadata", () => {
+      const result = normalizeMessage({
+        role: "user",
+        content: "Need a review",
+        provenance: {
+          kind: "inter_session",
+          sourceSessionKey: "agent:frontend_engineer:clawport",
+          sourceTool: "sessions_send",
+        },
+      });
+
+      expect(result).toMatchObject({
+        role: "peer",
+        speakerKey: "peer:frontend_engineer",
+        speakerLabel: "Frontend Engineer",
+        speakerInitial: "F",
+      });
+    });
   });
 
   describe("normalizeRoleForGrouping", () => {
@@ -141,6 +160,10 @@ describe("message-normalizer", () => {
 
     it("preserves assistant role", () => {
       expect(normalizeRoleForGrouping("assistant")).toBe("assistant");
+    });
+
+    it("preserves peer role", () => {
+      expect(normalizeRoleForGrouping("peer")).toBe("peer");
     });
 
     it("preserves system role", () => {

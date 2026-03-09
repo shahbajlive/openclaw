@@ -1,4 +1,4 @@
-import { refreshChat } from "./app-chat.ts";
+import { CHAT_SESSIONS_ACTIVE_MINUTES, refreshChat } from "./app-chat.ts";
 import {
   startLogsPolling,
   stopLogsPolling,
@@ -27,6 +27,15 @@ import { loadPresence } from "./controllers/presence.ts";
 import { loadSessions } from "./controllers/sessions.ts";
 import { loadSkills } from "./controllers/skills.ts";
 import {
+  buildWorkspaceAgentSessionKey,
+  loadWorkspaceConversationSummaries,
+  loadWorkspaceAgents,
+  loadWorkspaceFileContent,
+  loadWorkspaceFiles,
+  loadWorkspaceKanban,
+  markWorkspaceAgentSeen,
+} from "./controllers/workspace.ts";
+import {
   inferBasePathFromPathname,
   normalizeBasePath,
   normalizePath,
@@ -49,6 +58,12 @@ type SettingsHost = {
   tab: Tab;
   connected: boolean;
   chatHasAutoScrolled: boolean;
+  chatMessage: string;
+  chatMentionQuery: string | null;
+  chatMentionStart: number | null;
+  chatMentionEnd: number | null;
+  chatMentionSelectedIndex: number;
+  chatMessages: unknown[];
   logsAtBottom: boolean;
   eventLog: unknown[];
   eventLogBuffer: unknown[];
@@ -56,6 +71,15 @@ type SettingsHost = {
   agentsList?: AgentsListResult | null;
   agentsSelectedId?: string | null;
   agentsPanel?: "overview" | "files" | "tools" | "skills" | "channels" | "cron";
+  workspaceAgentsList?: import("./types.ts").WorkspaceAgentsListResult | null;
+  workspaceSelectedAgentId?: string | null;
+  workspaceFileActive?: string | null;
+  workspaceFilesList?: import("./types.ts").WorkspaceFilesListResult | null;
+  chatAttachments: import("./ui-types.ts").ChatAttachment[];
+  chatRunId: string | null;
+  chatStream: string | null;
+  chatStreamStartedAt: number | null;
+  chatQueue: import("./ui-types.ts").ChatQueueItem[];
   themeMedia: MediaQueryList | null;
   themeMediaHandler: ((event: MediaQueryListEvent) => void) | null;
   pendingGatewayUrl?: string | null;
@@ -220,6 +244,78 @@ export async function refreshActiveTab(host: SettingsHost) {
       host as unknown as Parameters<typeof scheduleChatScroll>[0],
       !host.chatHasAutoScrolled,
     );
+  }
+  if (host.tab === "workspace-messages") {
+    await loadWorkspaceAgents(host as unknown as OpenClawApp);
+    await loadSessions(host as unknown as OpenClawApp, {
+      activeMinutes: CHAT_SESSIONS_ACTIVE_MINUTES,
+    });
+    const agentId = host.workspaceSelectedAgentId ?? host.workspaceAgentsList?.defaultId ?? "main";
+    const sessionKey = buildWorkspaceAgentSessionKey(agentId);
+    if (host.sessionKey !== sessionKey) {
+      host.sessionKey = sessionKey;
+      host.chatMessage = "";
+      host.chatMentionQuery = null;
+      host.chatMentionStart = null;
+      host.chatMentionEnd = null;
+      host.chatMentionSelectedIndex = 0;
+      host.chatAttachments = [];
+      host.chatRunId = null;
+      host.chatStream = null;
+      host.chatStreamStartedAt = null;
+      host.chatQueue = [];
+      applySettings(host, {
+        ...host.settings,
+        sessionKey,
+        lastActiveSessionKey: sessionKey,
+        workspaceSelectedAgentId: agentId,
+      });
+    }
+    await refreshChat(host as unknown as Parameters<typeof refreshChat>[0]);
+    markWorkspaceAgentSeen(host as unknown as OpenClawApp, agentId, host.chatMessages);
+    await loadWorkspaceConversationSummaries(host as unknown as OpenClawApp);
+    scheduleChatScroll(
+      host as unknown as Parameters<typeof scheduleChatScroll>[0],
+      !host.chatHasAutoScrolled,
+    );
+  }
+  if (host.tab === "workspace-kanban" || host.tab === "workspace-map") {
+    await loadWorkspaceAgents(host as unknown as OpenClawApp);
+    if (host.tab === "workspace-kanban") {
+      await loadWorkspaceKanban(host as unknown as OpenClawApp);
+    }
+    if (host.tab === "workspace-map") {
+      await loadCron(host);
+    }
+  }
+  if (host.tab === "workspace-memory") {
+    await loadWorkspaceAgents(host as unknown as OpenClawApp);
+    const agentId = host.workspaceSelectedAgentId ?? host.workspaceAgentsList?.defaultId ?? "main";
+    await loadWorkspaceFiles(host as unknown as OpenClawApp, agentId);
+    const active =
+      host.workspaceFileActive ??
+      host.workspaceFilesList?.files.find((file) => !file.missing)?.relativePath ??
+      null;
+    if (active) {
+      host.workspaceFileActive = active;
+      await loadWorkspaceFileContent(host as unknown as OpenClawApp, agentId, active);
+    }
+  }
+  if (host.tab === "workspace-crons") {
+    await loadCron(host);
+  }
+  if (host.tab === "workspace-activity") {
+    host.logsAtBottom = true;
+    await loadLogs(host as unknown as OpenClawApp, { reset: true });
+    scheduleLogsScroll(host as unknown as Parameters<typeof scheduleLogsScroll>[0], true);
+  }
+  if (host.tab === "workspace-costs") {
+    const { loadUsage } = await import("./controllers/usage.ts");
+    await loadUsage(host as unknown as OpenClawApp);
+  }
+  if (host.tab === "workspace-settings") {
+    await loadConfigSchema(host as unknown as OpenClawApp);
+    await loadConfig(host as unknown as OpenClawApp);
   }
   if (host.tab === "config") {
     await loadConfigSchema(host as unknown as OpenClawApp);

@@ -394,6 +394,22 @@
   white-space: nowrap;
 }
 
+.nav-item__badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 85%, white 5%);
+  color: var(--accent-foreground, #fff);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .nav-item:hover {
   color: var(--text);
   background: var(--bg-hover);
@@ -441,6 +457,12 @@
   gap: 24px;
   overflow: hidden;
   padding-bottom: 0;
+}
+
+.content--workspace {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .content--chat > * + * {

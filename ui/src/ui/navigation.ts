@@ -4,6 +4,10 @@ import type { IconName } from "./icons.js";
 export const TAB_GROUPS = [
   { label: "chat", tabs: ["chat"] },
   {
+    label: "workspace",
+    tabs: ["workspace-map", "workspace-messages", "workspace-kanban"],
+  },
+  {
     label: "control",
     tabs: ["overview", "channels", "instances", "sessions", "usage", "cron"],
   },
@@ -22,9 +26,23 @@ export type Tab =
   | "skills"
   | "nodes"
   | "chat"
+  | "workspace-messages"
+  | "workspace-kanban"
+  | "workspace-map"
+  | "workspace-crons"
+  | "workspace-activity"
+  | "workspace-memory"
+  | "workspace-costs"
+  | "workspace-settings"
   | "config"
   | "debug"
   | "logs";
+
+export const WORKSPACE_TABS = [
+  "workspace-map",
+  "workspace-messages",
+  "workspace-kanban",
+] as const satisfies readonly Tab[];
 
 const TAB_PATHS: Record<Tab, string> = {
   agents: "/agents",
@@ -37,6 +55,14 @@ const TAB_PATHS: Record<Tab, string> = {
   skills: "/skills",
   nodes: "/nodes",
   chat: "/chat",
+  "workspace-messages": "/workspace/messages",
+  "workspace-kanban": "/workspace/kanban",
+  "workspace-map": "/workspace/map",
+  "workspace-crons": "/workspace/crons",
+  "workspace-activity": "/workspace/activity",
+  "workspace-memory": "/workspace/memory",
+  "workspace-costs": "/workspace/costs",
+  "workspace-settings": "/workspace/settings",
   config: "/config",
   debug: "/debug",
   logs: "/logs",
@@ -129,6 +155,22 @@ export function iconForTab(tab: Tab): IconName {
       return "folder";
     case "chat":
       return "messageSquare";
+    case "workspace-messages":
+      return "messageSquare";
+    case "workspace-kanban":
+      return "folder";
+    case "workspace-map":
+      return "folder";
+    case "workspace-crons":
+      return "loader";
+    case "workspace-activity":
+      return "scrollText";
+    case "workspace-memory":
+      return "fileText";
+    case "workspace-costs":
+      return "barChart";
+    case "workspace-settings":
+      return "settings";
     case "overview":
       return "barChart";
     case "channels":
@@ -156,10 +198,52 @@ export function iconForTab(tab: Tab): IconName {
   }
 }
 
+export function isWorkspaceTab(tab: Tab): boolean {
+  return (WORKSPACE_TABS as readonly Tab[]).includes(tab);
+}
+
 export function titleForTab(tab: Tab) {
-  return t(`tabs.${tab}`);
+  switch (tab) {
+    case "workspace-messages":
+      return "Messages";
+    case "workspace-kanban":
+      return "Kanban";
+    case "workspace-map":
+      return "Map";
+    case "workspace-crons":
+      return "Crons";
+    case "workspace-activity":
+      return "Activity";
+    case "workspace-memory":
+      return "Memory";
+    case "workspace-costs":
+      return "Costs";
+    case "workspace-settings":
+      return "Settings";
+    default:
+      return t(`tabs.${tab}`);
+  }
 }
 
 export function subtitleForTab(tab: Tab) {
-  return t(`subtitles.${tab}`);
+  switch (tab) {
+    case "workspace-messages":
+      return "Agent chat routed through real OpenClaw sessions.";
+    case "workspace-kanban":
+      return "Workspace task board with agent assignments.";
+    case "workspace-map":
+      return "Workspace team hierarchy from OpenClaw agent data.";
+    case "workspace-crons":
+      return "Scheduled jobs and recent runs.";
+    case "workspace-activity":
+      return "Gateway logs and activity stream.";
+    case "workspace-memory":
+      return "Workspace memory and agent instruction files.";
+    case "workspace-costs":
+      return "Token usage and cost analysis.";
+    case "workspace-settings":
+      return "Workspace-facing gateway configuration.";
+    default:
+      return t(`subtitles.${tab}`);
+  }
 }

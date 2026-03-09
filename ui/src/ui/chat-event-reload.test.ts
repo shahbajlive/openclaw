@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { shouldReloadHistoryForFinalEvent } from "./chat-event-reload.ts";
+import {
+  shouldReloadHistoryForFinalEvent,
+  shouldReloadHistoryForRecovery,
+} from "./chat-event-reload.ts";
 
 describe("shouldReloadHistoryForFinalEvent", () => {
   it("returns false for non-final events", () => {
@@ -23,25 +26,31 @@ describe("shouldReloadHistoryForFinalEvent", () => {
     ).toBe(true);
   });
 
-  it("returns false when final event includes assistant payload", () => {
+  it("returns true for final events without payloads regardless of session key", () => {
     expect(
       shouldReloadHistoryForFinalEvent({
-        runId: "run-1",
-        sessionKey: "main",
+        runId: "run-external",
+        sessionKey: "agent:other:main",
         state: "final",
-        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
-      }),
-    ).toBe(false);
-  });
-
-  it("returns true when final event message role is non-assistant", () => {
-    expect(
-      shouldReloadHistoryForFinalEvent({
-        runId: "run-1",
-        sessionKey: "main",
-        state: "final",
-        message: { role: "user", content: [{ type: "text", text: "echo" }] },
       }),
     ).toBe(true);
+  });
+});
+
+describe("shouldReloadHistoryForRecovery", () => {
+  it("returns true for reconnect recovery", () => {
+    expect(shouldReloadHistoryForRecovery("reconnect")).toBe(true);
+  });
+
+  it("returns true for websocket sequence gap recovery", () => {
+    expect(shouldReloadHistoryForRecovery("seq-gap")).toBe(true);
+  });
+
+  it("returns true for manual refresh", () => {
+    expect(shouldReloadHistoryForRecovery("manual")).toBe(true);
+  });
+
+  it("returns true for session-change refresh", () => {
+    expect(shouldReloadHistoryForRecovery("session-change")).toBe(true);
   });
 });

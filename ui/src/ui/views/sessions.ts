@@ -6,6 +6,7 @@ import type { GatewaySessionRow, SessionsListResult } from "../types.ts";
 
 export type SessionsProps = {
   loading: boolean;
+  deletingKey?: string | null;
   result: SessionsListResult | null;
   error: string | null;
   activeMinutes: string;
@@ -206,7 +207,14 @@ export function renderSessions(props: SessionsProps) {
                 <div class="muted">No sessions found.</div>
               `
             : rows.map((row) =>
-                renderRow(row, props.basePath, props.onPatch, props.onDelete, props.loading),
+                renderRow(
+                  row,
+                  props.basePath,
+                  props.onPatch,
+                  props.onDelete,
+                  props.loading,
+                  props.deletingKey ?? null,
+                ),
               )
         }
       </div>
@@ -220,6 +228,7 @@ function renderRow(
   onPatch: SessionsProps["onPatch"],
   onDelete: SessionsProps["onDelete"],
   disabled: boolean,
+  deletingKey: string | null,
 ) {
   const updated = row.updatedAt ? formatRelativeTimestamp(row.updatedAt) : "n/a";
   const rawThinking = row.thinkingLevel ?? "";
@@ -237,6 +246,8 @@ function renderRow(
   const label = typeof row.label === "string" ? row.label.trim() : "";
   const showDisplayName = Boolean(displayName && displayName !== row.key && displayName !== label);
   const canLink = row.kind !== "global";
+  const isDeleting = deletingKey === row.key;
+  const deleteDisabled = disabled || isDeleting;
   const chatUrl = canLink
     ? `${pathForTab("chat", basePath)}?session=${encodeURIComponent(row.key)}`
     : null;
@@ -312,8 +323,15 @@ function renderRow(
         </select>
       </div>
       <div>
-        <button class="btn danger" ?disabled=${disabled} @click=${() => onDelete(row.key)}>
-          Delete
+        <button
+          class="btn danger ${isDeleting ? "is-busy" : ""}"
+          ?disabled=${deleteDisabled}
+          data-busy=${isDeleting ? "true" : "false"}
+          aria-busy=${String(isDeleting)}
+          title=${isDeleting ? "Cleaning transcript…" : "Delete session"}
+          @click=${() => onDelete(row.key)}
+        >
+          ${isDeleting ? "Deleting…" : "Delete"}
         </button>
       </div>
     </div>

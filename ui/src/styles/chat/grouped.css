@@ -54,6 +54,11 @@
   opacity: 0.7;
 }
 
+.chat-agent-mention {
+  color: var(--chat-agent-mention-accent, var(--accent));
+  font-weight: 600;
+}
+
 /* Chat divider (e.g., compaction marker) */
 .chat-divider {
   display: flex;
@@ -85,7 +90,7 @@
 .chat-avatar {
   width: 40px;
   height: 40px;
-  border-radius: 8px;
+  border-radius: 50%;
   background: var(--panel-strong);
   display: grid;
   place-items: center;
@@ -104,6 +109,12 @@
 .chat-avatar.assistant {
   background: var(--secondary);
   color: var(--muted);
+}
+
+.chat-group.is-peer .chat-avatar.assistant {
+  background: color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 22%, var(--panel-strong));
+  color: color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 72%, white 28%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 30%, transparent);
 }
 
 .chat-avatar.other {
@@ -251,6 +262,19 @@ img.chat-avatar {
 
 .chat-bubble:hover {
   background: var(--bg-hover);
+}
+
+.chat-group.is-peer .chat-sender-name {
+  color: var(--chat-peer-accent, var(--accent));
+}
+
+.chat-group.is-peer .chat-bubble {
+  border-color: color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 28%, transparent);
+  background: color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 7%, var(--card));
+}
+
+.chat-group.is-peer .chat-bubble:hover {
+  background: color-mix(in srgb, var(--chat-peer-accent, var(--accent)) 10%, var(--bg-hover));
 }
 
 /* User bubbles have different styling */

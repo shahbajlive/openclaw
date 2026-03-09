@@ -14,6 +14,11 @@ export type MessageGroup = {
   kind: "group";
   key: string;
   role: string;
+  speakerKey?: string;
+  speakerLabel?: string;
+  speakerInitial?: string;
+  speakerAvatar?: string;
+  speakerAccent?: string;
   messages: Array<{ message: unknown; key: string }>;
   timestamp: number;
   isStreaming: boolean;
@@ -33,6 +38,11 @@ export type NormalizedMessage = {
   content: MessageContentItem[];
   timestamp: number;
   id?: string;
+  speakerKey?: string;
+  speakerLabel?: string;
+  speakerInitial?: string;
+  speakerAvatar?: string;
+  speakerAccent?: string;
 };
 
 /** Tool card representation for tool calls and results */

@@ -1,8 +1,10 @@
+import { buildToolDedupeKeys } from "./chat/tool-identity.ts";
 import { truncateText } from "./format.ts";
 
 const TOOL_STREAM_LIMIT = 50;
-const TOOL_STREAM_THROTTLE_MS = 80;
+const TOOL_STREAM_THROTTLE_MS = 24;
 const TOOL_OUTPUT_CHAR_LIMIT = 120_000;
+const TOOL_STREAM_TERMINAL_GRACE_MS = 3_000;
 
 export type AgentEventPayload = {
   runId: string;
@@ -28,6 +30,12 @@ export type ToolStreamEntry = {
 type ToolStreamHost = {
   sessionKey: string;
   chatRunId: string | null;
+  chatLastTerminalRunId?: string | null;
+  chatLastTerminalAt?: number | null;
+  chatMessages?: unknown[];
+  chatStream?: string | null;
+  chatStreamStartedAt?: number | null;
+  chatStreamCommittedPrefixLength?: number;
   toolStreamById: Map<string, ToolStreamEntry>;
   toolStreamOrder: string[];
   chatToolMessages: Record<string, unknown>[];
@@ -185,7 +193,9 @@ function buildToolStreamMessage(entry: ToolStreamEntry): Record<string, unknown>
   return {
     role: "assistant",
     toolCallId: entry.toolCallId,
+    tool_call_id: entry.toolCallId,
     runId: entry.runId,
+    sessionKey: entry.sessionKey,
     content,
     timestamp: entry.startedAt,
   };
@@ -202,10 +212,52 @@ function trimToolStream(host: ToolStreamHost) {
   }
 }
 
+function isCanonicalToolInvocationMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const marker = (message as { __openclaw?: unknown }).__openclaw;
+  if (!marker || typeof marker !== "object") {
+    return false;
+  }
+  return (marker as { canonicalToolInvocation?: unknown }).canonicalToolInvocation === true;
+}
+
+function resolveToolMessageId(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const record = message as Record<string, unknown>;
+  const camel = typeof record.toolCallId === "string" ? record.toolCallId.trim() : "";
+  if (camel) {
+    return camel;
+  }
+  const snake = typeof record.tool_call_id === "string" ? record.tool_call_id.trim() : "";
+  if (snake) {
+    return snake;
+  }
+  return "";
+}
+
 function syncToolStreamMessages(host: ToolStreamHost) {
-  host.chatToolMessages = host.toolStreamOrder
+  const liveMessages = host.toolStreamOrder
     .map((id) => host.toolStreamById.get(id)?.message)
     .filter((msg): msg is Record<string, unknown> => Boolean(msg));
+  const existingCanonical = Array.isArray(host.chatToolMessages)
+    ? host.chatToolMessages.filter(isCanonicalToolInvocationMessage)
+    : [];
+  if (existingCanonical.length === 0) {
+    host.chatToolMessages = liveMessages;
+    return;
+  }
+  const liveIds = new Set(
+    liveMessages.map((message) => resolveToolMessageId(message)).filter(Boolean),
+  );
+  const preservedCanonical = existingCanonical.filter((message) => {
+    const toolId = resolveToolMessageId(message);
+    return !toolId || !liveIds.has(toolId);
+  });
+  host.chatToolMessages = [...preservedCanonical, ...liveMessages];
 }
 
 export function flushToolStreamSync(host: ToolStreamHost) {
@@ -234,6 +286,8 @@ export function resetToolStream(host: ToolStreamHost) {
   host.toolStreamById.clear();
   host.toolStreamOrder = [];
   host.chatToolMessages = [];
+  host.chatLastTerminalRunId = null;
+  host.chatLastTerminalAt = null;
   flushToolStreamSync(host);
 }
 
@@ -298,13 +352,40 @@ function resolveAcceptedSession(
   payload: AgentEventPayload,
   options?: {
     allowSessionScopedWhenIdle?: boolean;
+    requireRecentTerminalForIdleSession?: boolean;
   },
 ): { accepted: boolean; sessionKey?: string } {
   const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey : undefined;
   if (sessionKey && sessionKey !== host.sessionKey) {
     return { accepted: false };
   }
+  // During an active run, trust same-session agent events even when run ids
+  // differ (for example teammate/sub-run tool execution).
+  if (sessionKey && host.chatRunId) {
+    return { accepted: true, sessionKey };
+  }
+  const now = Date.now();
+  const recentTerminalRunId = host.chatLastTerminalRunId ?? null;
+  const recentTerminalAt = host.chatLastTerminalAt ?? null;
+  const inTerminalGraceWindow =
+    Boolean(recentTerminalRunId) &&
+    payload.runId === recentTerminalRunId &&
+    typeof recentTerminalAt === "number" &&
+    now - recentTerminalAt <= TOOL_STREAM_TERMINAL_GRACE_MS;
   if (!host.chatRunId && options?.allowSessionScopedWhenIdle && sessionKey) {
+    if (!options.requireRecentTerminalForIdleSession) {
+      return { accepted: true, sessionKey };
+    }
+    if (
+      typeof recentTerminalAt === "number" &&
+      now - recentTerminalAt <= TOOL_STREAM_TERMINAL_GRACE_MS
+    ) {
+      return { accepted: true, sessionKey };
+    }
+  }
+  // Accept late tool/lifecycle events for the just-finished run to avoid
+  // losing cards until a manual history refresh.
+  if (!host.chatRunId && inTerminalGraceWindow) {
     return { accepted: true, sessionKey };
   }
   // Fallback: only accept session-less events for the active run.
@@ -382,6 +463,42 @@ function handleLifecycleFallbackEvent(host: CompactionHost, payload: AgentEventP
   }, FALLBACK_TOAST_DURATION_MS);
 }
 
+function handleLifecycleTypingEvent(host: ToolStreamHost, payload: AgentEventPayload) {
+  if (payload.stream !== "lifecycle") {
+    return;
+  }
+  const phase = toTrimmedString(payload.data?.phase);
+  if (phase !== "start") {
+    return;
+  }
+  const provenance = payload.data?.inputProvenance;
+  const isChatVisibleInterSession =
+    !!provenance &&
+    typeof provenance === "object" &&
+    (provenance as { kind?: unknown }).kind === "inter_session";
+  const accepted = resolveAcceptedSession(host, payload, {
+    allowSessionScopedWhenIdle: isChatVisibleInterSession,
+  });
+  if (!accepted.accepted) {
+    return;
+  }
+  if (host.chatRunId) {
+    return;
+  }
+  host.chatRunId = payload.runId;
+  host.chatStream = "";
+  host.chatStreamStartedAt = typeof payload.ts === "number" ? payload.ts : Date.now();
+  host.chatStreamCommittedPrefixLength = 0;
+}
+
+function hasCommonKey(left: string[], right: string[]): boolean {
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+  const rightSet = new Set(right);
+  return left.some((key) => rightSet.has(key));
+}
+
 export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPayload) {
   if (!payload) {
     return;
@@ -394,6 +511,7 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   }
 
   if (payload.stream === "lifecycle" || payload.stream === "fallback") {
+    handleLifecycleTypingEvent(host, payload);
     handleLifecycleFallbackEvent(host as CompactionHost, payload);
     return;
   }
@@ -401,14 +519,22 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   if (payload.stream !== "tool") {
     return;
   }
-  const accepted = resolveAcceptedSession(host, payload);
+  const accepted = resolveAcceptedSession(host, payload, {
+    allowSessionScopedWhenIdle: true,
+    requireRecentTerminalForIdleSession: true,
+  });
   if (!accepted.accepted) {
     return;
   }
   const sessionKey = accepted.sessionKey;
 
   const data = payload.data ?? {};
-  const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : "";
+  const toolCallId =
+    typeof data.toolCallId === "string"
+      ? data.toolCallId
+      : typeof data.tool_call_id === "string"
+        ? data.tool_call_id
+        : "";
   if (!toolCallId) {
     return;
   }
@@ -423,33 +549,123 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
         : undefined;
 
   const now = Date.now();
+  const eventTimestamp = typeof payload.ts === "number" ? payload.ts : now;
+  const incomingKeys = buildToolDedupeKeys({
+    toolCallId,
+    runId: payload.runId,
+    sessionKey,
+    name,
+    timestamp: eventTimestamp,
+  });
   let entry = host.toolStreamById.get(toolCallId);
   if (!entry) {
-    entry = {
-      toolCallId,
-      runId: payload.runId,
-      sessionKey,
-      name,
-      args,
-      output: output || undefined,
-      startedAt: typeof payload.ts === "number" ? payload.ts : now,
-      updatedAt: now,
-      message: {},
-    };
-    host.toolStreamById.set(toolCallId, entry);
-    host.toolStreamOrder.push(toolCallId);
-  } else {
-    entry.name = name;
-    if (args !== undefined) {
-      entry.args = args;
+    // Some providers emit a different id on result than start, and in some
+    // flows run ids can differ between start/result events. If we can find a
+    // recent pending start entry for the same tool/session, merge into that
+    // row instead of creating a duplicate "Completed" + "View" pair.
+    if (phase !== "start") {
+      const candidateId = [...host.toolStreamOrder].toReversed().find((id) => {
+        const pending = host.toolStreamById.get(id);
+        if (!pending) {
+          return false;
+        }
+        if ((pending.sessionKey ?? "") !== (sessionKey ?? "")) {
+          return false;
+        }
+        if (pending.name !== name) {
+          return false;
+        }
+        if (pending.output) {
+          return false;
+        }
+        const pendingKeys = buildToolDedupeKeys({
+          toolCallId: pending.toolCallId,
+          runId: pending.runId,
+          sessionKey: pending.sessionKey,
+          name: pending.name,
+          timestamp: pending.startedAt,
+        });
+        if (!hasCommonKey(incomingKeys, pendingKeys)) {
+          return false;
+        }
+        const sameRun = pending.runId === payload.runId;
+        const recentEnough = now - pending.updatedAt <= 5 * 60_000;
+        return sameRun || recentEnough;
+      });
+      if (candidateId) {
+        const pending = host.toolStreamById.get(candidateId);
+        if (pending) {
+          entry = pending;
+          if (candidateId !== toolCallId) {
+            pending.toolCallId = toolCallId;
+            host.toolStreamById.delete(candidateId);
+            host.toolStreamById.set(toolCallId, pending);
+            const idx = host.toolStreamOrder.indexOf(candidateId);
+            if (idx >= 0) {
+              host.toolStreamOrder[idx] = toolCallId;
+            }
+          }
+        }
+      }
     }
-    if (output !== undefined) {
-      entry.output = output || undefined;
+
+    if (!entry) {
+      if (phase === "start" && payload.runId === host.chatRunId) {
+        const streamText = typeof host.chatStream === "string" ? host.chatStream : "";
+        if (streamText.trim()) {
+          if (Array.isArray(host.chatMessages)) {
+            host.chatMessages = [
+              ...host.chatMessages,
+              {
+                role: "assistant",
+                content: [{ type: "text", text: streamText }],
+                timestamp:
+                  typeof host.chatStreamStartedAt === "number"
+                    ? host.chatStreamStartedAt
+                    : Date.now(),
+              },
+            ];
+          }
+          host.chatStreamCommittedPrefixLength =
+            Math.max(0, host.chatStreamCommittedPrefixLength ?? 0) + streamText.length;
+          host.chatStream = "";
+          host.chatStreamStartedAt = typeof payload.ts === "number" ? payload.ts : Date.now();
+        }
+      }
+
+      // Preserve on-screen chronology: if we first observe a tool call only after
+      // the run has already reached a terminal state, do not backdate it.
+      const isLateTerminalToolEvent = !host.chatRunId;
+      const startedAt =
+        phase === "start" && typeof payload.ts === "number" && !isLateTerminalToolEvent
+          ? payload.ts
+          : now;
+      entry = {
+        toolCallId,
+        runId: payload.runId,
+        sessionKey,
+        name,
+        args,
+        output: output || undefined,
+        startedAt,
+        updatedAt: now,
+        message: {},
+      };
+      host.toolStreamById.set(toolCallId, entry);
+      host.toolStreamOrder.push(toolCallId);
     }
-    entry.updatedAt = now;
   }
+
+  entry.name = name;
+  if (args !== undefined) {
+    entry.args = args;
+  }
+  if (output !== undefined) {
+    entry.output = output || undefined;
+  }
+  entry.updatedAt = now;
 
   entry.message = buildToolStreamMessage(entry);
   trimToolStream(host);
-  scheduleToolStreamSync(host, phase === "result");
+  scheduleToolStreamSync(host, phase === "result" || phase === "start");
 }

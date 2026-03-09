@@ -41,6 +41,17 @@ describe("control UI routing", () => {
     expect(window.location.pathname).toBe("/apps/openclaw/cron");
   });
 
+  it("mounts kanban page when workspace-kanban tab is selected", async () => {
+    const app = mountApp("/chat");
+    await app.updateComplete;
+
+    app.tab = "workspace-kanban";
+    await app.updateComplete;
+
+    expect(app.tab).toBe("workspace-kanban");
+    expect(app.textContent).toContain("Backlog");
+  });
+
   it("honors explicit base path overrides", async () => {
     window.__OPENCLAW_CONTROL_UI_BASE_PATH__ = "/openclaw";
     const app = mountApp("/openclaw/sessions");

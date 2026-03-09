@@ -1,16 +1,19 @@
 import type { ChatEventPayload } from "./controllers/chat.ts";
 
-export function shouldReloadHistoryForFinalEvent(payload?: ChatEventPayload): boolean {
+export function shouldReloadHistoryForFinalEvent(payload: ChatEventPayload | undefined): boolean {
   if (!payload || payload.state !== "final") {
     return false;
   }
-  if (!payload.message || typeof payload.message !== "object") {
-    return true;
-  }
-  const message = payload.message as Record<string, unknown>;
-  const role = typeof message.role === "string" ? message.role.toLowerCase() : "";
-  if (role && role !== "assistant") {
-    return true;
-  }
-  return false;
+  return payload.message === undefined;
+}
+
+export type ChatRecoveryReloadReason = "reconnect" | "seq-gap" | "manual" | "session-change";
+
+export function shouldReloadHistoryForRecovery(reason: ChatRecoveryReloadReason): boolean {
+  return (
+    reason === "reconnect" ||
+    reason === "seq-gap" ||
+    reason === "manual" ||
+    reason === "session-change"
+  );
 }

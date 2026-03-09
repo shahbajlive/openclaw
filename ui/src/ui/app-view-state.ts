@@ -29,10 +29,18 @@ import type {
   SkillStatusReport,
   ToolsCatalogResult,
   StatusSummary,
+  WorkspaceAgentsListResult,
+  WorkspaceConversationSummary,
+  WorkspaceFilesListResult,
 } from "./types.ts";
 import type { ChatAttachment, ChatQueueItem } from "./ui-types.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
 import type { SessionLogEntry } from "./views/usage.ts";
+import type {
+  WorkspaceTicket,
+  WorkspaceTicketPriority,
+  WorkspaceTicketRole,
+} from "./workspace-kanban.ts";
 
 export type AppViewState = {
   settings: UiSettings;
@@ -54,16 +62,24 @@ export type AppViewState = {
   chatLoading: boolean;
   chatSending: boolean;
   chatMessage: string;
+  chatMentionQuery: string | null;
+  chatMentionStart: number | null;
+  chatMentionEnd: number | null;
+  chatMentionSelectedIndex: number;
   chatAttachments: ChatAttachment[];
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatStream: string | null;
   chatStreamStartedAt: number | null;
   chatRunId: string | null;
+  chatResetInFlight: boolean;
   compactionStatus: CompactionStatus | null;
   fallbackStatus: FallbackStatus | null;
   chatAvatarUrl: string | null;
   chatThinkingLevel: string | null;
+  chatLiveToolEventsEnabled: boolean;
+  chatShouldEmitToolResult: boolean;
+  chatShouldEmitToolOutput: boolean;
   chatQueue: ChatQueueItem[];
   chatManualRefreshInFlight: boolean;
   nodesLoading: boolean;
@@ -74,6 +90,33 @@ export type AppViewState = {
   sidebarError: string | null;
   splitRatio: number;
   scrollToBottom: (opts?: { smooth?: boolean }) => void;
+  handleToggleLiveToolEvents: () => void;
+  handleToggleShouldEmitToolResult: () => void;
+  handleToggleShouldEmitToolOutput: () => void;
+  syncWorkspaceSelectedConversationSummary: (agentId: string, fallback: string) => void;
+  handleCreateWorkspaceKanbanTicket: () => Promise<void>;
+  handleRefreshWorkspaceKanban: () => Promise<void>;
+  handleMoveWorkspaceKanbanTicket: (
+    ticketId: string,
+    status: import("./workspace-kanban.ts").WorkspaceTicketStatus,
+  ) => Promise<void>;
+  handleDeleteWorkspaceKanbanTicket: (ticketId: string) => Promise<void>;
+  handleUpdateWorkspaceKanbanTicket: (
+    ticketId: string,
+    patch: Partial<{
+      title: string;
+      description: string;
+      status: import("./workspace-kanban.ts").WorkspaceTicketStatus;
+      priority: WorkspaceTicketPriority;
+      assigneeId: string | null;
+      assigneeRole: WorkspaceTicketRole | null;
+      workState: import("./workspace-kanban.ts").WorkspaceTicketWorkState;
+      workStartedAt: number | null;
+      workError: string | null;
+      workResult: string | null;
+    }>,
+  ) => Promise<void>;
+  setWorkspaceKanbanDraftAssignee: (agentId: string) => void;
   devicesLoading: boolean;
   devicesError: string | null;
   devicesList: DevicePairingList | null;
@@ -146,9 +189,49 @@ export type AppViewState = {
   agentSkillsError: string | null;
   agentSkillsReport: SkillStatusReport | null;
   agentSkillsAgentId: string | null;
+  workspaceAgentsLoading: boolean;
+  workspaceAgentsError: string | null;
+  workspaceAgentsList: WorkspaceAgentsListResult | null;
+  workspaceSelectedAgentId: string | null;
+  workspaceConversationSummaries: Record<string, WorkspaceConversationSummary>;
+  workspaceMessagesSeenAt: Record<string, number>;
+  workspaceUnreadTotal: number;
+  workspaceFilesLoading: boolean;
+  workspaceFilesError: string | null;
+  workspaceFilesList: WorkspaceFilesListResult | null;
+  workspaceFileActive: string | null;
+  workspaceFileContents: Record<string, string>;
+  workspaceKanbanLoading: boolean;
+  workspaceKanbanError: string | null;
+  workspaceKanbanTickets: WorkspaceTicket[];
+  workspaceKanbanDraftTitle: string;
+  workspaceKanbanDraftDescription: string;
+  workspaceKanbanDraftPriority: WorkspaceTicketPriority;
+  workspaceKanbanDraftAssigneeId: string;
+  workspaceKanbanDraftAssigneeRole: WorkspaceTicketRole | "";
+  workspaceKanbanCreateOpen: boolean;
+  workspaceKanbanSelectedTicketId: string | null;
+  workspaceKanbanFilterAgentId: string | null;
+  workspaceKanbanDragOverStatus: import("./workspace-kanban.ts").WorkspaceTicketStatus | null;
+  workspaceKanbanDrawerExpanded: boolean;
+  workspaceMessagesSearch?: string;
+  workspaceMapLayout?: "teams" | "hierarchy";
+  workspaceMapView?: "map" | "grid" | "feed";
+  workspaceMapZoom?: number;
+  workspaceMapFeedFilter?: "all" | "ok" | "error";
+  workspaceMapPanX?: number;
+  workspaceMapPanY?: number;
+  workspaceMapInteracted?: boolean;
+  workspaceMapPointerId?: number | null;
+  workspaceMapDragStartX?: number;
+  workspaceMapDragStartY?: number;
+  workspaceMapPanStartX?: number;
+  workspaceMapPanStartY?: number;
+  workspaceMapQuickViewOpen?: boolean;
   sessionsLoading: boolean;
   sessionsResult: SessionsListResult | null;
   sessionsError: string | null;
+  sessionsDeletingKey: string | null;
   sessionsFilterActive: string;
   sessionsFilterLimit: string;
   sessionsIncludeGlobal: boolean;
@@ -310,6 +393,7 @@ export type AppViewState = {
     handleSendChat: (messageOverride?: string, opts?: { restoreDraft?: boolean }) => Promise<void>;
     handleAbortChat: () => Promise<void>;
     removeQueuedMessage: (id: string) => void;
+    editQueuedMessage: (id: string) => void;
     handleChatScroll: (event: Event) => void;
     resetToolStream: () => void;
     resetChatScroll: () => void;

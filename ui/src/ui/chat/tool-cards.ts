@@ -11,6 +11,7 @@ export function extractToolCards(message: unknown): ToolCard[] {
   const m = message as Record<string, unknown>;
   const content = normalizeContent(m.content);
   const cards: ToolCard[] = [];
+  const pendingCalls: Array<{ name: string; args?: unknown; used: boolean }> = [];
 
   for (const item of content) {
     const kind = (typeof item.type === "string" ? item.type : "").toLowerCase();
@@ -18,10 +19,10 @@ export function extractToolCards(message: unknown): ToolCard[] {
       ["toolcall", "tool_call", "tooluse", "tool_use"].includes(kind) ||
       (typeof item.name === "string" && item.arguments != null);
     if (isToolCall) {
-      cards.push({
-        kind: "call",
+      pendingCalls.push({
         name: (item.name as string) ?? "tool",
         args: coerceArgs(item.arguments ?? item.args),
+        used: false,
       });
     }
   }
@@ -33,7 +34,25 @@ export function extractToolCards(message: unknown): ToolCard[] {
     }
     const text = extractToolText(item);
     const name = typeof item.name === "string" ? item.name : "tool";
-    cards.push({ kind: "result", name, text });
+    const matchIndex = pendingCalls.findIndex(
+      (call) => !call.used && call.name.trim().toLowerCase() === name.trim().toLowerCase(),
+    );
+    const matched = matchIndex >= 0 ? pendingCalls[matchIndex] : null;
+    if (matched) {
+      matched.used = true;
+    }
+    cards.push({ kind: "result", name, args: matched?.args, text });
+  }
+
+  for (const call of pendingCalls) {
+    if (call.used) {
+      continue;
+    }
+    cards.push({
+      kind: "call",
+      name: call.name,
+      args: call.args,
+    });
   }
 
   if (isToolResultMessage(message) && !cards.some((card) => card.kind === "result")) {
@@ -48,10 +67,14 @@ export function extractToolCards(message: unknown): ToolCard[] {
   return cards;
 }
 
-export function renderToolCardSidebar(card: ToolCard, onOpenSidebar?: (content: string) => void) {
+export function renderToolCardSidebar(
+  card: ToolCard,
+  onOpenSidebar?: (content: string) => void,
+  showOutput = true,
+) {
   const display = resolveToolDisplay({ name: card.name, args: card.args });
   const detail = formatToolDetail(display);
-  const hasText = Boolean(card.text?.trim());
+  const hasText = showOutput && Boolean(card.text?.trim());
 
   const canClick = Boolean(onOpenSidebar);
   const handleClick = canClick

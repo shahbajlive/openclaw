@@ -797,4 +797,41 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       }),
     );
   });
+
+  it("chat.history ignores terminal dedupe runs when resolving activeRun", async () => {
+    createTranscriptFixture("openclaw-chat-history-ignore-terminal-active-run-");
+    mockState.sessionEntry = { thinkingLevel: "low" };
+    const respond = vi.fn();
+    const context = createChatContext();
+    context.chatAbortControllers.set("run-terminal", {
+      controller: new AbortController(),
+      sessionId: "sess-terminal",
+      sessionKey: "main",
+      startedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 30_000,
+    });
+    context.chatRunBuffers.set("run-terminal", "");
+    context.dedupe.set("chat:run-terminal", {
+      ts: Date.now(),
+      ok: true,
+      payload: { runId: "run-terminal", status: "ok" },
+    });
+
+    await chatHandlers["chat.history"]({
+      params: { sessionKey: "main", limit: 200 },
+      respond: respond as unknown as Parameters<
+        (typeof chatHandlers)["chat.history"]
+      >[0]["respond"],
+      req: {} as never,
+      client: null as never,
+      isWebchatConnect: () => false,
+      context: context as GatewayRequestContext,
+    });
+
+    const [ok, payload, err] = respond.mock.calls.at(-1) ?? [];
+    expect(ok).toBe(true);
+    expect(err).toBeUndefined();
+    expect(payload).toBeDefined();
+    expect((payload as { activeRun?: unknown }).activeRun).toBeNull();
+  });
 });

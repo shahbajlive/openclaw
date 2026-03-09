@@ -5,6 +5,7 @@ import {
   extractThinkingFromMessage,
   isCommandMessage,
   sanitizeRenderableText,
+  splitThinkingFromText,
 } from "./tui-formatters.js";
 
 describe("extractTextFromMessage", () => {

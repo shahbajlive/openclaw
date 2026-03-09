@@ -117,10 +117,10 @@ export type TuiStateAccess = {
   lastCtrlCAt: number;
 
   // Split view state
-  splitViewMode: boolean;
-  splitViewPanes: string[]; // sessionKeys to display in split view
-  activePaneIndex: number; // which pane has focus (0-based)
+  splitViewMode?: boolean;
+  splitViewPanes?: string[]; // sessionKeys to display in split view
+  activePaneIndex?: number; // which pane has focus (0-based)
 
   // Team view mode - when true, only show team communication messages
-  teamViewMode: boolean;
+  teamViewMode?: boolean;
 };

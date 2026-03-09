@@ -155,4 +155,11 @@ export type SessionLogEntry = {
   content: string;
   tokens?: number;
   cost?: number;
+  usageBreakdown?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
 };

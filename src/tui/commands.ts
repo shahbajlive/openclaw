@@ -2,6 +2,7 @@ import type { SlashCommand } from "@mariozechner/pi-tui";
 import { listChatCommands, listChatCommandsForConfig } from "../auto-reply/commands-registry.js";
 import { formatThinkingLevels, listThinkingLevelLabels } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.js";
+import type { PaneContext } from "./tui-types.js";
 
 const VERBOSE_LEVELS = ["on", "off"];
 const REASONING_LEVELS = ["on", "off"];
@@ -23,6 +24,82 @@ export type SlashCommandOptions = {
 const COMMAND_ALIASES: Record<string, string> = {
   elev: "elevated",
 };
+
+export function getAllowedCommands(context: PaneContext): string[] {
+  if (context.type === "standalone") {
+    return [
+      "help",
+      "status",
+      "agent",
+      "agents",
+      "session",
+      "sessions",
+      "model",
+      "models",
+      "think",
+      "verbose",
+      "reasoning",
+      "usage",
+      "elevated",
+      "elev",
+      "activation",
+      "team",
+      "teams",
+      "abort",
+      "new",
+      "reset",
+      "settings",
+      "exit",
+      "quit",
+      "split",
+    ];
+  }
+  if (context.type === "teammate") {
+    return [
+      "help",
+      "abort",
+      "new",
+      "reset",
+      "exit",
+      "quit",
+      "model",
+      "models",
+      "think",
+      "verbose",
+      "reasoning",
+      "usage",
+      "elevated",
+      "elev",
+    ];
+  }
+  // lead context
+  return [
+    "help",
+    "status",
+    "agent",
+    "agents",
+    "session",
+    "sessions",
+    "model",
+    "models",
+    "think",
+    "verbose",
+    "reasoning",
+    "usage",
+    "elevated",
+    "elev",
+    "activation",
+    "team",
+    "teams",
+    "abort",
+    "new",
+    "reset",
+    "settings",
+    "exit",
+    "quit",
+    "split",
+  ];
+}
 
 function createLevelCompletion(
   levels: string[],

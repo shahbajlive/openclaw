@@ -8,17 +8,20 @@ import {
 import type { SessionsPatchResult } from "../gateway/protocol/index.js";
 import { formatRelativeTimestamp } from "../infra/format-time/format-relative.ts";
 import { normalizeAgentId } from "../routing/session-key.js";
-import { helpText, parseCommand } from "./commands.js";
+import { getAllowedCommands, helpText, parseCommand } from "./commands.js";
 import type { ChatLog } from "./components/chat-log.js";
 import {
   createFilterableSelectList,
   createSearchableSelectList,
   createSettingsList,
 } from "./components/selectors.js";
+import type { SplitView } from "./components/split-view.js";
 import type { GatewayChatClient } from "./gateway-chat.js";
 import { formatStatusSummary } from "./tui-status-summary.js";
 import type {
   AgentSummary,
+  GatewayTeamStatus,
+  PaneContext,
   GatewayStatusSummary,
   TuiOptions,
   TuiStateAccess,
@@ -43,6 +46,9 @@ type CommandHandlerContext = {
   applySessionInfoFromPatch: (result: SessionsPatchResult) => void;
   noteLocalRunId: (runId: string) => void;
   forgetLocalRunId?: (runId: string) => void;
+  splitView?: SplitView;
+  getPaneContext?: () => PaneContext;
+  updateRootLayout?: () => void;
   requestExit: () => void;
 };
 
@@ -66,23 +72,10 @@ export function createCommandHandlers(context: CommandHandlerContext) {
     applySessionInfoFromPatch,
     noteLocalRunId,
     forgetLocalRunId,
+    getPaneContext,
+    updateRootLayout,
     requestExit,
   } = context;
-
-  /**
-   * Get the appropriate chat log for displaying messages.
-   * If in split view mode, returns the active pane's chat log.
-   * Otherwise, returns the main chat log.
-   */
-  const getActiveChatLog = (): ChatLog => {
-    if (state.splitViewMode) {
-      const activePane = splitView.getPane(state.activePaneIndex);
-      if (activePane) {
-        return activePane;
-      }
-    }
-    return chatLog;
-  };
 
   const setAgent = async (id: string) => {
     state.currentAgentId = normalizeAgentId(id);
@@ -465,7 +458,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
     }
 
     // Check command permissions based on pane context
-    const context = getPaneContext();
+    const context = getPaneContext?.() ?? { type: "standalone" };
     const allowedCommands = getAllowedCommands(context);
 
     // Block restricted commands
@@ -490,7 +483,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
               provider: state.sessionInfo.modelProvider,
               model: state.sessionInfo.model,
             },
-            getPaneContext(),
+            getPaneContext?.() ?? { type: "standalone" },
           ),
         );
         break;
@@ -756,7 +749,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
             state.splitViewMode = false;
             state.splitViewPanes = [];
             state.activePaneIndex = 0;
-            updateRootLayout();
+            updateRootLayout?.();
             chatLog.addSystem("Exited split view.");
             tui.requestRender();
           } else {

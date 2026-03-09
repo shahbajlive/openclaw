@@ -1,4 +1,5 @@
 import { onAgentEvent } from "../../infra/agent-events.js";
+import type { InputProvenance } from "../../sessions/input-provenance.js";
 
 const AGENT_RUN_CACHE_TTL_MS = 10 * 60_000;
 /**
@@ -11,6 +12,7 @@ const AGENT_RUN_ERROR_RETRY_GRACE_MS = 15_000;
 const agentRunCache = new Map<string, AgentRunSnapshot>();
 const agentRunStarts = new Map<string, number>();
 const pendingAgentRunErrors = new Map<string, PendingAgentRunError>();
+const activeAgentRuns = new Map<string, ActiveAgentRunSnapshot>();
 let agentRunListenerStarted = false;
 
 type AgentRunSnapshot = {
@@ -26,6 +28,13 @@ type PendingAgentRunError = {
   snapshot: AgentRunSnapshot;
   dueAt: number;
   timer: NodeJS.Timeout;
+};
+
+export type ActiveAgentRunSnapshot = {
+  runId: string;
+  sessionKey: string;
+  startedAt: number;
+  inputProvenance?: InputProvenance;
 };
 
 function pruneAgentRunCache(now = Date.now()) {
@@ -116,11 +125,26 @@ function ensureAgentRunListener() {
       // A new start means this run is active again (or retried). Drop stale
       // terminal snapshots so waiters don't resolve from old state.
       agentRunCache.delete(evt.runId);
+      const sessionKey =
+        typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined;
+      if (sessionKey) {
+        activeAgentRuns.set(evt.runId, {
+          runId: evt.runId,
+          sessionKey,
+          startedAt: startedAt ?? Date.now(),
+          ...(evt.data?.inputProvenance &&
+          typeof evt.data.inputProvenance === "object" &&
+          evt.data.inputProvenance !== null
+            ? { inputProvenance: evt.data.inputProvenance as InputProvenance }
+            : {}),
+        });
+      }
       return;
     }
     if (phase !== "end" && phase !== "error") {
       return;
     }
+    activeAgentRuns.delete(evt.runId);
     const snapshot = createSnapshotFromLifecycleEvent({
       runId: evt.runId,
       phase,
@@ -139,6 +163,26 @@ function ensureAgentRunListener() {
 function getCachedAgentRun(runId: string) {
   pruneAgentRunCache();
   return agentRunCache.get(runId);
+}
+
+export function listActiveAgentRunsForSession(sessionKey: string): ActiveAgentRunSnapshot[] {
+  const normalizedSessionKey = sessionKey.trim();
+  if (!normalizedSessionKey) {
+    return [];
+  }
+  return [...activeAgentRuns.values()]
+    .filter((entry) => entry.sessionKey === normalizedSessionKey)
+    .toSorted((a, b) => b.startedAt - a.startedAt);
+}
+
+export function resetAgentJobStateForTest() {
+  for (const pending of pendingAgentRunErrors.values()) {
+    clearTimeout(pending.timer);
+  }
+  agentRunCache.clear();
+  agentRunStarts.clear();
+  pendingAgentRunErrors.clear();
+  activeAgentRuns.clear();
 }
 
 export async function waitForAgentJob(params: {

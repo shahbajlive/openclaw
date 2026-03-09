@@ -8,6 +8,7 @@ export function buildControlUiCspHeader(): string {
     "base-uri 'none'",
     "object-src 'none'",
     "frame-ancestors 'none'",
+    "frame-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: https:",

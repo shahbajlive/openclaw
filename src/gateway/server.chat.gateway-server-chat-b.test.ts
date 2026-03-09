@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { GetReplyOptions } from "../auto-reply/types.js";
+import { emitAgentEvent } from "../infra/agent-events.js";
 import { __setMaxChatHistoryMessagesBytesForTest } from "./server-constants.js";
 import {
   connectOk,
@@ -329,6 +330,225 @@ describe("gateway server chat", () => {
       expect(second.content?.replace(/\s+/g, " ").trim()).toBe("A B");
       expect(third.text?.replace(/\s+/g, " ").trim()).toBe("C");
       expect(fourth.content?.[0]?.text).toBe("  keep padded  ");
+    });
+  });
+
+  test("chat.history returns canonical toolInvocations and activeRun snapshots", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      const spy = getReplyFromConfig;
+      await connectOk(ws);
+
+      const sessionDir = await createSessionDir();
+      await writeMainSessionStore();
+      const ts = Date.now();
+      await writeMainSessionTranscript(sessionDir, [
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            timestamp: ts,
+            content: [
+              { type: "toolCall", id: "call-1", name: "discover_teammates", arguments: {} },
+            ],
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "toolResult",
+            timestamp: ts + 1,
+            toolCallId: "call-1",
+            toolName: "discover_teammates",
+            content: [{ type: "text", text: "Found 3 teammates." }],
+          },
+        }),
+      ]);
+
+      let releaseRun: () => void = () => {};
+      const runGate = new Promise<void>((resolve) => {
+        releaseRun = resolve;
+      });
+      spy.mockImplementationOnce(async () => {
+        await runGate;
+        return undefined;
+      });
+
+      const sendRes = await rpcReq(ws, "chat.send", {
+        sessionKey: "main",
+        message: "hello",
+        idempotencyKey: "idem-active-run",
+      });
+      expect(sendRes.ok).toBe(true);
+
+      const historyRes = await rpcReq<{
+        toolInvocations?: Array<Record<string, unknown>>;
+        activeRun?: { runId?: string; streamText?: string };
+      }>(ws, "chat.history", {
+        sessionKey: "main",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+
+      const toolInvocations = historyRes.payload?.toolInvocations ?? [];
+      expect(toolInvocations).toHaveLength(1);
+      expect(toolInvocations[0]?.toolCallId).toBe("call-1");
+      expect(toolInvocations[0]?.phase).toBe("result");
+      expect(
+        (toolInvocations[0]?.message as { __openclaw?: { canonicalToolInvocation?: boolean } })
+          ?.__openclaw?.canonicalToolInvocation,
+      ).toBe(true);
+      expect(historyRes.payload?.activeRun?.runId).toBe("idem-active-run");
+      expect(typeof historyRes.payload?.activeRun?.streamText).toBe("string");
+
+      releaseRun();
+    });
+  });
+
+  test("chat.send includes effectiveUserMessage for bare /reset", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      const sendRes = await rpcReq<{ status?: string; effectiveUserMessage?: string }>(
+        ws,
+        "chat.send",
+        {
+          sessionKey: "main",
+          message: "/reset",
+          idempotencyKey: "idem-reset-effective",
+        },
+      );
+      expect(sendRes.ok).toBe(true);
+      expect(sendRes.payload?.status).toBe("started");
+      expect(sendRes.payload?.effectiveUserMessage ?? "").toContain(
+        "A new session was started via /new or /reset.",
+      );
+    });
+  });
+
+  test("chat.history activeRun includes effectiveUserMessage for bare /reset while in-flight", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      const spy = getReplyFromConfig;
+      await connectOk(ws);
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      let releaseRun: () => void = () => {};
+      const runGate = new Promise<void>((resolve) => {
+        releaseRun = resolve;
+      });
+      spy.mockImplementationOnce(async () => {
+        await runGate;
+        return undefined;
+      });
+
+      const sendRes = await rpcReq<{ status?: string; effectiveUserMessage?: string }>(
+        ws,
+        "chat.send",
+        {
+          sessionKey: "main",
+          message: "/reset",
+          idempotencyKey: "idem-reset-history-effective",
+        },
+      );
+      expect(sendRes.ok).toBe(true);
+      expect(sendRes.payload?.status).toBe("started");
+      const effective = sendRes.payload?.effectiveUserMessage ?? "";
+      expect(effective).toContain("A new session was started via /new or /reset.");
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string; effectiveUserMessage?: string };
+      }>(ws, "chat.history", {
+        sessionKey: "main",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun?.runId).toBe("idem-reset-history-effective");
+      expect(historyRes.payload?.activeRun?.effectiveUserMessage).toBe(effective);
+
+      releaseRun();
+    });
+  });
+
+  test("chat.history hydrates activeRun from an in-flight agent lifecycle run", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeSessionStore({
+        entries: {
+          "agent:frontend_engineer:clawport": {
+            sessionId: "sess-frontend",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      emitAgentEvent({
+        runId: "run-a2a-active",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: {
+          phase: "start",
+          startedAt: 123,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: "agent:developer_lead:clawport",
+            sourceTool: "mention_route",
+          },
+        },
+      });
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string; streamText?: string };
+      }>(ws, "chat.history", {
+        sessionKey: "agent:frontend_engineer:clawport",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun?.runId).toBe("run-a2a-active");
+      expect(historyRes.payload?.activeRun?.streamText).toBe("");
+
+      emitAgentEvent({
+        runId: "run-a2a-active",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 124 },
+      });
+    });
+  });
+
+  test("chat.history ignores hidden same-session background lifecycle runs", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeSessionStore({
+        entries: {
+          "agent:frontend_engineer:clawport": {
+            sessionId: "sess-frontend",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      emitAgentEvent({
+        runId: "run-hidden",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 123 },
+      });
+
+      const historyRes = await rpcReq<{ activeRun?: { runId?: string } }>(ws, "chat.history", {
+        sessionKey: "agent:frontend_engineer:clawport",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun).toBeNull();
+
+      emitAgentEvent({
+        runId: "run-hidden",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 124 },
+      });
     });
   });
 

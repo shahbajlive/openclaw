@@ -515,7 +515,7 @@ describe("agent event handler", () => {
     resetAgentRunContextForTest();
   });
 
-  it("strips tool output when verbose is on", () => {
+  it("keeps tool output for WS recipients when verbose is on", () => {
     const { broadcastToConnIds, toolEventRecipients, handler } = createHarness({
       resolveSessionKeyForRun: () => "session-1",
     });
@@ -539,6 +539,36 @@ describe("agent event handler", () => {
 
     expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
     const payload = broadcastToConnIds.mock.calls[0]?.[1] as { data?: Record<string, unknown> };
+    expect(payload.data?.result).toEqual({ content: [{ type: "text", text: "secret" }] });
+    expect(payload.data?.partialResult).toEqual({ content: [{ type: "text", text: "partial" }] });
+    resetAgentRunContextForTest();
+  });
+
+  it("strips tool output for node session fanout when verbose is on", () => {
+    const { nodeSendToSession, toolEventRecipients, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-1",
+    });
+
+    registerAgentRunContext("run-tool-on-node", { sessionKey: "session-1", verboseLevel: "on" });
+    toolEventRecipients.add("run-tool-on-node", "conn-1");
+
+    handler({
+      runId: "run-tool-on-node",
+      seq: 1,
+      stream: "tool",
+      ts: Date.now(),
+      data: {
+        phase: "result",
+        name: "exec",
+        toolCallId: "t3-node",
+        result: { content: [{ type: "text", text: "secret" }] },
+        partialResult: { content: [{ type: "text", text: "partial" }] },
+      },
+    });
+
+    const nodeToolCalls = nodeSendToSession.mock.calls.filter(([, event]) => event === "agent");
+    expect(nodeToolCalls).toHaveLength(1);
+    const payload = nodeToolCalls[0]?.[2] as { data?: Record<string, unknown> };
     expect(payload.data?.result).toBeUndefined();
     expect(payload.data?.partialResult).toBeUndefined();
     resetAgentRunContextForTest();
@@ -681,6 +711,36 @@ describe("agent event handler", () => {
     expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
     const payload = broadcastToConnIds.mock.calls[0]?.[1] as { runId?: string };
     expect(payload.runId).toBe("run-tool-client");
+    resetAgentRunContextForTest();
+  });
+
+  it("routes tool events when recipients are registered on linked client run id", () => {
+    const { broadcastToConnIds, chatRunState, toolEventRecipients, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-tool-link",
+    });
+
+    chatRunState.registry.add("run-tool-internal-link", {
+      sessionKey: "session-tool-link",
+      clientRunId: "run-tool-client-link",
+    });
+    registerAgentRunContext("run-tool-internal-link", {
+      sessionKey: "session-tool-link",
+      verboseLevel: "on",
+    });
+    toolEventRecipients.add("run-tool-client-link", "conn-refresh");
+
+    handler({
+      runId: "run-tool-internal-link",
+      seq: 1,
+      stream: "tool",
+      ts: Date.now(),
+      data: { phase: "start", name: "discover_teammates", toolCallId: "t-link-1" },
+    });
+
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    const recipients = broadcastToConnIds.mock.calls[0]?.[2] as ReadonlySet<string> | undefined;
+    expect(recipients?.has("conn-refresh")).toBe(true);
+    expect(toolEventRecipients.get("run-tool-internal-link")?.has("conn-refresh")).toBe(true);
     resetAgentRunContextForTest();
   });
 

@@ -8,6 +8,7 @@ import {
   Text,
   TUI,
 } from "@mariozechner/pi-tui";
+import chalk from "chalk";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveTeamDisplayMode } from "../agents/teams/display-tmux.js";
 import { loadConfig } from "../config/config.js";
@@ -26,12 +27,13 @@ import { getTeamColor, getTeammateColor } from "./team-colors.js";
 import { editorTheme, theme } from "./theme/theme.js";
 import { createCommandHandlers } from "./tui-command-handlers.js";
 import { createEventHandlers } from "./tui-event-handlers.js";
-import { formatTokens } from "./tui-formatters.js";
 import { createLocalShellRunner } from "./tui-local-shell.js";
 import { createOverlayHandlers } from "./tui-overlays.js";
 import { createSessionActions } from "./tui-session-actions.js";
 import type {
   AgentSummary,
+  GatewayTeamStatus,
+  PaneContext,
   SessionInfo,
   SessionScope,
   TuiOptions,
@@ -617,6 +619,22 @@ export async function runTui(opts: TuiOptions) {
   currentSessionKey = resolveSessionKey(initialSessionInput);
   const homeSessionKey = currentSessionKey;
 
+  const getPaneContext = (): PaneContext => {
+    if (!teamStatus) {
+      return { type: "standalone" };
+    }
+    if (teamStatus.leadSessionKey === currentSessionKey) {
+      return { type: "lead", teamStatus };
+    }
+    const teammateIndex = teamStatus.teammates.findIndex(
+      (tm) => tm.sessionKey === currentSessionKey,
+    );
+    if (teammateIndex >= 0) {
+      return { type: "teammate", teamStatus, teammateIndex };
+    }
+    return { type: "standalone" };
+  };
+
   const updateHeader = () => {
     const sessionLabel = formatSessionKey(currentSessionKey);
     const agentLabel = formatAgentLabel(currentAgentId);
@@ -653,7 +671,6 @@ export async function runTui(opts: TuiOptions) {
   };
 
   const busyStates = new Set(["sending", "waiting", "streaming", "running"]);
-  let statusText: Text | null = null;
   let statusLoader: Loader | null = null;
 
   const formatElapsed = (startMs: number) => {
@@ -666,23 +683,11 @@ export async function runTui(opts: TuiOptions) {
     return `${minutes}m ${seconds}s`;
   };
 
-  const ensureStatusText = () => {
-    if (statusText) {
-      return;
-    }
-    statusContainer.clear();
-    statusLoader?.stop();
-    statusLoader = null;
-    statusText = new Text("", 1, 0);
-    statusContainer.addChild(statusText);
-  };
-
   const ensureStatusLoader = () => {
     if (statusLoader) {
       return;
     }
     statusContainer.clear();
-    statusText = null;
     statusLoader = new Loader(
       tui,
       (spinner) => theme.accent(spinner),
@@ -792,7 +797,6 @@ export async function runTui(opts: TuiOptions) {
       statusLoader = null;
       // When idle, clear the status container entirely — status info goes in the footer
       statusContainer.clear();
-      statusText = null;
       updateFooter();
     }
     lastActivityStatus = activityStatus;
@@ -1081,6 +1085,9 @@ export async function runTui(opts: TuiOptions) {
       formatSessionKey,
       noteLocalRunId,
       forgetLocalRunId,
+      splitView,
+      getPaneContext,
+      updateRootLayout,
       requestExit,
     });
 
@@ -1374,9 +1381,12 @@ export async function runTui(opts: TuiOptions) {
         const { stdout } = await execFileAsync("wezterm", ["cli", "list", "--format", "json"], {
           encoding: "utf-8",
         });
-        const panes = JSON.parse(stdout);
+        const panes = JSON.parse(stdout) as Array<{
+          pane_id?: string | number;
+          is_active?: boolean;
+        }>;
         const currentPaneId = process.env.WEZTERM_PANE.trim();
-        const currentPane = panes.find((p: any) => p.pane_id === currentPaneId);
+        const currentPane = panes.find((pane) => `${pane.pane_id ?? ""}` === currentPaneId);
         editor.isPaneActive = currentPane?.is_active ?? true;
         tui.requestRender();
       } catch {
@@ -1410,6 +1420,11 @@ export async function runTui(opts: TuiOptions) {
   client.start();
   await new Promise<void>((resolve) => {
     const finish = () => {
+      stopTeamPolling();
+      if (paneActiveCheckInterval) {
+        clearInterval(paneActiveCheckInterval);
+        paneActiveCheckInterval = null;
+      }
       process.removeListener("SIGINT", sigintHandler);
       process.removeListener("SIGTERM", sigtermHandler);
       resolve();

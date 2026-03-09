@@ -6,6 +6,11 @@ export type ChatAbortControllerEntry = {
   sessionKey: string;
   startedAtMs: number;
   expiresAtMs: number;
+  /**
+   * User-facing text for the in-flight run. Used by chat.history recovery so
+   * refresh can keep the optimistic user row (for example bare /reset rewrite).
+   */
+  effectiveUserMessage?: string;
 };
 
 export function isChatStopCommandText(text: string): boolean {

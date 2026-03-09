@@ -1,12 +1,23 @@
-import { Container, Spacer } from "@mariozechner/pi-tui";
+import { Container, Spacer, Text } from "@mariozechner/pi-tui";
+import chalk from "chalk";
 import { markdownTheme, theme } from "../theme/theme.js";
+import { splitThinkingFromText } from "../tui-formatters.js";
 import { HyperlinkMarkdown } from "./hyperlink-markdown.js";
 
 export class AssistantMessageComponent extends Container {
   private body: HyperlinkMarkdown;
+  private roleBadgeText: Text | null = null;
+  private roleBadgeShown = false;
+  private thinkingShown = false;
+  private readonly thinkingBox: HyperlinkMarkdown;
+  private readonly thinkingSpacer: Spacer;
 
   constructor(text: string) {
     super();
+    this.thinkingBox = new HyperlinkMarkdown("", 1, 0, markdownTheme, {
+      color: (line) => theme.dim(line),
+    });
+    this.thinkingSpacer = new Spacer(1);
     this.body = new HyperlinkMarkdown(text, 1, 0, markdownTheme, {
       // Keep assistant body text in terminal default foreground so contrast
       // follows the user's terminal theme (dark or light).

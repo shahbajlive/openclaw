@@ -15,6 +15,31 @@ export type GatewayInjectedTranscriptAppendResult = {
   error?: string;
 };
 
+export function appendInjectedUserMessageToTranscript(params: {
+  transcriptPath: string;
+  message: string;
+  provenance?: Record<string, unknown>;
+  idempotencyKey?: string;
+  now?: number;
+}): GatewayInjectedTranscriptAppendResult {
+  const now = params.now ?? Date.now();
+  const messageBody: AppendMessageArg & Record<string, unknown> = {
+    role: "user",
+    content: [{ type: "text", text: params.message }],
+    timestamp: now,
+    ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+    ...(params.provenance ? { provenance: params.provenance } : {}),
+  };
+
+  try {
+    const sessionManager = SessionManager.open(params.transcriptPath);
+    const messageId = sessionManager.appendMessage(messageBody);
+    return { ok: true, messageId, message: messageBody };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export function appendInjectedAssistantMessageToTranscript(params: {
   transcriptPath: string;
   message: string;

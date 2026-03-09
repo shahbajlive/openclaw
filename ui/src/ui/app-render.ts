@@ -1,10 +1,14 @@
 import { html, nothing } from "lit";
 import { parseAgentSessionKey } from "../../../src/routing/session-key.js";
 import { t } from "../i18n/index.ts";
+import { renderWorkspaceKanbanPage } from "../workspace/kanban-page.ts";
+import { renderWorkspaceMapPage } from "../workspace/map-page.ts";
+import { renderWorkspaceMessagesPage } from "../workspace/messages-page.ts";
 import { refreshChatAvatar } from "./app-chat.ts";
 import { renderUsageTab } from "./app-render-usage-tab.ts";
 import { renderChatControls, renderTab, renderThemeToggle } from "./app-render.helpers.ts";
 import type { AppViewState } from "./app-view-state.ts";
+import { buildMentionSuggestions, findDraftMentionAtSelection } from "./chat/draft-mentions.ts";
 import { loadAgentFileContent, loadAgentFiles, saveAgentFile } from "./controllers/agent-files.ts";
 import { loadAgentIdentities, loadAgentIdentity } from "./controllers/agent-identity.ts";
 import { loadAgentSkills } from "./controllers/agent-skills.ts";
@@ -65,7 +69,13 @@ import {
 } from "./controllers/skills.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "./external-link.ts";
 import { icons } from "./icons.ts";
-import { normalizeBasePath, TAB_GROUPS, subtitleForTab, titleForTab } from "./navigation.ts";
+import {
+  isWorkspaceTab,
+  normalizeBasePath,
+  TAB_GROUPS,
+  subtitleForTab,
+  titleForTab,
+} from "./navigation.ts";
 import { resolveConfiguredCronModelSuggestions, sortLocaleStrings } from "./views/agents-utils.ts";
 import { renderAgents } from "./views/agents.ts";
 import { renderChannels } from "./views/channels.ts";
@@ -154,10 +164,39 @@ export function renderApp(state: AppViewState) {
   const cronNext = state.cronStatus?.nextWakeAtMs ?? null;
   const chatDisabledReason = state.connected ? null : t("chat.disconnected");
   const isChat = state.tab === "chat";
+  const isWorkspace = isWorkspaceTab(state.tab);
   const chatFocus = isChat && (state.settings.chatFocusMode || state.onboarding);
   const showThinking = state.onboarding ? false : state.settings.chatShowThinking;
   const assistantAvatarUrl = resolveAssistantAvatarUrl(state);
   const chatAvatarUrl = state.chatAvatarUrl ?? assistantAvatarUrl ?? null;
+  const assistantWorkspaceAgent =
+    state.workspaceAgentsList?.agents.find((agent) => agent.id === state.assistantAgentId) ?? null;
+  const syncChatMentionDraft = (
+    next: string,
+    selectionStart = next.length,
+    selectionEnd = selectionStart,
+  ) => {
+    state.chatMessage = next;
+    const previousQuery = state.chatMentionQuery;
+    const previousStart = state.chatMentionStart;
+    const previousEnd = state.chatMentionEnd;
+    const mention = findDraftMentionAtSelection(next, selectionStart, selectionEnd);
+    state.chatMentionQuery = mention?.query ?? null;
+    state.chatMentionStart = mention?.start ?? null;
+    state.chatMentionEnd = mention?.end ?? null;
+    const mentionChanged =
+      previousQuery !== state.chatMentionQuery ||
+      previousStart !== state.chatMentionStart ||
+      previousEnd !== state.chatMentionEnd;
+    if (mentionChanged) {
+      state.chatMentionSelectedIndex = 0;
+    }
+  };
+  const chatMentionSuggestions = buildMentionSuggestions({
+    sessionKey: state.sessionKey,
+    query: state.chatMentionQuery,
+    agents: state.workspaceAgentsList?.agents ?? [],
+  });
   const configValue =
     state.configForm ?? (state.configSnapshot?.config as Record<string, unknown> | null);
   const basePath = normalizeBasePath(state.basePath ?? "");
@@ -278,7 +317,7 @@ export function renderApp(state: AppViewState) {
                 }}
                 aria-expanded=${!isGroupCollapsed}
               >
-                <span class="nav-label__text">${t(`nav.${group.label}`)}</span>
+                <span class="nav-label__text">${group.label === "workspace" ? "Workspace" : t(`nav.${group.label}`)}</span>
                 <span class="nav-label__chevron">${isGroupCollapsed ? "+" : "−"}</span>
               </button>
               <div class="nav-group__items">
@@ -305,7 +344,7 @@ export function renderApp(state: AppViewState) {
           </div>
         </div>
       </aside>
-      <main class="content ${isChat ? "content--chat" : ""}">
+      <main class="content ${isChat ? "content--chat" : ""} ${isWorkspace ? "content--workspace" : ""}">
         ${
           availableUpdate
             ? html`<div class="update-banner callout danger" role="alert">
@@ -319,16 +358,40 @@ export function renderApp(state: AppViewState) {
             </div>`
             : nothing
         }
-        <section class="content-header">
-          <div>
-            ${state.tab === "usage" ? nothing : html`<div class="page-title">${titleForTab(state.tab)}</div>`}
-            ${state.tab === "usage" ? nothing : html`<div class="page-sub">${subtitleForTab(state.tab)}</div>`}
-          </div>
-          <div class="page-meta">
-            ${state.lastError ? html`<div class="pill danger">${state.lastError}</div>` : nothing}
-            ${isChat ? renderChatControls(state) : nothing}
-          </div>
-        </section>
+        ${
+          isWorkspace
+            ? nothing
+            : html`
+                <section class="content-header">
+                  <div>
+                    ${state.tab === "usage" ? nothing : html`<div class="page-title">${titleForTab(state.tab)}</div>`}
+                    ${state.tab === "usage" ? nothing : html`<div class="page-sub">${subtitleForTab(state.tab)}</div>`}
+                  </div>
+                  <div class="page-meta">
+                    ${state.lastError ? html`<div class="pill danger">${state.lastError}</div>` : nothing}
+                    ${isChat ? renderChatControls(state) : nothing}
+                  </div>
+                </section>
+              `
+        }
+
+        ${
+          state.tab === "workspace-messages"
+            ? renderWorkspaceMessagesPage(
+                state as AppViewState & { workspaceMessagesSearch?: string },
+              )
+            : nothing
+        }
+
+        ${state.tab === "workspace-kanban" ? renderWorkspaceKanbanPage(state) : nothing}
+
+        ${
+          state.tab === "workspace-map"
+            ? renderWorkspaceMapPage(
+                state as AppViewState & { workspaceMapLayout?: "teams" | "hierarchy" },
+              )
+            : nothing
+        }
 
         ${
           state.tab === "overview"
@@ -349,6 +412,10 @@ export function renderApp(state: AppViewState) {
                 onSessionKeyChange: (next) => {
                   state.sessionKey = next;
                   state.chatMessage = "";
+                  state.chatMentionQuery = null;
+                  state.chatMentionStart = null;
+                  state.chatMentionEnd = null;
+                  state.chatMentionSelectedIndex = 0;
                   state.resetToolStream();
                   state.applySettings({
                     ...state.settings,
@@ -420,6 +487,7 @@ export function renderApp(state: AppViewState) {
                 loading: state.sessionsLoading,
                 result: state.sessionsResult,
                 error: state.sessionsError,
+                deletingKey: state.sessionsDeletingKey,
                 activeMinutes: state.sessionsFilterActive,
                 limit: state.sessionsFilterLimit,
                 includeGlobal: state.sessionsIncludeGlobal,
@@ -433,7 +501,17 @@ export function renderApp(state: AppViewState) {
                 },
                 onRefresh: () => loadSessions(state),
                 onPatch: (key, patch) => patchSession(state, key, patch),
-                onDelete: (key) => deleteSessionAndRefresh(state, key),
+                onDelete: (key) => {
+                  if (state.sessionsDeletingKey || state.sessionsLoading) {
+                    return;
+                  }
+                  state.sessionsDeletingKey = key;
+                  void deleteSessionAndRefresh(state, key).finally(() => {
+                    if (state.sessionsDeletingKey === key) {
+                      state.sessionsDeletingKey = null;
+                    }
+                  });
+                },
               })
             : nothing
         }
@@ -1004,6 +1082,10 @@ export function renderApp(state: AppViewState) {
                 onSessionKeyChange: (next) => {
                   state.sessionKey = next;
                   state.chatMessage = "";
+                  state.chatMentionQuery = null;
+                  state.chatMentionStart = null;
+                  state.chatMentionEnd = null;
+                  state.chatMentionSelectedIndex = 0;
                   state.chatAttachments = [];
                   state.chatStream = null;
                   state.chatStreamStartedAt = null;
@@ -1053,13 +1135,35 @@ export function renderApp(state: AppViewState) {
                   });
                 },
                 onChatScroll: (event) => state.handleChatScroll(event),
-                onDraftChange: (next) => (state.chatMessage = next),
+                onDraftChange: syncChatMentionDraft,
+                mentionSuggestions: chatMentionSuggestions,
+                mentionSelectedIndex: Math.min(
+                  state.chatMentionSelectedIndex,
+                  Math.max(chatMentionSuggestions.length - 1, 0),
+                ),
+                mentionRangeStart: state.chatMentionStart,
+                mentionRangeEnd: state.chatMentionEnd,
+                onMentionHighlight: (nextIndex) => (state.chatMentionSelectedIndex = nextIndex),
+                onMentionDismiss: () => {
+                  state.chatMentionQuery = null;
+                  state.chatMentionStart = null;
+                  state.chatMentionEnd = null;
+                  state.chatMentionSelectedIndex = 0;
+                },
                 attachments: state.chatAttachments,
                 onAttachmentsChange: (next) => (state.chatAttachments = next),
+                liveToolEventsEnabled: state.chatLiveToolEventsEnabled,
+                onToggleLiveToolEvents: () => state.handleToggleLiveToolEvents(),
+                shouldEmitToolResult: state.chatShouldEmitToolResult,
+                onToggleShouldEmitToolResult: () => state.handleToggleShouldEmitToolResult(),
+                shouldEmitToolOutput: state.chatShouldEmitToolOutput,
+                onToggleShouldEmitToolOutput: () => state.handleToggleShouldEmitToolOutput(),
                 onSend: () => state.handleSendChat(),
                 canAbort: Boolean(state.chatRunId),
                 onAbort: () => void state.handleAbortChat(),
                 onQueueRemove: (id) => state.removeQueuedMessage(id),
+                onQueueEdit: (id) => state.editQueuedMessage(id),
+                newSessionBusy: state.chatResetInFlight,
                 onNewSession: () => state.handleSendChat("/new", { restoreDraft: true }),
                 showNewMessages: state.chatNewMessagesBelow && !state.chatManualRefreshInFlight,
                 onScrollToBottom: () => state.scrollToBottom(),
@@ -1073,6 +1177,8 @@ export function renderApp(state: AppViewState) {
                 onSplitRatioChange: (ratio: number) => state.handleSplitRatioChange(ratio),
                 assistantName: state.assistantName,
                 assistantAvatar: state.assistantAvatar,
+                assistantAccent: assistantWorkspaceAgent?.color ?? null,
+                agentDirectory: state.workspaceAgentsList?.agents ?? [],
               })
             : nothing
         }

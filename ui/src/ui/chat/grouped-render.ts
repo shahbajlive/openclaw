@@ -4,6 +4,7 @@ import type { AssistantIdentity } from "../assistant-identity.ts";
 import { toSanitizedMarkdownHtml } from "../markdown.ts";
 import { openExternalUrlSafe } from "../open-external-url.ts";
 import { detectTextDirection } from "../text-direction.ts";
+import type { WorkspaceAgentRow } from "../types.ts";
 import type { MessageGroup } from "../types/chat-types.ts";
 import { renderCopyAsMarkdownButton } from "./copy-as-markdown.ts";
 import {
@@ -18,6 +19,8 @@ type ImageBlock = {
   url: string;
   alt?: string;
 };
+
+const AGENT_MENTION_TOKEN_RE = /(^|[^a-z0-9_])(@[a-z0-9_]+)(?=$|[^a-z0-9_])/gi;
 
 function extractImages(message: unknown): ImageBlock[] {
   const m = message as Record<string, unknown>;
@@ -56,6 +59,42 @@ function extractImages(message: unknown): ImageBlock[] {
   return images;
 }
 
+function formatRelativeTimestamp(timestamp: number): string {
+  const diffMs = Date.now() - timestamp;
+  if (!Number.isFinite(diffMs)) {
+    return "";
+  }
+  const absMs = Math.abs(diffMs);
+  if (absMs < 60_000) {
+    return "just now";
+  }
+  const minutes = Math.floor(absMs / 60_000);
+  if (minutes < 60) {
+    return diffMs >= 0 ? `${minutes}m ago` : `in ${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return diffMs >= 0 ? `${hours}h ago` : `in ${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days === 1 && diffMs >= 0) {
+    return "yesterday";
+  }
+  if (days < 7) {
+    return diffMs >= 0 ? `${days}d ago` : `in ${days}d`;
+  }
+  return new Date(timestamp).toLocaleDateString();
+}
+
+function formatAbsoluteTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
   return html`
     <div class="chat-group assistant">
@@ -76,16 +115,20 @@ export function renderStreamingGroup(
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
   assistant?: AssistantIdentity,
+  assistantAccent?: string | null,
+  agentDirectory?: WorkspaceAgentRow[],
 ) {
-  const timestamp = new Date(startedAt).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const timestamp = formatRelativeTimestamp(startedAt);
   const name = assistant?.name ?? "Assistant";
+  const absoluteTimestamp = formatAbsoluteTimestamp(startedAt);
 
   return html`
     <div class="chat-group assistant">
-      ${renderAvatar("assistant", assistant)}
+      ${renderAvatar("assistant", {
+        name,
+        avatar: assistant?.avatar ?? null,
+        accent: assistantAccent ?? null,
+      })}
       <div class="chat-group-messages">
         ${renderGroupedMessage(
           {
@@ -93,12 +136,13 @@ export function renderStreamingGroup(
             content: [{ type: "text", text }],
             timestamp: startedAt,
           },
-          { isStreaming: true, showReasoning: false },
+          { isStreaming: true, showReasoning: false, showToolOutput: true },
           onOpenSidebar,
+          agentDirectory,
         )}
         <div class="chat-group-footer">
           <span class="chat-sender-name">${name}</span>
-          <span class="chat-group-timestamp">${timestamp}</span>
+          <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
         </div>
       </div>
     </div>
@@ -110,30 +154,40 @@ export function renderMessageGroup(
   opts: {
     onOpenSidebar?: (content: string) => void;
     showReasoning: boolean;
+    showToolOutput: boolean;
     assistantName?: string;
     assistantAvatar?: string | null;
+    assistantAccent?: string | null;
+    agentDirectory?: WorkspaceAgentRow[];
   },
 ) {
   const normalizedRole = normalizeRoleForGrouping(group.role);
+  const identityRole =
+    normalizedRole === "tool" || normalizedRole === "peer" ? "assistant" : normalizedRole;
   const assistantName = opts.assistantName ?? "Assistant";
   const who =
-    normalizedRole === "user"
-      ? "You"
-      : normalizedRole === "assistant"
-        ? assistantName
-        : normalizedRole;
+    group.speakerLabel ??
+    (identityRole === "user" ? "You" : identityRole === "assistant" ? assistantName : identityRole);
   const roleClass =
-    normalizedRole === "user" ? "user" : normalizedRole === "assistant" ? "assistant" : "other";
-  const timestamp = new Date(group.timestamp).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+    identityRole === "user" ? "user" : identityRole === "assistant" ? "assistant" : "other";
+  const timestamp = formatRelativeTimestamp(group.timestamp);
+  const absoluteTimestamp = formatAbsoluteTimestamp(group.timestamp);
+  const isPeer = normalizedRole === "peer";
+  const groupClasses = ["chat-group", roleClass, isPeer ? "is-peer" : ""].filter(Boolean).join(" ");
+  const groupStyle = group.speakerAccent ? `--chat-peer-accent: ${group.speakerAccent};` : nothing;
 
   return html`
-    <div class="chat-group ${roleClass}">
-      ${renderAvatar(group.role, {
-        name: assistantName,
-        avatar: opts.assistantAvatar ?? null,
+    <div class=${groupClasses} style=${groupStyle}>
+      ${renderAvatar(identityRole, {
+        name: group.speakerLabel ?? assistantName,
+        avatar:
+          normalizedRole === "peer"
+            ? (group.speakerAvatar ?? null)
+            : (opts.assistantAvatar ?? null),
+        accent:
+          normalizedRole === "peer"
+            ? (group.speakerAccent ?? null)
+            : (opts.assistantAccent ?? null),
       })}
       <div class="chat-group-messages">
         ${group.messages.map((item, index) =>
@@ -142,23 +196,29 @@ export function renderMessageGroup(
             {
               isStreaming: group.isStreaming && index === group.messages.length - 1,
               showReasoning: opts.showReasoning,
+              showToolOutput: opts.showToolOutput,
             },
             opts.onOpenSidebar,
+            opts.agentDirectory,
           ),
         )}
         <div class="chat-group-footer">
           <span class="chat-sender-name">${who}</span>
-          <span class="chat-group-timestamp">${timestamp}</span>
+          <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
         </div>
       </div>
     </div>
   `;
 }
 
-function renderAvatar(role: string, assistant?: Pick<AssistantIdentity, "name" | "avatar">) {
+function renderAvatar(
+  role: string,
+  assistant?: Pick<AssistantIdentity, "name" | "avatar"> & { accent?: string | null },
+) {
   const normalized = normalizeRoleForGrouping(role);
   const assistantName = assistant?.name?.trim() || "Assistant";
   const assistantAvatar = assistant?.avatar?.trim() || "";
+  const assistantAccent = assistant?.accent?.trim() || "";
   const initial =
     normalized === "user"
       ? "U"
@@ -172,9 +232,12 @@ function renderAvatar(role: string, assistant?: Pick<AssistantIdentity, "name" |
       ? "user"
       : normalized === "assistant"
         ? "assistant"
-        : normalized === "tool"
-          ? "tool"
-          : "other";
+        : normalized === "peer"
+          ? "assistant"
+          : normalized === "tool"
+            ? "tool"
+            : "other";
+  const style = assistantAccent ? `--chat-peer-accent: ${assistantAccent};` : nothing;
 
   if (assistantAvatar && normalized === "assistant") {
     if (isAvatarUrl(assistantAvatar)) {
@@ -182,18 +245,99 @@ function renderAvatar(role: string, assistant?: Pick<AssistantIdentity, "name" |
         class="chat-avatar ${className}"
         src="${assistantAvatar}"
         alt="${assistantName}"
+        style=${style}
       />`;
     }
-    return html`<div class="chat-avatar ${className}">${assistantAvatar}</div>`;
+    return html`<div class="chat-avatar ${className}" style=${style}>${assistantAvatar}</div>`;
   }
 
-  return html`<div class="chat-avatar ${className}">${initial}</div>`;
+  return html`<div class="chat-avatar ${className}" style=${style}>${initial}</div>`;
 }
 
 function isAvatarUrl(value: string): boolean {
   return (
     /^https?:\/\//i.test(value) || /^data:image\//i.test(value) || value.startsWith("/") // Relative paths from avatar endpoint
   );
+}
+
+function buildMentionAccentMap(agentDirectory?: WorkspaceAgentRow[]): Map<string, string> {
+  const accents = new Map<string, string>();
+  for (const agent of agentDirectory ?? []) {
+    const agentId = agent.id?.trim();
+    const color = agent.color?.trim();
+    if (!agentId || !color) {
+      continue;
+    }
+    accents.set(`@${agentId}`, color);
+  }
+  return accents;
+}
+
+function highlightAgentMentionsInHtml(
+  htmlString: string,
+  agentDirectory?: WorkspaceAgentRow[],
+): string {
+  if (!htmlString || !agentDirectory?.length || typeof document === "undefined") {
+    return htmlString;
+  }
+  const mentionAccents = buildMentionAccentMap(agentDirectory);
+  if (mentionAccents.size === 0) {
+    return htmlString;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = htmlString;
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let current = walker.nextNode();
+  while (current) {
+    const textNode = current as Text;
+    const parentTag = textNode.parentElement?.tagName?.toLowerCase();
+    if (
+      textNode.nodeValue?.includes("@") &&
+      parentTag !== "code" &&
+      parentTag !== "pre" &&
+      parentTag !== "a"
+    ) {
+      textNodes.push(textNode);
+    }
+    current = walker.nextNode();
+  }
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue ?? "";
+    AGENT_MENTION_TOKEN_RE.lastIndex = 0;
+    const matches = [...text.matchAll(AGENT_MENTION_TOKEN_RE)];
+    if (matches.length === 0) {
+      continue;
+    }
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const match of matches) {
+      const mention = match[2] ?? "";
+      const accent = mentionAccents.get(mention);
+      const fullMatch = match[0] ?? "";
+      const prefixLength = fullMatch.length - mention.length;
+      const start = (match.index ?? 0) + prefixLength;
+      const end = start + mention.length;
+      if (start > cursor) {
+        fragment.append(document.createTextNode(text.slice(cursor, start)));
+      }
+      if (accent) {
+        const mentionEl = document.createElement("span");
+        mentionEl.className = "chat-agent-mention";
+        mentionEl.style.setProperty("--chat-agent-mention-accent", accent);
+        mentionEl.textContent = mention;
+        fragment.append(mentionEl);
+      } else {
+        fragment.append(document.createTextNode(mention));
+      }
+      cursor = end;
+    }
+    if (cursor < text.length) {
+      fragment.append(document.createTextNode(text.slice(cursor)));
+    }
+    textNode.parentNode?.replaceChild(fragment, textNode);
+  }
+  return template.innerHTML;
 }
 
 function renderMessageImages(images: ImageBlock[]) {
@@ -223,8 +367,9 @@ function renderMessageImages(images: ImageBlock[]) {
 
 function renderGroupedMessage(
   message: unknown,
-  opts: { isStreaming: boolean; showReasoning: boolean },
+  opts: { isStreaming: boolean; showReasoning: boolean; showToolOutput: boolean },
   onOpenSidebar?: (content: string) => void,
+  agentDirectory?: WorkspaceAgentRow[],
 ) {
   const m = message as Record<string, unknown>;
   const role = typeof m.role === "string" ? m.role : "unknown";
@@ -244,8 +389,11 @@ function renderGroupedMessage(
   const extractedThinking =
     opts.showReasoning && role === "assistant" ? extractThinkingCached(message) : null;
   const markdownBase = extractedText?.trim() ? extractedText : null;
+  const markdown =
+    (!opts.showToolOutput && isToolResult) || (opts.showToolOutput && isToolResult && hasToolCards)
+      ? null
+      : markdownBase;
   const reasoningMarkdown = extractedThinking ? formatReasoningMarkdown(extractedThinking) : null;
-  const markdown = markdownBase;
   const canCopyMarkdown = role === "assistant" && Boolean(markdown?.trim());
 
   const bubbleClasses = [
@@ -258,7 +406,7 @@ function renderGroupedMessage(
     .join(" ");
 
   if (!markdown && hasToolCards && isToolResult) {
-    return html`${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}`;
+    return html`${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar, opts.showToolOutput))}`;
   }
 
   if (!markdown && !hasToolCards && !hasImages) {
@@ -272,16 +420,21 @@ function renderGroupedMessage(
       ${
         reasoningMarkdown
           ? html`<div class="chat-thinking">${unsafeHTML(
-              toSanitizedMarkdownHtml(reasoningMarkdown),
+              highlightAgentMentionsInHtml(
+                toSanitizedMarkdownHtml(reasoningMarkdown),
+                agentDirectory,
+              ),
             )}</div>`
           : nothing
       }
       ${
         markdown
-          ? html`<div class="chat-text" dir="${detectTextDirection(markdown)}">${unsafeHTML(toSanitizedMarkdownHtml(markdown))}</div>`
+          ? html`<div class="chat-text" dir="${detectTextDirection(markdown)}">${unsafeHTML(
+              highlightAgentMentionsInHtml(toSanitizedMarkdownHtml(markdown), agentDirectory),
+            )}</div>`
           : nothing
       }
-      ${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}
+      ${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar, opts.showToolOutput))}
     </div>
   `;
 }

@@ -3,7 +3,17 @@
  */
 
 import { stripInboundMetadata } from "../../../../src/auto-reply/reply/strip-inbound-meta.js";
+import { resolveAgentIdFromSessionKey } from "../../../../src/routing/session-key.js";
+import { normalizeInputProvenance } from "../../../../src/sessions/input-provenance.js";
 import type { NormalizedMessage, MessageContentItem } from "../types/chat-types.ts";
+
+function humanizeAgentId(agentId: string): string {
+  return agentId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 /**
  * Normalize a raw message object into a consistent structure.
@@ -50,9 +60,21 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
 
   const timestamp = typeof m.timestamp === "number" ? m.timestamp : Date.now();
   const id = typeof m.id === "string" ? m.id : undefined;
+  let speakerKey: string | undefined;
+  let speakerLabel: string | undefined;
+  let speakerInitial: string | undefined;
 
   // Strip AI-injected metadata prefix blocks from user messages before display.
   if (role === "user" || role === "User") {
+    const provenance = normalizeInputProvenance(m.provenance);
+    if (provenance?.kind === "inter_session" && provenance.sourceSessionKey) {
+      const sourceAgentId = resolveAgentIdFromSessionKey(provenance.sourceSessionKey);
+      const sourceLabel = humanizeAgentId(sourceAgentId);
+      role = "peer";
+      speakerKey = `peer:${sourceAgentId}`;
+      speakerLabel = sourceLabel;
+      speakerInitial = sourceLabel.charAt(0).toUpperCase() || "A";
+    }
     content = content.map((item) => {
       if (item.type === "text" && typeof item.text === "string") {
         return { ...item, text: stripInboundMetadata(item.text) };
@@ -61,7 +83,7 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
     });
   }
 
-  return { role, content, timestamp, id };
+  return { role, content, timestamp, id, speakerKey, speakerLabel, speakerInitial };
 }
 
 /**
@@ -75,6 +97,9 @@ export function normalizeRoleForGrouping(role: string): string {
   }
   if (role === "assistant") {
     return "assistant";
+  }
+  if (role === "peer") {
+    return "peer";
   }
   if (role === "system") {
     return "system";

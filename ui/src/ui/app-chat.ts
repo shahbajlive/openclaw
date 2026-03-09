@@ -5,17 +5,25 @@ import { resetToolStream } from "./app-tool-stream.ts";
 import type { OpenClawApp } from "./app.ts";
 import { abortChatRun, loadChatHistory, sendChatMessage } from "./controllers/chat.ts";
 import { loadSessions } from "./controllers/sessions.ts";
-import type { GatewayHelloOk } from "./gateway.ts";
+import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import { normalizeBasePath } from "./navigation.ts";
 import type { ChatAttachment, ChatQueueItem } from "./ui-types.ts";
 import { generateUUID } from "./uuid.ts";
 
 export type ChatHost = {
+  client: GatewayBrowserClient | null;
   connected: boolean;
   chatMessage: string;
+  chatMentionQuery: string | null;
+  chatMentionStart: number | null;
+  chatMentionEnd: number | null;
+  chatMentionSelectedIndex: number;
   chatAttachments: ChatAttachment[];
   chatQueue: ChatQueueItem[];
   chatRunId: string | null;
+  chatResetInFlight: boolean;
+  chatLastTerminalRunId?: string | null;
+  chatLastTerminalAt?: number | null;
   chatSending: boolean;
   sessionKey: string;
   basePath: string;
@@ -25,6 +33,18 @@ export type ChatHost = {
 };
 
 export const CHAT_SESSIONS_ACTIVE_MINUTES = 120;
+
+function clearChatMentionState(
+  host: Pick<
+    ChatHost,
+    "chatMentionQuery" | "chatMentionStart" | "chatMentionEnd" | "chatMentionSelectedIndex"
+  >,
+) {
+  host.chatMentionQuery = null;
+  host.chatMentionStart = null;
+  host.chatMentionEnd = null;
+  host.chatMentionSelectedIndex = 0;
+}
 
 export function isChatBusy(host: ChatHost) {
   return host.chatSending || Boolean(host.chatRunId);
@@ -65,7 +85,26 @@ export async function handleAbortChat(host: ChatHost) {
     return;
   }
   host.chatMessage = "";
+  clearChatMentionState(host);
   await abortChatRun(host as unknown as OpenClawApp);
+}
+
+export async function resetChatSession(host: ChatHost) {
+  if (!host.client || !host.connected) {
+    return false;
+  }
+  try {
+    await host.client.request("sessions.reset", { key: host.sessionKey });
+    host.chatMessage = "";
+    clearChatMentionState(host);
+    host.chatAttachments = [];
+    host.chatQueue = [];
+    host.chatRunId = null;
+    await refreshChat(host, { scheduleScroll: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function enqueueChatMessage(
@@ -104,6 +143,8 @@ async function sendChatMessageNow(
   },
 ) {
   resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
+  host.chatLastTerminalRunId = null;
+  host.chatLastTerminalAt = null;
   const runId = await sendChatMessage(host as unknown as OpenClawApp, message, opts?.attachments);
   const ok = Boolean(runId);
   if (!ok && opts?.previousDraft != null) {
@@ -156,6 +197,17 @@ export function removeQueuedMessage(host: ChatHost, id: string) {
   host.chatQueue = host.chatQueue.filter((item) => item.id !== id);
 }
 
+export function editQueuedMessage(host: ChatHost, id: string) {
+  const item = host.chatQueue.find((entry) => entry.id === id);
+  if (!item) {
+    return;
+  }
+  host.chatMessage = item.text;
+  clearChatMentionState(host);
+  host.chatAttachments = item.attachments?.map((att) => ({ ...att })) ?? [];
+  host.chatQueue = host.chatQueue.filter((entry) => entry.id !== id);
+}
+
 export async function handleSendChat(
   host: ChatHost,
   messageOverride?: string,
@@ -181,18 +233,28 @@ export async function handleSendChat(
   }
 
   const refreshSessions = isChatResetCommand(message);
+  if (refreshSessions && host.chatResetInFlight) {
+    return;
+  }
   if (messageOverride == null) {
     host.chatMessage = "";
+    clearChatMentionState(host);
     // Clear attachments when sending
     host.chatAttachments = [];
   }
 
   if (isChatBusy(host)) {
+    if (refreshSessions) {
+      return;
+    }
     enqueueChatMessage(host, message, attachmentsToSend, refreshSessions);
     return;
   }
 
-  await sendChatMessageNow(host, message, {
+  if (refreshSessions) {
+    host.chatResetInFlight = true;
+  }
+  const ok = await sendChatMessageNow(host, message, {
     previousDraft: messageOverride == null ? previousDraft : undefined,
     restoreDraft: Boolean(messageOverride && opts?.restoreDraft),
     attachments: hasAttachments ? attachmentsToSend : undefined,
@@ -200,6 +262,9 @@ export async function handleSendChat(
     restoreAttachments: Boolean(messageOverride && opts?.restoreDraft),
     refreshSessions,
   });
+  if (refreshSessions && !ok) {
+    host.chatResetInFlight = false;
+  }
 }
 
 export async function refreshChat(host: ChatHost, opts?: { scheduleScroll?: boolean }) {

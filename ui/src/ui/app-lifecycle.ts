@@ -16,6 +16,7 @@ import {
   syncTabWithLocation,
   syncThemeWithSettings,
 } from "./app-settings.ts";
+import { persistChatRuntimeState } from "./chat-runtime-state.ts";
 import { loadControlUiBootstrapConfig } from "./controllers/control-ui-bootstrap.ts";
 import type { Tab } from "./navigation.ts";
 
@@ -34,12 +35,20 @@ type LifecycleHost = {
   chatLoading: boolean;
   chatMessages: unknown[];
   chatToolMessages: unknown[];
-  chatStream: string;
+  chatStream: string | null;
+  chatRunId: string | null;
+  chatStreamStartedAt: number | null;
+  chatStreamCommittedPrefixLength?: number;
+  workspaceSelectedAgentId: string | null;
+  workspaceAgentsList?: {
+    agents?: Array<{ id: string; title?: string | null; description?: string | null }>;
+  } | null;
   logsAutoFollow: boolean;
   logsAtBottom: boolean;
   logsEntries: unknown[];
   popStateHandler: () => void;
   topbarObserver: ResizeObserver | null;
+  syncWorkspaceSelectedConversationSummary?: (agentId: string, fallback: string) => void;
 };
 
 export function handleConnected(host: LifecycleHost) {
@@ -105,6 +114,17 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
     );
   }
   if (
+    host.tab === "workspace-messages" &&
+    (changed.has("chatMessages") || changed.has("chatStream"))
+  ) {
+    const agentId = host.workspaceSelectedAgentId;
+    if (agentId && host.syncWorkspaceSelectedConversationSummary) {
+      const agent = host.workspaceAgentsList?.agents?.find((entry) => entry.id === agentId);
+      const fallback = agent?.description?.trim() || agent?.title?.trim() || "Start a conversation";
+      host.syncWorkspaceSelectedConversationSummary(agentId, fallback);
+    }
+  }
+  if (
     host.tab === "logs" &&
     (changed.has("logsEntries") || changed.has("logsAutoFollow") || changed.has("tab"))
   ) {
@@ -114,5 +134,20 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
         changed.has("tab") || changed.has("logsAutoFollow"),
       );
     }
+  }
+
+  if (
+    changed.has("chatRunId") ||
+    changed.has("chatStream") ||
+    changed.has("chatStreamStartedAt") ||
+    changed.has("sessionKey")
+  ) {
+    persistChatRuntimeState({
+      sessionKey: host.sessionKey,
+      runId: host.chatRunId,
+      stream: host.chatStream,
+      streamStartedAt: host.chatStreamStartedAt,
+      streamCommittedPrefixLength: host.chatStreamCommittedPrefixLength ?? 0,
+    });
   }
 }

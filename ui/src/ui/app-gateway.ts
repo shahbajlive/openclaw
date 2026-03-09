@@ -70,8 +70,13 @@ type GatewayHost = {
   assistantAvatar: string | null;
   assistantAgentId: string | null;
   serverVersion: string | null;
+  chatLiveToolEventsEnabled: boolean;
   sessionKey: string;
   chatRunId: string | null;
+  chatStreamCommittedPrefixLength?: number;
+  chatResetInFlight: boolean;
+  chatLastTerminalRunId?: string | null;
+  chatLastTerminalAt?: number | null;
   refreshSessionsAfterChat: Set<string>;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
@@ -194,11 +199,9 @@ export function connectGateway(host: GatewayHost) {
       host.lastErrorCode = null;
       host.hello = hello;
       applySnapshot(host, hello);
-      // Reset orphaned chat run state from before disconnect.
-      // Any in-flight run's final event was lost during the disconnect window.
-      host.chatRunId = null;
-      (host as unknown as { chatStream: string | null }).chatStream = null;
-      (host as unknown as { chatStreamStartedAt: number | null }).chatStreamStartedAt = null;
+      // Keep any local in-progress chat stream/run state so refresh/reconnect
+      // does not drop visible active responses mid-turn.
+      host.chatResetInFlight = false;
       resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
       void loadAssistantIdentity(host as unknown as OpenClawApp);
       void loadAgents(host as unknown as OpenClawApp);
@@ -239,6 +242,8 @@ export function connectGateway(host: GatewayHost) {
       }
       host.lastError = `event gap detected (expected seq ${expected}, got ${received}); refresh recommended`;
       host.lastErrorCode = null;
+      resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
+      void loadChatHistory(host as unknown as OpenClawApp);
     },
   });
   host.client = client;
@@ -262,7 +267,11 @@ function handleTerminalChatEvent(
   if (state !== "final" && state !== "error" && state !== "aborted") {
     return;
   }
-  resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
+  host.chatResetInFlight = false;
+  if (payload?.runId) {
+    host.chatLastTerminalRunId = payload.runId;
+    host.chatLastTerminalAt = Date.now();
+  }
   void flushChatQueueForEvent(host as unknown as Parameters<typeof flushChatQueueForEvent>[0]);
   const runId = payload?.runId;
   if (!runId || !host.refreshSessionsAfterChat.has(runId)) {
@@ -284,10 +293,31 @@ function handleChatGatewayEvent(host: GatewayHost, payload: ChatEventPayload | u
     );
   }
   const state = handleChatEvent(host as unknown as OpenClawApp, payload);
-  handleTerminalChatEvent(host, payload, state);
-  if (state === "final" && shouldReloadHistoryForFinalEvent(payload)) {
+  if (payload?.sessionKey === host.sessionKey && shouldReloadHistoryForFinalEvent(payload)) {
     void loadChatHistory(host as unknown as OpenClawApp);
   }
+  handleTerminalChatEvent(host, payload, state);
+}
+
+function shouldReloadHistoryForInboundInterSessionStart(
+  host: GatewayHost,
+  payload: AgentEventPayload | undefined,
+  hadChatRun: boolean,
+): boolean {
+  if (hadChatRun || !payload || payload.stream !== "lifecycle") {
+    return false;
+  }
+  if (payload.sessionKey !== host.sessionKey) {
+    return false;
+  }
+  if ((payload.data?.phase as string | undefined) !== "start") {
+    return false;
+  }
+  const provenance = payload.data?.inputProvenance;
+  if (!provenance || typeof provenance !== "object") {
+    return false;
+  }
+  return (provenance as { kind?: unknown }).kind === "inter_session";
 }
 
 function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
@@ -303,10 +333,23 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
     if (host.onboarding) {
       return;
     }
+    if (!host.chatLiveToolEventsEnabled) {
+      return;
+    }
+    const hadChatRun = Boolean(host.chatRunId);
     handleAgentEvent(
       host as unknown as Parameters<typeof handleAgentEvent>[0],
       evt.payload as AgentEventPayload | undefined,
     );
+    if (
+      shouldReloadHistoryForInboundInterSessionStart(
+        host,
+        evt.payload as AgentEventPayload | undefined,
+        hadChatRun,
+      )
+    ) {
+      void loadChatHistory(host as unknown as OpenClawApp);
+    }
     return;
   }
 

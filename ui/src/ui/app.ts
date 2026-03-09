@@ -15,6 +15,7 @@ import {
   handleWhatsAppWait as handleWhatsAppWaitInternal,
 } from "./app-channels.ts";
 import {
+  editQueuedMessage as editQueuedMessageInternal,
   handleAbortChat as handleAbortChatInternal,
   handleSendChat as handleSendChatInternal,
   removeQueuedMessage as removeQueuedMessageInternal,
@@ -52,16 +53,30 @@ import {
 } from "./app-tool-stream.ts";
 import type { AppViewState } from "./app-view-state.ts";
 import { normalizeAssistantIdentity } from "./assistant-identity.ts";
+import { loadChatRuntimeState } from "./chat-runtime-state.ts";
 import { loadAssistantIdentity as loadAssistantIdentityInternal } from "./controllers/assistant-identity.ts";
 import type { CronFieldErrors } from "./controllers/cron.ts";
 import type { DevicePairingList } from "./controllers/devices.ts";
 import type { ExecApprovalRequest } from "./controllers/exec-approval.ts";
 import type { ExecApprovalsFile, ExecApprovalsSnapshot } from "./controllers/exec-approvals.ts";
 import type { SkillMessage } from "./controllers/skills.ts";
+import {
+  createWorkspaceKanbanTicket,
+  deleteWorkspaceKanbanTicket,
+  loadWorkspaceKanban,
+  moveWorkspaceKanbanTicket,
+  syncWorkspaceSelectedConversationSummary as syncWorkspaceSelectedConversationSummaryInternal,
+  updateWorkspaceKanbanTicket,
+} from "./controllers/workspace.ts";
 import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
 import { loadSettings, type UiSettings } from "./storage.ts";
 import type { ResolvedTheme, ThemeMode } from "./theme.ts";
+import type {
+  WorkspaceAgentsListResult,
+  WorkspaceConversationSummary,
+  WorkspaceFilesListResult,
+} from "./types.ts";
 import type {
   AgentsListResult,
   AgentsFilesListResult,
@@ -85,6 +100,13 @@ import type {
 import { type ChatAttachment, type ChatQueueItem, type CronFormState } from "./ui-types.ts";
 import { generateUUID } from "./uuid.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
+import type {
+  WorkspaceTicket,
+  WorkspaceTicketPriority,
+  WorkspaceTicketRole,
+  WorkspaceTicketStatus,
+  WorkspaceTicketWorkState,
+} from "./workspace-kanban.ts";
 
 declare global {
   interface Window {
@@ -113,6 +135,7 @@ export class OpenClawApp extends LitElement {
   clientInstanceId = generateUUID();
   connectGeneration = 0;
   @state() settings: UiSettings = loadSettings();
+  private initialChatRuntime = loadChatRuntimeState(this.settings.sessionKey);
   constructor() {
     super();
     if (isSupportedLocale(this.settings.locale)) {
@@ -142,15 +165,26 @@ export class OpenClawApp extends LitElement {
   @state() chatLoading = false;
   @state() chatSending = false;
   @state() chatMessage = "";
+  @state() chatMentionQuery: string | null = null;
+  @state() chatMentionStart: number | null = null;
+  @state() chatMentionEnd: number | null = null;
+  @state() chatMentionSelectedIndex = 0;
   @state() chatMessages: unknown[] = [];
   @state() chatToolMessages: unknown[] = [];
-  @state() chatStream: string | null = null;
-  @state() chatStreamStartedAt: number | null = null;
-  @state() chatRunId: string | null = null;
+  @state() chatStream: string | null = this.initialChatRuntime?.stream ?? null;
+  @state() chatStreamStartedAt: number | null = this.initialChatRuntime?.streamStartedAt ?? null;
+  chatStreamCommittedPrefixLength = this.initialChatRuntime?.streamCommittedPrefixLength ?? 0;
+  @state() chatRunId: string | null = this.initialChatRuntime?.runId ?? null;
+  @state() chatResetInFlight = false;
+  @state() chatLastTerminalRunId: string | null = null;
+  @state() chatLastTerminalAt: number | null = null;
   @state() compactionStatus: CompactionStatus | null = null;
   @state() fallbackStatus: FallbackStatus | null = null;
   @state() chatAvatarUrl: string | null = null;
   @state() chatThinkingLevel: string | null = null;
+  @state() chatLiveToolEventsEnabled = this.settings.chatLiveToolEvents;
+  @state() chatShouldEmitToolResult = this.settings.chatShouldEmitToolResult ?? true;
+  @state() chatShouldEmitToolOutput = this.settings.chatShouldEmitToolOutput ?? true;
   @state() chatQueue: ChatQueueItem[] = [];
   @state() chatAttachments: ChatAttachment[] = [];
   @state() chatManualRefreshInFlight = false;
@@ -240,9 +274,51 @@ export class OpenClawApp extends LitElement {
   @state() agentSkillsReport: SkillStatusReport | null = null;
   @state() agentSkillsAgentId: string | null = null;
 
+  @state() workspaceAgentsLoading = false;
+  @state() workspaceAgentsError: string | null = null;
+  @state() workspaceAgentsList: WorkspaceAgentsListResult | null = null;
+  @state() workspaceSelectedAgentId: string | null = this.settings.workspaceSelectedAgentId || null;
+  @state() workspaceConversationSummaries: Record<string, WorkspaceConversationSummary> = {};
+  @state() workspaceMessagesSeenAt: Record<string, number> = {
+    ...this.settings.workspaceMessagesSeenAt,
+  };
+  @state() workspaceUnreadTotal = 0;
+  @state() workspaceFilesLoading = false;
+  @state() workspaceFilesError: string | null = null;
+  @state() workspaceFilesList: WorkspaceFilesListResult | null = null;
+  @state() workspaceFileActive: string | null = null;
+  @state() workspaceFileContents: Record<string, string> = {};
+  @state() workspaceKanbanLoading = false;
+  @state() workspaceKanbanError: string | null = null;
+  @state() workspaceKanbanTickets: WorkspaceTicket[] = [];
+  @state() workspaceKanbanDraftTitle = "";
+  @state() workspaceKanbanDraftDescription = "";
+  @state() workspaceKanbanDraftPriority: WorkspaceTicketPriority = "medium";
+  @state() workspaceKanbanDraftAssigneeId = "";
+  @state() workspaceKanbanDraftAssigneeRole: WorkspaceTicketRole | "" = "";
+  @state() workspaceKanbanCreateOpen = false;
+  @state() workspaceKanbanSelectedTicketId: string | null = null;
+  @state() workspaceKanbanFilterAgentId: string | null = null;
+  @state() workspaceKanbanDragOverStatus: WorkspaceTicketStatus | null = null;
+  @state() workspaceKanbanDrawerExpanded = false;
+  @state() workspaceMessagesSearch = "";
+  @state() workspaceMapLayout: "teams" | "hierarchy" = "hierarchy";
+  @state() workspaceMapView: "map" | "grid" | "feed" = "map";
+  @state() workspaceMapZoom = 1;
+  @state() workspaceMapFeedFilter: "all" | "ok" | "error" = "all";
+  @state() workspaceMapPanX = 0;
+  @state() workspaceMapPanY = 0;
+  @state() workspaceMapInteracted = false;
+  @state() workspaceMapPointerId: number | null = null;
+  @state() workspaceMapDragStartX = 0;
+  @state() workspaceMapDragStartY = 0;
+  @state() workspaceMapPanStartX = 0;
+  @state() workspaceMapPanStartY = 0;
+
   @state() sessionsLoading = false;
   @state() sessionsResult: SessionsListResult | null = null;
   @state() sessionsError: string | null = null;
+  @state() sessionsDeletingKey: string | null = null;
   @state() sessionsFilterActive = "";
   @state() sessionsFilterLimit = "120";
   @state() sessionsIncludeGlobal = true;
@@ -457,12 +533,51 @@ export class OpenClawApp extends LitElement {
     );
   }
 
+  handleToggleLiveToolEvents() {
+    const enabled = !this.chatLiveToolEventsEnabled;
+    this.chatLiveToolEventsEnabled = enabled;
+    this.applySettings({ ...this.settings, chatLiveToolEvents: enabled });
+    if (!enabled) {
+      this.resetToolStream();
+    }
+  }
+
+  handleToggleShouldEmitToolResult() {
+    const enabled = !this.chatShouldEmitToolResult;
+    this.chatShouldEmitToolResult = enabled;
+    if (!enabled) {
+      this.chatShouldEmitToolOutput = false;
+    }
+    this.applySettings({
+      ...this.settings,
+      chatShouldEmitToolResult: enabled,
+      chatShouldEmitToolOutput: enabled ? this.chatShouldEmitToolOutput : false,
+    });
+  }
+
+  handleToggleShouldEmitToolOutput() {
+    const enabled = !this.chatShouldEmitToolOutput;
+    this.chatShouldEmitToolOutput = enabled;
+    if (enabled) {
+      this.chatShouldEmitToolResult = true;
+    }
+    this.applySettings({
+      ...this.settings,
+      chatShouldEmitToolResult: enabled ? true : this.chatShouldEmitToolResult,
+      chatShouldEmitToolOutput: enabled,
+    });
+  }
+
   async loadAssistantIdentity() {
     await loadAssistantIdentityInternal(this);
   }
 
   applySettings(next: UiSettings) {
     applySettingsInternal(this as unknown as Parameters<typeof applySettingsInternal>[0], next);
+  }
+
+  syncWorkspaceSelectedConversationSummary(agentId: string, fallback: string) {
+    syncWorkspaceSelectedConversationSummaryInternal(this, agentId, fallback);
   }
 
   setTab(next: Tab) {
@@ -488,6 +603,13 @@ export class OpenClawApp extends LitElement {
   removeQueuedMessage(id: string) {
     removeQueuedMessageInternal(
       this as unknown as Parameters<typeof removeQueuedMessageInternal>[0],
+      id,
+    );
+  }
+
+  editQueuedMessage(id: string) {
+    editQueuedMessageInternal(
+      this as unknown as Parameters<typeof editQueuedMessageInternal>[0],
       id,
     );
   }
@@ -545,6 +667,64 @@ export class OpenClawApp extends LitElement {
 
   handleNostrProfileToggleAdvanced() {
     handleNostrProfileToggleAdvancedInternal(this);
+  }
+
+  setWorkspaceKanbanDraftAssignee(agentId: string) {
+    this.workspaceKanbanDraftAssigneeId = agentId;
+    if (!agentId) {
+      this.workspaceKanbanDraftAssigneeRole = "";
+    }
+  }
+
+  async handleCreateWorkspaceKanbanTicket() {
+    const title = this.workspaceKanbanDraftTitle.trim();
+    if (!title) {
+      return;
+    }
+    await createWorkspaceKanbanTicket(this, {
+      title,
+      description: this.workspaceKanbanDraftDescription.trim(),
+      priority: this.workspaceKanbanDraftPriority,
+      assigneeId: this.workspaceKanbanDraftAssigneeId || null,
+      assigneeRole: this.workspaceKanbanDraftAssigneeId
+        ? this.workspaceKanbanDraftAssigneeRole || null
+        : null,
+    });
+    this.workspaceKanbanDraftTitle = "";
+    this.workspaceKanbanDraftDescription = "";
+    this.workspaceKanbanDraftPriority = "medium";
+    this.workspaceKanbanDraftAssigneeId = "";
+    this.workspaceKanbanDraftAssigneeRole = "";
+  }
+
+  async handleRefreshWorkspaceKanban() {
+    await loadWorkspaceKanban(this);
+  }
+
+  async handleMoveWorkspaceKanbanTicket(ticketId: string, status: WorkspaceTicketStatus) {
+    await moveWorkspaceKanbanTicket(this, ticketId, status);
+  }
+
+  async handleDeleteWorkspaceKanbanTicket(ticketId: string) {
+    await deleteWorkspaceKanbanTicket(this, ticketId);
+  }
+
+  async handleUpdateWorkspaceKanbanTicket(
+    ticketId: string,
+    patch: Partial<{
+      title: string;
+      description: string;
+      status: WorkspaceTicketStatus;
+      priority: WorkspaceTicketPriority;
+      assigneeId: string | null;
+      assigneeRole: WorkspaceTicketRole | null;
+      workState: WorkspaceTicketWorkState;
+      workStartedAt: number | null;
+      workError: string | null;
+      workResult: string | null;
+    }>,
+  ) {
+    await updateWorkspaceKanbanTicket(this, ticketId, patch);
   }
 
   async handleExecApprovalDecision(decision: "allow-once" | "allow-always" | "deny") {

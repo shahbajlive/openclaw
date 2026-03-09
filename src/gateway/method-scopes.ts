@@ -82,6 +82,10 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "talk.config",
     "agents.files.list",
     "agents.files.get",
+    "workspace.agents.list",
+    "workspace.files.list",
+    "workspace.files.get",
+    "workspace.kanban.list",
   ],
   [WRITE_SCOPE]: [
     "send",
@@ -100,6 +104,10 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "chat.abort",
     "browser.request",
     "push.test",
+    "workspace.kanban.create",
+    "workspace.kanban.update",
+    "workspace.kanban.move",
+    "workspace.kanban.delete",
   ],
   [ADMIN_SCOPE]: [
     "channels.logout",

@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BARE_SESSION_RESET_PROMPT } from "../../auto-reply/reply/session-reset-prompt.js";
 import { agentHandlers } from "./agent.js";
 import type { GatewayRequestContext } from "./types.js";
@@ -9,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   agentCommand: vi.fn(),
   registerAgentRunContext: vi.fn(),
   sessionsResetHandler: vi.fn(),
+  resolveTeamSessionWorkspace: vi.fn(),
+  listAgentIds: vi.fn(() => ["main"]),
+  resolveAgentWorkspaceDir: vi.fn(() => "/tmp/team-root"),
   loadConfigReturn: {} as Record<string, unknown>,
 }));
 
@@ -61,8 +65,8 @@ vi.mock("../../config/config.js", async () => {
 });
 
 vi.mock("../../agents/agent-scope.js", () => ({
-  listAgentIds: () => ["main"],
-  resolveAgentWorkspaceDir: () => "/tmp/team-root",
+  listAgentIds: mocks.listAgentIds,
+  resolveAgentWorkspaceDir: mocks.resolveAgentWorkspaceDir,
 }));
 
 vi.mock("../../agents/teams/team-registry.js", () => ({
@@ -120,6 +124,12 @@ function mockMainSessionEntry(entry: Record<string, unknown>, cfg: Record<string
     canonicalKey: "agent:main:main",
   });
 }
+
+beforeEach(() => {
+  mocks.loadConfigReturn = {};
+  mocks.listAgentIds.mockReturnValue(["main"]);
+  mocks.resolveAgentWorkspaceDir.mockReturnValue("/tmp/team-root");
+});
 
 function captureUpdatedMainEntry() {
   let capturedEntry: Record<string, unknown> | undefined;
@@ -674,5 +684,109 @@ describe("gateway agent handler", () => {
     await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
     const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as { workspaceDir?: string };
     expect(callArgs.workspaceDir).toBe(path.resolve("/tmp/team-root/.worktrees/reviewer"));
+  });
+
+  it("routes leading @agent_id mentions to the allowed teammate session with the mention removed", async () => {
+    mocks.listAgentIds.mockReturnValue(["developer_lead", "frontend_engineer"]);
+    mocks.loadConfigReturn = {
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["developer_lead", "frontend_engineer"],
+        },
+      },
+    };
+    mocks.loadSessionEntry.mockReturnValue({
+      cfg: mocks.loadConfigReturn,
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "existing-session-id", updatedAt: Date.now() },
+      canonicalKey: "agent:frontend_engineer:clawport",
+    });
+    mocks.updateSessionStore.mockResolvedValue(undefined);
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    const respond = vi.fn();
+    await agentHandlers.agent({
+      params: {
+        message: "@frontend_engineer please review this UI change",
+        sessionKey: "agent:developer_lead:clawport",
+        idempotencyKey: "test-mention-route",
+      },
+      respond,
+      context: makeContext(),
+      req: { type: "req", id: "6", method: "agent" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
+    const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as {
+      message?: string;
+      sessionKey?: string;
+      inputProvenance?: { kind?: string; sourceSessionKey?: string; sourceTool?: string };
+    };
+    expect(callArgs.message).toContain("please review this UI change");
+    expect(callArgs.message).not.toContain("@frontend_engineer");
+    expect(callArgs.sessionKey).toBe("agent:frontend_engineer:clawport");
+    expect(callArgs.inputProvenance).toMatchObject({
+      kind: "inter_session",
+      sourceSessionKey: "agent:developer_lead:clawport",
+      sourceTool: "mention_route",
+    });
+  });
+
+  it("routes mid-sentence @agent_id mentions to the allowed teammate session with the mention removed", async () => {
+    mocks.listAgentIds.mockReturnValue(["developer_lead", "frontend_engineer"]);
+    mocks.loadConfigReturn = {
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["developer_lead", "frontend_engineer"],
+        },
+      },
+    };
+    mocks.loadSessionEntry.mockReturnValue({
+      cfg: mocks.loadConfigReturn,
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "existing-session-id", updatedAt: Date.now() },
+      canonicalKey: "agent:frontend_engineer:clawport",
+    });
+    mocks.updateSessionStore.mockResolvedValue(undefined);
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    const respond = vi.fn();
+    await agentHandlers.agent({
+      params: {
+        message: "Please sync with @frontend_engineer on the UI polish",
+        sessionKey: "agent:developer_lead:clawport",
+        idempotencyKey: "test-mid-mention-route",
+      },
+      respond,
+      context: makeContext(),
+      req: { type: "req", id: "7", method: "agent" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
+    const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as {
+      message?: string;
+      sessionKey?: string;
+      inputProvenance?: { kind?: string; sourceSessionKey?: string; sourceTool?: string };
+    };
+    expect(callArgs.message).toContain("Please sync with on the UI polish");
+    expect(callArgs.message).not.toContain("@frontend_engineer");
+    expect(callArgs.sessionKey).toBe("agent:frontend_engineer:clawport");
+    expect(callArgs.inputProvenance).toMatchObject({
+      kind: "inter_session",
+      sourceSessionKey: "agent:developer_lead:clawport",
+      sourceTool: "mention_route",
+    });
   });
 });

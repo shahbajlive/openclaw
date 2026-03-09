@@ -9,9 +9,15 @@ export type UiSettings = {
   token: string;
   sessionKey: string;
   lastActiveSessionKey: string;
+  workspaceSelectedAgentId: string;
+  workspaceMessagesSeenAt: Record<string, number>;
+  workspaceMessagesSidebarCollapsed: boolean;
   theme: ThemeMode;
   chatFocusMode: boolean;
   chatShowThinking: boolean;
+  chatLiveToolEvents: boolean;
+  chatShouldEmitToolResult?: boolean;
+  chatShouldEmitToolOutput?: boolean;
   splitRatio: number; // Sidebar split ratio (0.4 to 0.7, default 0.6)
   navCollapsed: boolean; // Collapsible sidebar state
   navGroupsCollapsed: Record<string, boolean>; // Which nav groups are collapsed
@@ -36,9 +42,15 @@ export function loadSettings(): UiSettings {
     token: "",
     sessionKey: "main",
     lastActiveSessionKey: "main",
+    workspaceSelectedAgentId: "main",
+    workspaceMessagesSeenAt: {},
+    workspaceMessagesSidebarCollapsed: false,
     theme: "system",
     chatFocusMode: false,
     chatShowThinking: true,
+    chatLiveToolEvents: true,
+    chatShouldEmitToolResult: true,
+    chatShouldEmitToolOutput: true,
     splitRatio: 0.6,
     navCollapsed: false,
     navGroupsCollapsed: {},
@@ -65,6 +77,29 @@ export function loadSettings(): UiSettings {
           ? parsed.lastActiveSessionKey.trim()
           : (typeof parsed.sessionKey === "string" && parsed.sessionKey.trim()) ||
             defaults.lastActiveSessionKey,
+      workspaceSelectedAgentId:
+        typeof parsed.workspaceSelectedAgentId === "string" &&
+        parsed.workspaceSelectedAgentId.trim()
+          ? parsed.workspaceSelectedAgentId.trim()
+          : defaults.workspaceSelectedAgentId,
+      workspaceMessagesSeenAt:
+        typeof parsed.workspaceMessagesSeenAt === "object" &&
+        parsed.workspaceMessagesSeenAt !== null
+          ? Object.fromEntries(
+              Object.entries(parsed.workspaceMessagesSeenAt).filter(
+                ([agentId, timestamp]) =>
+                  typeof agentId === "string" &&
+                  agentId.trim() &&
+                  typeof timestamp === "number" &&
+                  Number.isFinite(timestamp) &&
+                  timestamp > 0,
+              ),
+            )
+          : defaults.workspaceMessagesSeenAt,
+      workspaceMessagesSidebarCollapsed:
+        typeof parsed.workspaceMessagesSidebarCollapsed === "boolean"
+          ? parsed.workspaceMessagesSidebarCollapsed
+          : defaults.workspaceMessagesSidebarCollapsed,
       theme:
         parsed.theme === "light" || parsed.theme === "dark" || parsed.theme === "system"
           ? parsed.theme
@@ -75,6 +110,9 @@ export function loadSettings(): UiSettings {
         typeof parsed.chatShowThinking === "boolean"
           ? parsed.chatShowThinking
           : defaults.chatShowThinking,
+      chatLiveToolEvents: true,
+      chatShouldEmitToolResult: true,
+      chatShouldEmitToolOutput: true,
       splitRatio:
         typeof parsed.splitRatio === "number" &&
         parsed.splitRatio >= 0.4 &&

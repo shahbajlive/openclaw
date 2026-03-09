@@ -32,6 +32,7 @@ export type ChatState = {
   sessionKey: string;
   chatLoading: boolean;
   chatMessages: unknown[];
+  chatToolMessages: unknown[];
   chatThinkingLevel: string | null;
   chatSending: boolean;
   chatMessage: string;
@@ -39,6 +40,7 @@ export type ChatState = {
   chatRunId: string | null;
   chatStream: string | null;
   chatStreamStartedAt: number | null;
+  chatStreamCommittedPrefixLength?: number;
   lastError: string | null;
 };
 
@@ -50,6 +52,23 @@ export type ChatEventPayload = {
   errorMessage?: string;
 };
 
+type ChatHistoryResponse = {
+  messages?: Array<unknown>;
+  toolInvocations?: Array<{ message?: unknown }>;
+  activeRun?: {
+    runId?: unknown;
+    streamText?: unknown;
+    startedAtMs?: unknown;
+  } | null;
+  thinkingLevel?: string;
+};
+
+type ChatSendResponse = {
+  runId?: string;
+  status?: string;
+  routedTo?: string;
+};
+
 export async function loadChatHistory(state: ChatState) {
   if (!state.client || !state.connected) {
     return;
@@ -57,16 +76,33 @@ export async function loadChatHistory(state: ChatState) {
   state.chatLoading = true;
   state.lastError = null;
   try {
-    const res = await state.client.request<{ messages?: Array<unknown>; thinkingLevel?: string }>(
-      "chat.history",
-      {
-        sessionKey: state.sessionKey,
-        limit: 200,
-      },
-    );
+    const res = await state.client.request<ChatHistoryResponse>("chat.history", {
+      sessionKey: state.sessionKey,
+      limit: 200,
+    });
     const messages = Array.isArray(res.messages) ? res.messages : [];
     state.chatMessages = messages.filter((message) => !isAssistantSilentReply(message));
+    const toolInvocations = Array.isArray(res.toolInvocations) ? res.toolInvocations : [];
+    state.chatToolMessages = toolInvocations
+      .map((row) => row?.message)
+      .filter((message): message is unknown => message !== undefined);
     state.chatThinkingLevel = res.thinkingLevel ?? null;
+    const activeRun = res.activeRun;
+    const activeRunId =
+      activeRun && typeof activeRun.runId === "string" ? activeRun.runId.trim() : "";
+    if (activeRunId) {
+      const streamText = typeof activeRun?.streamText === "string" ? activeRun.streamText : "";
+      state.chatRunId = activeRunId;
+      state.chatStream = streamText;
+      state.chatStreamStartedAt =
+        typeof activeRun?.startedAtMs === "number" ? activeRun.startedAtMs : Date.now();
+      state.chatStreamCommittedPrefixLength = 0;
+    } else {
+      state.chatRunId = null;
+      state.chatStream = null;
+      state.chatStreamStartedAt = null;
+      state.chatStreamCommittedPrefixLength = 0;
+    }
   } catch (err) {
     state.lastError = String(err);
   } finally {
@@ -88,6 +124,8 @@ type AssistantMessageNormalizationOptions = {
   requireContentArray?: boolean;
   allowTextField?: boolean;
 };
+
+type UserContentBlock = { type: string; text?: string; source?: unknown };
 
 function normalizeAssistantMessage(
   message: unknown,
@@ -146,9 +184,10 @@ export async function sendChatMessage(
   }
 
   const now = Date.now();
+  const runId = generateUUID();
 
   // Build user message content blocks
-  const contentBlocks: Array<{ type: string; text?: string; source?: unknown }> = [];
+  const contentBlocks: UserContentBlock[] = [];
   if (msg) {
     contentBlocks.push({ type: "text", text: msg });
   }
@@ -162,21 +201,20 @@ export async function sendChatMessage(
     }
   }
 
-  state.chatMessages = [
-    ...state.chatMessages,
-    {
-      role: "user",
-      content: contentBlocks,
-      timestamp: now,
-    },
-  ];
+  const optimisticUserMessage = {
+    role: "user",
+    content: contentBlocks,
+    timestamp: now,
+    idempotencyKey: runId,
+  };
+  state.chatMessages = [...state.chatMessages, optimisticUserMessage];
 
   state.chatSending = true;
   state.lastError = null;
-  const runId = generateUUID();
   state.chatRunId = runId;
   state.chatStream = "";
   state.chatStreamStartedAt = now;
+  state.chatStreamCommittedPrefixLength = 0;
 
   // Convert attachments to API format
   const apiAttachments = hasAttachments
@@ -196,19 +234,26 @@ export async function sendChatMessage(
     : undefined;
 
   try {
-    await state.client.request("chat.send", {
+    const response = await state.client.request<ChatSendResponse>("chat.send", {
       sessionKey: state.sessionKey,
       message: msg,
       deliver: false,
       idempotencyKey: runId,
       attachments: apiAttachments,
     });
+    if (typeof response?.routedTo === "string" && response.routedTo.trim()) {
+      state.chatRunId = null;
+      state.chatStream = null;
+      state.chatStreamStartedAt = null;
+      state.chatStreamCommittedPrefixLength = 0;
+    }
     return runId;
   } catch (err) {
     const error = String(err);
     state.chatRunId = null;
     state.chatStream = null;
     state.chatStreamStartedAt = null;
+    state.chatStreamCommittedPrefixLength = 0;
     state.lastError = error;
     state.chatMessages = [
       ...state.chatMessages,
@@ -266,9 +311,11 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   if (payload.state === "delta") {
     const next = extractText(payload.message);
     if (typeof next === "string" && !isSilentReplyStream(next)) {
+      const committed = Math.max(0, state.chatStreamCommittedPrefixLength ?? 0);
+      const visible = next.length > committed ? next.slice(committed) : "";
       const current = state.chatStream ?? "";
-      if (!current || next.length >= current.length) {
-        state.chatStream = next;
+      if (!current || visible.length >= current.length) {
+        state.chatStream = visible;
       }
     }
   } else if (payload.state === "final") {
@@ -288,6 +335,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
     state.chatStream = null;
     state.chatRunId = null;
     state.chatStreamStartedAt = null;
+    state.chatStreamCommittedPrefixLength = 0;
   } else if (payload.state === "aborted") {
     const normalizedMessage = normalizeAbortedAssistantMessage(payload.message);
     if (normalizedMessage && !isAssistantSilentReply(normalizedMessage)) {
@@ -308,10 +356,12 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
     state.chatStream = null;
     state.chatRunId = null;
     state.chatStreamStartedAt = null;
+    state.chatStreamCommittedPrefixLength = 0;
   } else if (payload.state === "error") {
     state.chatStream = null;
     state.chatRunId = null;
     state.chatStreamStartedAt = null;
+    state.chatStreamCommittedPrefixLength = 0;
     state.lastError = payload.errorMessage ?? "chat error";
   }
   return payload.state;

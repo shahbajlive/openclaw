@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleChatEvent, loadChatHistory, type ChatEventPayload, type ChatState } from "./chat.ts";
+import {
+  handleChatEvent,
+  loadChatHistory,
+  sendChatMessage,
+  type ChatEventPayload,
+  type ChatState,
+} from "./chat.ts";
 
 function createState(overrides: Partial<ChatState> = {}): ChatState {
   return {
@@ -7,10 +13,12 @@ function createState(overrides: Partial<ChatState> = {}): ChatState {
     chatLoading: false,
     chatMessage: "",
     chatMessages: [],
+    chatToolMessages: [],
     chatRunId: null,
     chatSending: false,
     chatStream: null,
     chatStreamStartedAt: null,
+    chatStreamCommittedPrefixLength: 0,
     chatThinkingLevel: null,
     client: null,
     connected: true,
@@ -68,6 +76,24 @@ describe("handleChatEvent", () => {
 
     expect(handleChatEvent(state, payload)).toBe("delta");
     expect(state.chatStream).toBe("Hello");
+  });
+
+  it("trims committed stream prefix from cumulative deltas", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatStream: "",
+      chatStreamCommittedPrefixLength: 5,
+    });
+    const payload: ChatEventPayload = {
+      runId: "run-1",
+      sessionKey: "main",
+      state: "delta",
+      message: { role: "assistant", content: [{ type: "text", text: "Hello world" }] },
+    };
+
+    expect(handleChatEvent(state, payload)).toBe("delta");
+    expect(state.chatStream).toBe(" world");
   });
 
   it("appends final payload from another run without clearing active stream", () => {
@@ -533,6 +559,112 @@ describe("loadChatHistory", () => {
 
     // text takes precedence — "real reply" is NOT silent, so message is kept.
     expect(state.chatMessages).toHaveLength(1);
+  });
+});
+
+describe("event-first history hydration", () => {
+  it("hydrates canonical tool invocations and active run stream from chat.history", async () => {
+    const request = vi.fn().mockResolvedValue({
+      messages: [{ role: "assistant", content: [{ type: "text", text: "Working..." }] }],
+      toolInvocations: [
+        {
+          message: {
+            role: "assistant",
+            toolCallId: "call-1",
+            content: [
+              { type: "toolcall", name: "discover_teammates", arguments: {} },
+              { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+            ],
+            __openclaw: { canonicalToolInvocation: true },
+            timestamp: 100,
+          },
+        },
+      ],
+      activeRun: { runId: "run-1", streamText: "", startedAtMs: 1234 },
+      thinkingLevel: "low",
+    });
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    await loadChatHistory(state);
+
+    expect(state.chatMessages).toHaveLength(1);
+    expect(state.chatToolMessages).toHaveLength(1);
+    expect(state.chatRunId).toBe("run-1");
+    expect(state.chatStream).toBe("");
+    expect(state.chatStreamStartedAt).toBe(1234);
+  });
+
+  it("keeps bare /reset row visible while hydrating an in-flight active run", async () => {
+    const request = vi.fn().mockResolvedValue({
+      messages: [{ role: "user", content: [{ type: "text", text: "/reset" }], timestamp: 10 }],
+      toolInvocations: [],
+      activeRun: {
+        runId: "run-reset",
+        streamText: "",
+        startedAtMs: 20,
+      },
+    });
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    await loadChatHistory(state);
+
+    expect(state.chatMessages).toHaveLength(1);
+    const only = state.chatMessages[0] as { content?: Array<{ text?: string }> };
+    expect(only.content?.[0]?.text).toBe("/reset");
+    expect(state.chatRunId).toBe("run-reset");
+  });
+});
+
+describe("sendChatMessage", () => {
+  it("keeps optimistic /reset row visible even if backend returns effectiveUserMessage metadata", async () => {
+    const request = vi.fn().mockResolvedValue({
+      runId: "run-1",
+      status: "started",
+      effectiveUserMessage:
+        "A new session was started via /new or /reset. Execute your Session Startup sequence now.",
+    });
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    const runId = await sendChatMessage(state, "/reset");
+
+    expect(runId).toBeTruthy();
+    const last = state.chatMessages[state.chatMessages.length - 1] as {
+      role?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    expect(last.role).toBe("user");
+    expect(last.content?.[0]?.type).toBe("text");
+    expect(last.content?.[0]?.text).toBe("/reset");
+    expect((last as { idempotencyKey?: string }).idempotencyKey).toBe(runId);
+  });
+
+  it("clears local in-flight state after a routed teammate send starts elsewhere", async () => {
+    const request = vi.fn().mockResolvedValue({
+      runId: "run-mention",
+      status: "started",
+      routedTo: "@frontend_engineer",
+    });
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    const runId = await sendChatMessage(state, "@frontend_engineer can you review this?");
+
+    expect(runId).toBeTruthy();
+    expect(state.chatRunId).toBe(null);
+    expect(state.chatStream).toBe(null);
+    expect(state.chatStreamStartedAt).toBe(null);
+    expect(state.chatStreamCommittedPrefixLength).toBe(0);
   });
 });
 

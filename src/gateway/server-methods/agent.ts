@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { listAgentIds } from "../../agents/agent-scope.js";
+import { resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
 import type { AgentInternalEvent } from "../../agents/internal-events.js";
+import { resolveTeamSessionWorkspace } from "../../agents/teams/team-registry.js";
+import { createAgentToAgentPolicy } from "../../agents/tools/sessions-access.js";
 import { buildBareSessionResetPrompt } from "../../auto-reply/reply/session-reset-prompt.js";
 import { agentCommandFromIngress } from "../../commands/agent.js";
 import { loadConfig } from "../../config/config.js";
@@ -18,7 +22,11 @@ import {
   resolveAgentOutboundTarget,
 } from "../../infra/outbound/agent-delivery.js";
 import { resolveMessageChannelSelection } from "../../infra/outbound/channel-selection.js";
-import { classifySessionKeyShape, normalizeAgentId } from "../../routing/session-key.js";
+import {
+  classifySessionKeyShape,
+  isTeamSessionKey,
+  normalizeAgentId,
+} from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
@@ -50,6 +58,7 @@ import {
 } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
 import { waitForAgentJob } from "./agent-job.js";
+import { resolveMentionRouteInText } from "./agent-mentions.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 import {
   readTerminalSnapshotFromGatewayDedupe,
@@ -225,7 +234,7 @@ export const agentHandlers: GatewayRequestHandlers = {
     let resolvedGroupSpace: string | undefined = groupSpaceRaw || undefined;
     let spawnedByValue =
       typeof request.spawnedBy === "string" ? request.spawnedBy.trim() : undefined;
-    const inputProvenance = normalizeInputProvenance(request.inputProvenance);
+    let inputProvenance = normalizeInputProvenance(request.inputProvenance);
     const cached = context.dedupe.get(`agent:${idem}`);
     if (cached) {
       respond(cached.ok, cached.payload, cached.error, {
@@ -328,6 +337,48 @@ export const agentHandlers: GatewayRequestHandlers = {
         return;
       }
     }
+    const mentionRoute =
+      requestedSessionKey && !RESET_COMMAND_RE.test(message)
+        ? await resolveMentionRouteInText({
+            text: message,
+            cfg,
+            requesterSessionKey: requestedSessionKey,
+            workspaceDir: resolveAgentWorkspaceDir(
+              cfg,
+              resolveAgentIdFromSessionKey(requestedSessionKey),
+            ),
+            action: "send",
+            policy: createAgentToAgentPolicy(cfg),
+          })
+        : null;
+    if (mentionRoute && !mentionRoute.ok) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, mentionRoute.error));
+      return;
+    }
+    if (mentionRoute?.ok && requestedSessionKey) {
+      const requesterSessionKey = requestedSessionKey;
+      requestedSessionKey = mentionRoute.sessionKey;
+      message = mentionRoute.bodyWithoutMention.trim();
+      if (!mentionRoute.bodyWithoutMention.trim() && normalizedAttachments.length === 0) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "message body required after teammate mention when no attachment is provided",
+          ),
+        );
+        return;
+      }
+      inputProvenance = normalizeInputProvenance(
+        inputProvenance ?? {
+          kind: "inter_session",
+          sourceSessionKey: requesterSessionKey,
+          sourceChannel: request.channel,
+          sourceTool: "mention_route",
+        },
+      );
+    }
     let resolvedSessionId = request.sessionId?.trim() || undefined;
     let requestedWorkspaceDir: string | undefined;
     const requestedWorkspaceDirRaw =
@@ -341,7 +392,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         return undefined;
       }
       const teamWorkspaceRoot = path.resolve(
-        resolveAgentWorkspaceDir(cfg, resolveAgentIdFromSessionKey(teamSessionKey), teamSessionKey),
+        resolveAgentWorkspaceDir(cfg, resolveAgentIdFromSessionKey(teamSessionKey)),
       );
       const resolved = path.resolve(candidate);
       const isWithinTeamWorkspace =
@@ -527,7 +578,10 @@ export const agentHandlers: GatewayRequestHandlers = {
           bestEffortDeliver = true;
         }
       }
-      registerAgentRunContext(idem, { sessionKey: canonicalSessionKey });
+      registerAgentRunContext(idem, {
+        sessionKey: canonicalSessionKey,
+        inputProvenance,
+      });
     }
 
     const runId = idem;
@@ -670,6 +724,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         to: resolvedTo,
         sessionId: resolvedSessionId,
         sessionKey: resolvedSessionKey,
+        workspaceDir: requestedWorkspaceDir,
         thinking: request.thinking,
         deliver,
         deliveryTargetMode,

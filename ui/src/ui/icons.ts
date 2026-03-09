@@ -43,6 +43,12 @@ export const icons = {
   zap: html`
     <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>
   `,
+  zapOff: html`
+    <svg viewBox="0 0 24 24">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+      <path d="m2 2 20 20" />
+    </svg>
+  `,
   monitor: html`
     <svg viewBox="0 0 24 24">
       <rect width="20" height="14" x="2" y="3" rx="2" />
@@ -112,6 +118,22 @@ export const icons = {
       <path d="m19 12-7 7-7-7" />
     </svg>
   `,
+  arrowUp: html`
+    <svg viewBox="0 0 24 24">
+      <path d="M12 19V5" />
+      <path d="m5 12 7-7 7 7" />
+    </svg>
+  `,
+  chevronLeft: html`
+    <svg viewBox="0 0 24 24">
+      <path d="m15 18-6-6 6-6" />
+    </svg>
+  `,
+  chevronRight: html`
+    <svg viewBox="0 0 24 24">
+      <path d="m9 18 6-6-6-6" />
+    </svg>
+  `,
   copy: html`
     <svg viewBox="0 0 24 24">
       <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
@@ -135,6 +157,20 @@ export const icons = {
       <path d="M19.938 10.5a4 4 0 0 1 .585.396" />
       <path d="M6 18a4 4 0 0 1-1.967-.516" />
       <path d="M19.967 17.484A4 4 0 0 1 18 18" />
+    </svg>
+  `,
+  brainOff: html`
+    <svg viewBox="0 0 24 24">
+      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+      <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
+      <path d="M17.599 6.5a3 3 0 0 0 .399-1.375" />
+      <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5" />
+      <path d="M3.477 10.896a4 4 0 0 1 .585-.396" />
+      <path d="M19.938 10.5a4 4 0 0 1 .585.396" />
+      <path d="M6 18a4 4 0 0 1-1.967-.516" />
+      <path d="M19.967 17.484A4 4 0 0 1 18 18" />
+      <path d="m2 2 20 20" />
     </svg>
   `,
   book: html`
@@ -163,6 +199,23 @@ export const icons = {
       />
     </svg>
   `,
+  wrenchOff: html`
+    <svg viewBox="0 0 24 24">
+      <path
+        d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+      />
+      <path d="m2 2 20 20" />
+    </svg>
+  `,
+  scrollTextOff: html`
+    <svg viewBox="0 0 24 24">
+      <path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4" />
+      <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+      <path d="M15 8h-5" />
+      <path d="M15 12h-5" />
+      <path d="m2 2 20 20" />
+    </svg>
+  `,
   fileCode: html`
     <svg viewBox="0 0 24 24">
       <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
@@ -188,6 +241,19 @@ export const icons = {
       <path
         d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
       />
+    </svg>
+  `,
+  mic: html`
+    <svg viewBox="0 0 24 24">
+      <rect x="9" y="2.5" width="6" height="11" rx="3" />
+      <path d="M6 11a6 6 0 0 0 12 0" />
+      <path d="M12 17v4" />
+      <path d="M9 21h6" />
+    </svg>
+  `,
+  stop: html`
+    <svg viewBox="0 0 24 24">
+      <rect x="7" y="7" width="10" height="10" rx="2" />
     </svg>
   `,
   globe: html`

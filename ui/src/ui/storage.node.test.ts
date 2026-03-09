@@ -60,4 +60,20 @@ describe("loadSettings default gateway URL derivation", () => {
     const { loadSettings } = await import("./storage.ts");
     expect(loadSettings().gatewayUrl).toBe("ws://gateway.example:18789/apps/openclaw");
   });
+
+  it("hydrates the workspace messages sidebar collapse preference", async () => {
+    vi.stubGlobal("location", {
+      protocol: "http:",
+      host: "gateway.example:18789",
+      pathname: "/apps/openclaw/chat",
+    } as Location);
+    vi.stubGlobal("window", {} as Window & typeof globalThis);
+    localStorage.setItem(
+      "openclaw.control.settings.v1",
+      JSON.stringify({ workspaceMessagesSidebarCollapsed: true }),
+    );
+
+    const { loadSettings } = await import("./storage.ts");
+    expect(loadSettings().workspaceMessagesSidebarCollapsed).toBe(true);
+  });
 });

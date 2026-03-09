@@ -1,16 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
+import { createAgentToAgentPolicy } from "../../agents/tools/sessions-access.js";
 import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
+import { buildBareSessionResetPrompt } from "../../auto-reply/reply/session-reset-prompt.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveSessionFilePath } from "../../config/sessions.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
+import type { InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import {
@@ -55,11 +58,17 @@ import {
   resolveSessionModelRef,
 } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
+import { listActiveAgentRunsForSession } from "./agent-job.js";
+import { resolveMentionRouteInText } from "./agent-mentions.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 import { setGatewayDedupeEntry } from "./agent-wait-dedupe.js";
+import { agentHandlers } from "./agent.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
-import { appendInjectedAssistantMessageToTranscript } from "./chat-transcript-inject.js";
-import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
+import {
+  appendInjectedAssistantMessageToTranscript,
+  appendInjectedUserMessageToTranscript,
+} from "./chat-transcript-inject.js";
+import type { GatewayClient, GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 
 type TranscriptAppendResult = {
   ok: boolean;
@@ -80,6 +89,7 @@ type AbortedPartialSnapshot = {
 const CHAT_HISTORY_TEXT_MAX_CHARS = 12_000;
 const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
 const CHAT_HISTORY_OVERSIZED_PLACEHOLDER = "[chat.history omitted: message too large]";
+const BARE_SESSION_RESET_RE = /^\/(?:new|reset)\s*$/i;
 let chatHistoryPlaceholderEmitCount = 0;
 const CHANNEL_AGNOSTIC_SESSION_SCOPES = new Set([
   "main",
@@ -382,6 +392,487 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   return changed ? next : messages;
 }
 
+type CanonicalToolInvocation = {
+  toolCallId: string;
+  tool_call_id: string;
+  runId?: string;
+  sessionKey: string;
+  name: string;
+  args?: unknown;
+  output?: string;
+  startedAt: number;
+  updatedAt: number;
+  phase: "start" | "result";
+  message: Record<string, unknown>;
+};
+
+type ActiveChatRunSnapshot = {
+  runId: string;
+  sessionKey: string;
+  startedAtMs: number;
+  expiresAtMs: number;
+  streamText: string;
+  effectiveUserMessage?: string;
+  inputProvenance?: InputProvenance;
+};
+
+type MutableToolInvocation = {
+  key: string;
+  order: number;
+  toolCallId: string;
+  runId?: string;
+  sessionKey: string;
+  name: string;
+  args?: unknown;
+  output?: string;
+  startedAt: number;
+  updatedAt: number;
+  phase: "start" | "result";
+};
+
+function toTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeToolBlockType(value: unknown): string {
+  return toTrimmedString(value)
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function coerceToolArgs(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function extractToolResultTextFromValue(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.text === "string") {
+    return record.text;
+  }
+  if (typeof record.content === "string") {
+    return record.content;
+  }
+  if (!Array.isArray(record.content)) {
+    return undefined;
+  }
+  const textParts = record.content
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const block = item as Record<string, unknown>;
+      if (
+        normalizeToolBlockType(block.type) === "text" &&
+        typeof block.text === "string" &&
+        block.text.length > 0
+      ) {
+        return block.text;
+      }
+      return null;
+    })
+    .filter((part): part is string => Boolean(part));
+  if (textParts.length === 0) {
+    return undefined;
+  }
+  return textParts.join("\n");
+}
+
+function buildCanonicalToolInvocationMessage(entry: {
+  toolCallId: string;
+  runId?: string;
+  sessionKey: string;
+  name: string;
+  args?: unknown;
+  output?: string;
+  timestamp: number;
+}): Record<string, unknown> {
+  const content: Array<Record<string, unknown>> = [
+    {
+      type: "toolcall",
+      name: entry.name,
+      arguments: entry.args ?? {},
+    },
+  ];
+  if (typeof entry.output === "string" && entry.output.length > 0) {
+    content.push({
+      type: "toolresult",
+      name: entry.name,
+      text: entry.output,
+    });
+  }
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    toolCallId: entry.toolCallId,
+    tool_call_id: entry.toolCallId,
+    sessionKey: entry.sessionKey,
+    content,
+    timestamp: entry.timestamp,
+    __openclaw: { canonicalToolInvocation: true },
+  };
+  if (entry.runId) {
+    message.runId = entry.runId;
+  }
+  return message;
+}
+
+function buildCanonicalToolInvocations(params: {
+  messages: unknown[];
+  defaultSessionKey: string;
+}): CanonicalToolInvocation[] {
+  const invocations = new Map<string, MutableToolInvocation>();
+  const pendingByScopeAndName = new Map<string, string[]>();
+  const seqByScopeAndName = new Map<string, number>();
+  let creationOrder = 0;
+
+  const resolveScopeAndNameKey = (scope: string, name: string) => `${scope}::${name}`;
+
+  const nextSyntheticId = (scope: string, name: string) => {
+    const key = resolveScopeAndNameKey(scope, name);
+    const next = (seqByScopeAndName.get(key) ?? 0) + 1;
+    seqByScopeAndName.set(key, next);
+    return `history:${scope}:${name}:${next}`;
+  };
+
+  const enqueuePending = (scope: string, name: string, invocationKey: string) => {
+    const key = resolveScopeAndNameKey(scope, name);
+    const queue = pendingByScopeAndName.get(key) ?? [];
+    if (!queue.includes(invocationKey)) {
+      queue.push(invocationKey);
+      pendingByScopeAndName.set(key, queue);
+    }
+  };
+
+  const dequeuePending = (scope: string, name: string) => {
+    const key = resolveScopeAndNameKey(scope, name);
+    const queue = pendingByScopeAndName.get(key);
+    if (!queue || queue.length === 0) {
+      return null;
+    }
+    const invocationKey = queue.shift() ?? null;
+    if (queue.length === 0) {
+      pendingByScopeAndName.delete(key);
+    } else {
+      pendingByScopeAndName.set(key, queue);
+    }
+    return invocationKey;
+  };
+
+  const dropPending = (scope: string, name: string, invocationKey: string) => {
+    const key = resolveScopeAndNameKey(scope, name);
+    const queue = pendingByScopeAndName.get(key);
+    if (!queue || queue.length === 0) {
+      return;
+    }
+    const filtered = queue.filter((existing) => existing !== invocationKey);
+    if (filtered.length === 0) {
+      pendingByScopeAndName.delete(key);
+      return;
+    }
+    pendingByScopeAndName.set(key, filtered);
+  };
+
+  const upsertInvocation = (params: {
+    key: string;
+    toolCallId: string;
+    runId?: string;
+    sessionKey: string;
+    name: string;
+    args?: unknown;
+    output?: string;
+    timestamp: number;
+    phase: "start" | "result";
+  }) => {
+    const existing = invocations.get(params.key);
+    if (!existing) {
+      const created: MutableToolInvocation = {
+        key: params.key,
+        order: creationOrder++,
+        toolCallId: params.toolCallId,
+        runId: params.runId,
+        sessionKey: params.sessionKey,
+        name: params.name,
+        args: params.args,
+        output: params.output,
+        startedAt: params.timestamp,
+        updatedAt: params.timestamp,
+        phase: params.phase,
+      };
+      invocations.set(params.key, created);
+      return created;
+    }
+    existing.toolCallId = params.toolCallId || existing.toolCallId;
+    if (params.runId) {
+      existing.runId = params.runId;
+    }
+    if (params.sessionKey) {
+      existing.sessionKey = params.sessionKey;
+    }
+    if (params.name && (!existing.name || existing.name === "tool")) {
+      existing.name = params.name;
+    }
+    if (params.args !== undefined && existing.args === undefined) {
+      existing.args = params.args;
+    }
+    if (params.output !== undefined) {
+      existing.output = params.output;
+      existing.phase = "result";
+    } else if (existing.phase !== "result") {
+      existing.phase = params.phase;
+    }
+    existing.startedAt = Math.min(existing.startedAt, params.timestamp);
+    existing.updatedAt = Math.max(existing.updatedAt, params.timestamp);
+    return existing;
+  };
+
+  for (let index = 0; index < params.messages.length; index += 1) {
+    const message = params.messages[index];
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const record = message as Record<string, unknown>;
+    const messageRunId = toTrimmedString(record.runId) || toTrimmedString(record.run_id);
+    const messageSessionKey =
+      toTrimmedString(record.sessionKey) ||
+      toTrimmedString(record.session_key) ||
+      params.defaultSessionKey;
+    const messageToolCallId =
+      toTrimmedString(record.toolCallId) || toTrimmedString(record.tool_call_id);
+    const timestamp = typeof record.timestamp === "number" ? record.timestamp : Date.now() + index;
+    const scope = messageRunId || messageSessionKey || "__session__";
+
+    const calls: Array<{ id?: string; name: string; args?: unknown }> = [];
+    const results: Array<{ id?: string; name: string; output?: string }> = [];
+    const content = Array.isArray(record.content) ? record.content : [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const entry = block as Record<string, unknown>;
+      const type = normalizeToolBlockType(entry.type);
+      const blockName = toTrimmedString(entry.name) || "tool";
+      const blockId =
+        toTrimmedString(entry.id) ||
+        toTrimmedString(entry.toolCallId) ||
+        toTrimmedString(entry.tool_call_id) ||
+        undefined;
+      if (
+        type === "toolcall" ||
+        type === "tooluse" ||
+        (type === "" && toTrimmedString(entry.name) && ("arguments" in entry || "args" in entry))
+      ) {
+        calls.push({
+          id: blockId ?? (messageToolCallId || undefined),
+          name: blockName,
+          args: coerceToolArgs(entry.arguments ?? entry.args),
+        });
+        continue;
+      }
+      if (type === "toolresult") {
+        results.push({
+          id: blockId ?? (messageToolCallId || undefined),
+          name:
+            blockName ||
+            toTrimmedString(record.toolName) ||
+            toTrimmedString(record.tool_name) ||
+            "tool",
+          output: extractToolResultTextFromValue(entry),
+        });
+      }
+    }
+
+    const role = toTrimmedString(record.role).toLowerCase();
+    if ((role === "toolresult" || role === "tool_result") && results.length === 0) {
+      results.push({
+        id: messageToolCallId || undefined,
+        name: toTrimmedString(record.toolName) || toTrimmedString(record.tool_name) || "tool",
+        output: extractToolResultTextFromValue(record),
+      });
+    }
+
+    for (const call of calls) {
+      const normalizedName = call.name.trim().toLowerCase() || "tool";
+      const toolCallId =
+        call.id && call.id.trim() ? call.id.trim() : nextSyntheticId(scope, normalizedName);
+      const key = call.id ? `id:${toolCallId}` : `synthetic:${toolCallId}`;
+      const invocation = upsertInvocation({
+        key,
+        toolCallId,
+        runId: messageRunId || undefined,
+        sessionKey: messageSessionKey,
+        name: call.name || "tool",
+        args: call.args,
+        timestamp,
+        phase: "start",
+      });
+      if (invocation.phase !== "result") {
+        enqueuePending(scope, normalizedName, key);
+      }
+    }
+
+    for (const result of results) {
+      const normalizedName = result.name.trim().toLowerCase() || "tool";
+      let key: string;
+      let toolCallId: string;
+      if (result.id && result.id.trim()) {
+        toolCallId = result.id.trim();
+        key = `id:${toolCallId}`;
+      } else {
+        const pendingKey = dequeuePending(scope, normalizedName);
+        if (pendingKey) {
+          key = pendingKey;
+          const pending = invocations.get(pendingKey);
+          toolCallId = pending?.toolCallId ?? nextSyntheticId(scope, normalizedName);
+        } else {
+          toolCallId = nextSyntheticId(scope, normalizedName);
+          key = `synthetic:${toolCallId}`;
+        }
+      }
+      upsertInvocation({
+        key,
+        toolCallId,
+        runId: messageRunId || undefined,
+        sessionKey: messageSessionKey,
+        name: result.name || "tool",
+        output: result.output,
+        timestamp,
+        phase: "result",
+      });
+      dropPending(scope, normalizedName, key);
+    }
+  }
+
+  const sorted = [...invocations.values()].toSorted(
+    (a, b) => a.startedAt - b.startedAt || a.order - b.order,
+  );
+  return sorted.map((entry) => ({
+    toolCallId: entry.toolCallId,
+    tool_call_id: entry.toolCallId,
+    ...(entry.runId ? { runId: entry.runId } : {}),
+    sessionKey: entry.sessionKey,
+    name: entry.name,
+    ...(entry.args !== undefined ? { args: entry.args } : {}),
+    ...(entry.output !== undefined ? { output: entry.output } : {}),
+    startedAt: entry.startedAt,
+    updatedAt: entry.updatedAt,
+    phase: entry.phase,
+    message: buildCanonicalToolInvocationMessage({
+      toolCallId: entry.toolCallId,
+      runId: entry.runId,
+      sessionKey: entry.sessionKey,
+      name: entry.name,
+      args: entry.args,
+      output: entry.output,
+      timestamp: entry.startedAt,
+    }),
+  }));
+}
+
+function resolveActiveChatRunSnapshot(params: {
+  chatAbortControllers: Map<string, ChatAbortControllerEntry>;
+  chatRunBuffers: Map<string, string>;
+  dedupe: Map<string, { payload?: unknown }>;
+  activeAgentRuns?: Array<{
+    runId: string;
+    sessionKey: string;
+    startedAt: number;
+    inputProvenance?: InputProvenance;
+  }>;
+  requestedSessionKey: string;
+  canonicalSessionKey: string;
+}): ActiveChatRunSnapshot | null {
+  const now = Date.now();
+  const isTerminalChatRun = (runId: string): boolean => {
+    const dedupeEntry = params.dedupe.get(`chat:${runId}`);
+    if (!dedupeEntry || !dedupeEntry.payload || typeof dedupeEntry.payload !== "object") {
+      return false;
+    }
+    const payload = dedupeEntry.payload as Record<string, unknown>;
+    const status = typeof payload.status === "string" ? payload.status : "";
+    return status === "ok" || status === "error";
+  };
+
+  let selectedChatRun: { runId: string; entry: ChatAbortControllerEntry } | null = null;
+  for (const [runId, entry] of params.chatAbortControllers) {
+    if (entry.controller.signal.aborted) {
+      continue;
+    }
+    if (entry.expiresAtMs <= now) {
+      continue;
+    }
+    if (isTerminalChatRun(runId)) {
+      continue;
+    }
+    if (
+      entry.sessionKey !== params.requestedSessionKey &&
+      entry.sessionKey !== params.canonicalSessionKey
+    ) {
+      continue;
+    }
+    if (!selectedChatRun || entry.startedAtMs > selectedChatRun.entry.startedAtMs) {
+      selectedChatRun = { runId, entry };
+    }
+  }
+
+  const selectedAgentRun =
+    params.activeAgentRuns?.find(
+      (entry) =>
+        (entry.sessionKey === params.requestedSessionKey ||
+          entry.sessionKey === params.canonicalSessionKey) &&
+        entry.inputProvenance?.kind === "inter_session",
+    ) ?? null;
+
+  if (
+    selectedChatRun &&
+    (!selectedAgentRun || selectedChatRun.entry.startedAtMs >= selectedAgentRun.startedAt)
+  ) {
+    const rawStream = params.chatRunBuffers.get(selectedChatRun.runId) ?? "";
+    const stripped = stripInlineDirectiveTagsForDisplay(rawStream);
+    const truncated = truncateChatHistoryText(stripped.text);
+    return {
+      runId: selectedChatRun.runId,
+      sessionKey: selectedChatRun.entry.sessionKey,
+      startedAtMs: selectedChatRun.entry.startedAtMs,
+      expiresAtMs: selectedChatRun.entry.expiresAtMs,
+      streamText: truncated.text,
+      ...(selectedChatRun.entry.effectiveUserMessage
+        ? { effectiveUserMessage: selectedChatRun.entry.effectiveUserMessage }
+        : {}),
+    };
+  }
+
+  if (!selectedAgentRun) {
+    return null;
+  }
+
+  const rawStream = params.chatRunBuffers.get(selectedAgentRun.runId) ?? "";
+  const stripped = stripInlineDirectiveTagsForDisplay(rawStream);
+  const truncated = truncateChatHistoryText(stripped.text);
+  return {
+    runId: selectedAgentRun.runId,
+    sessionKey: selectedAgentRun.sessionKey,
+    startedAtMs: selectedAgentRun.startedAt,
+    expiresAtMs: now + 60_000,
+    streamText: truncated.text,
+    ...(selectedAgentRun.inputProvenance
+      ? { inputProvenance: selectedAgentRun.inputProvenance }
+      : {}),
+  };
+}
+
 function buildOversizedHistoryPlaceholder(message?: unknown): Record<string, unknown> {
   const role =
     message &&
@@ -561,6 +1052,135 @@ function appendAssistantTranscriptMessage(params: {
   });
 }
 
+function appendUserTranscriptMessage(params: {
+  message: string;
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile?: string;
+  agentId?: string;
+  createIfMissing?: boolean;
+  idempotencyKey?: string;
+  provenance?: Record<string, unknown>;
+}): TranscriptAppendResult {
+  const transcriptPath = resolveTranscriptPath({
+    sessionId: params.sessionId,
+    storePath: params.storePath,
+    sessionFile: params.sessionFile,
+    agentId: params.agentId,
+  });
+  if (!transcriptPath) {
+    return { ok: false, error: "transcript path not resolved" };
+  }
+
+  if (!fs.existsSync(transcriptPath)) {
+    if (!params.createIfMissing) {
+      return { ok: false, error: "transcript file not found" };
+    }
+    const ensured = ensureTranscriptFile({
+      transcriptPath,
+      sessionId: params.sessionId,
+    });
+    if (!ensured.ok) {
+      return { ok: false, error: ensured.error ?? "failed to create transcript file" };
+    }
+  }
+
+  if (params.idempotencyKey && transcriptHasIdempotencyKey(transcriptPath, params.idempotencyKey)) {
+    return { ok: true };
+  }
+
+  return appendInjectedUserMessageToTranscript({
+    transcriptPath,
+    message: params.message,
+    idempotencyKey: params.idempotencyKey,
+    provenance: params.provenance,
+  });
+}
+
+async function forwardMentionRouteToAgent(params: {
+  message: string;
+  targetSessionKey: string;
+  requesterSessionKey: string;
+  attachments?: Array<{
+    type?: string;
+    mimeType?: string;
+    fileName?: string;
+    content?: unknown;
+  }>;
+  idempotencyKey: string;
+  context: GatewayRequestContext;
+  client: GatewayClient | null;
+}): Promise<
+  | { ok: true; payload?: unknown }
+  | { ok: false; payload?: unknown; error: ReturnType<typeof errorShape> }
+> {
+  return await new Promise((resolve) => {
+    let settled = false;
+    const settle = (
+      result:
+        | { ok: true; payload?: unknown }
+        | { ok: false; payload?: unknown; error: ReturnType<typeof errorShape> },
+    ) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+
+    const respond: Parameters<GatewayRequestHandlers["agent"]>[0]["respond"] = (
+      ok,
+      payload,
+      error,
+    ) => {
+      if (ok) {
+        settle({ ok: true, payload });
+        return;
+      }
+      settle({
+        ok: false,
+        payload,
+        error: errorShape(
+          ErrorCodes.UNAVAILABLE,
+          typeof error?.message === "string" ? error.message : "agent route failed",
+        ),
+      });
+    };
+
+    const result = agentHandlers.agent({
+      req: {
+        type: "req",
+        id: `${params.idempotencyKey}:mention-route`,
+        method: "agent",
+      },
+      params: {
+        message: params.message,
+        sessionKey: params.targetSessionKey,
+        attachments: params.attachments,
+        deliver: false,
+        idempotencyKey: params.idempotencyKey,
+        inputProvenance: {
+          kind: "inter_session",
+          sourceSessionKey: params.requesterSessionKey,
+          sourceChannel: "webchat",
+          sourceTool: "mention_route",
+        },
+      },
+      context: params.context,
+      client: params.client,
+      isWebchatConnect: () => false,
+      respond,
+    });
+
+    void Promise.resolve(result).catch((err) => {
+      settle({
+        ok: false,
+        error: errorShape(ErrorCodes.UNAVAILABLE, String(err)),
+      });
+    });
+  });
+}
+
 function collectSessionAbortPartials(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
@@ -722,7 +1342,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey: string;
       limit?: number;
     };
-    const { cfg, storePath, entry } = loadSessionEntry(sessionKey);
+    const { cfg, storePath, entry, canonicalKey } = loadSessionEntry(sessionKey);
     const sessionId = entry?.sessionId;
     const rawMessages =
       sessionId && storePath ? readSessionMessages(sessionId, storePath, entry?.sessionFile) : [];
@@ -761,10 +1381,41 @@ export const chatHandlers: GatewayRequestHandlers = {
       });
     }
     const verboseLevel = entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
+    const toolInvocations = buildCanonicalToolInvocations({
+      messages: bounded.messages,
+      defaultSessionKey: canonicalKey || sessionKey,
+    });
+    const activeAgentRuns = new Map<
+      string,
+      {
+        runId: string;
+        sessionKey: string;
+        startedAt: number;
+        inputProvenance?: InputProvenance;
+      }
+    >();
+    for (const candidate of [
+      ...listActiveAgentRunsForSession(sessionKey),
+      ...(canonicalKey && canonicalKey !== sessionKey
+        ? listActiveAgentRunsForSession(canonicalKey)
+        : []),
+    ]) {
+      activeAgentRuns.set(candidate.runId, candidate);
+    }
+    const activeRun = resolveActiveChatRunSnapshot({
+      chatAbortControllers: context.chatAbortControllers,
+      chatRunBuffers: context.chatRunBuffers,
+      dedupe: context.dedupe,
+      activeAgentRuns: [...activeAgentRuns.values()],
+      requestedSessionKey: sessionKey,
+      canonicalSessionKey: canonicalKey || sessionKey,
+    });
     respond(true, {
       sessionKey,
       sessionId,
       messages: bounded.messages,
+      toolInvocations,
+      activeRun,
       thinkingLevel,
       verboseLevel,
     });
@@ -903,13 +1554,17 @@ export const chatHandlers: GatewayRequestHandlers = {
       }
     }
     const rawSessionKey = p.sessionKey;
-    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
+    const { cfg, storePath, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
     const timeoutMs = resolveAgentTimeoutMs({
       cfg,
       overrideMs: p.timeoutMs,
     });
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
+    const effectiveUserMessage =
+      normalizedAttachments.length === 0 && BARE_SESSION_RESET_RE.test(rawMessage)
+        ? buildBareSessionResetPrompt(cfg)
+        : undefined;
 
     const sendPolicy = resolveSendPolicy({
       cfg,
@@ -924,6 +1579,85 @@ export const chatHandlers: GatewayRequestHandlers = {
         undefined,
         errorShape(ErrorCodes.INVALID_REQUEST, "send blocked by session policy"),
       );
+      return;
+    }
+
+    const requesterAgentId = resolveSessionAgentId({
+      sessionKey,
+      config: cfg,
+    });
+    const mentionRoute = BARE_SESSION_RESET_RE.test(rawMessage)
+      ? null
+      : await resolveMentionRouteInText({
+          text: parsedMessage,
+          cfg,
+          requesterSessionKey: sessionKey,
+          workspaceDir: resolveAgentWorkspaceDir(cfg, requesterAgentId),
+          action: "send",
+          policy: createAgentToAgentPolicy(cfg),
+        });
+    if (mentionRoute && !mentionRoute.ok) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, mentionRoute.error));
+      return;
+    }
+    if (mentionRoute?.ok) {
+      if (!mentionRoute.bodyWithoutMention.trim() && normalizedAttachments.length === 0) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "message body required after teammate mention when no attachment is provided",
+          ),
+        );
+        return;
+      }
+      const persisted = appendUserTranscriptMessage({
+        message: parsedMessage.trim(),
+        sessionId: entry?.sessionId ?? clientRunId,
+        storePath,
+        sessionFile: entry?.sessionFile,
+        agentId: requesterAgentId,
+        createIfMissing: true,
+        idempotencyKey: clientRunId,
+      });
+      if (!persisted.ok) {
+        context.logGateway.warn(
+          `chat mention route user transcript append failed: ${persisted.error ?? "unknown error"}`,
+        );
+      }
+
+      const routedMessage = mentionRoute.bodyWithoutMention.trim();
+
+      const routed = await forwardMentionRouteToAgent({
+        message: routedMessage,
+        targetSessionKey: mentionRoute.sessionKey,
+        requesterSessionKey: sessionKey,
+        attachments: p.attachments,
+        idempotencyKey: clientRunId,
+        context,
+        client,
+      });
+      if (!routed.ok) {
+        respond(false, routed.payload, routed.error);
+        return;
+      }
+
+      const payload = {
+        runId: clientRunId,
+        status: "started" as const,
+        routedTo: mentionRoute.mention,
+      };
+      setGatewayDedupeEntry({
+        dedupe: context.dedupe,
+        key: `chat:${clientRunId}`,
+        entry: {
+          ts: Date.now(),
+          ok: true,
+          payload,
+        },
+      });
+      respond(true, payload, undefined, { runId: clientRunId });
       return;
     }
 
@@ -949,10 +1683,25 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const activeExisting = context.chatAbortControllers.get(clientRunId);
     if (activeExisting) {
-      respond(true, { runId: clientRunId, status: "in_flight" as const }, undefined, {
-        cached: true,
-        runId: clientRunId,
-      });
+      const inFlightEffectiveUserMessage =
+        typeof activeExisting.effectiveUserMessage === "string"
+          ? activeExisting.effectiveUserMessage
+          : effectiveUserMessage;
+      respond(
+        true,
+        {
+          runId: clientRunId,
+          status: "in_flight" as const,
+          ...(inFlightEffectiveUserMessage
+            ? { effectiveUserMessage: inFlightEffectiveUserMessage }
+            : {}),
+        },
+        undefined,
+        {
+          cached: true,
+          runId: clientRunId,
+        },
+      );
       return;
     }
 
@@ -964,10 +1713,12 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionKey: rawSessionKey,
         startedAtMs: now,
         expiresAtMs: resolveChatRunExpiresAtMs({ now, timeoutMs }),
+        effectiveUserMessage,
       });
       const ackPayload = {
         runId: clientRunId,
         status: "started" as const,
+        ...(effectiveUserMessage ? { effectiveUserMessage } : {}),
       };
       respond(true, ackPayload, undefined, { runId: clientRunId });
 
@@ -1019,10 +1770,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         GatewayClientScopes: client?.connect?.scopes,
       };
 
-      const agentId = resolveSessionAgentId({
-        sessionKey,
-        config: cfg,
-      });
+      const agentId = requesterAgentId;
       const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
         cfg,
         agentId,
@@ -1077,7 +1825,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           onModelSelected,
         },
       })
-        .then(() => {
+        .then(async () => {
           if (!agentRunStarted) {
             const combinedReply = finalReplyParts
               .map((part) => part.trim())
@@ -1086,6 +1834,33 @@ export const chatHandlers: GatewayRequestHandlers = {
               .trim();
             let message: Record<string, unknown> | undefined;
             if (combinedReply) {
+              const assistantMentionRoute = await resolveMentionRouteInText({
+                text: combinedReply,
+                cfg,
+                requesterSessionKey: sessionKey,
+                workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
+                action: "send",
+                policy: createAgentToAgentPolicy(cfg),
+              });
+              if (assistantMentionRoute?.ok && assistantMentionRoute.bodyWithoutMention.trim()) {
+                const routed = await forwardMentionRouteToAgent({
+                  message: assistantMentionRoute.bodyWithoutMention.trim(),
+                  targetSessionKey: assistantMentionRoute.sessionKey,
+                  requesterSessionKey: sessionKey,
+                  idempotencyKey: `${clientRunId}:assistant-mention-route`,
+                  context,
+                  client,
+                });
+                if (!routed.ok) {
+                  context.logGateway.warn(
+                    `assistant mention route failed: ${routed.error.message}`,
+                  );
+                }
+              } else if (assistantMentionRoute && !assistantMentionRoute.ok) {
+                context.logGateway.warn(
+                  `assistant mention route skipped: ${assistantMentionRoute.error}`,
+                );
+              }
               const { storePath: latestStorePath, entry: latestEntry } =
                 loadSessionEntry(sessionKey);
               const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;

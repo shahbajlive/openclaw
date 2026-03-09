@@ -42,8 +42,15 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
     onRefresh: () => undefined,
     onToggleFocusMode: () => undefined,
     onDraftChange: () => undefined,
+    liveToolEventsEnabled: true,
+    onToggleLiveToolEvents: () => undefined,
+    shouldEmitToolResult: true,
+    onToggleShouldEmitToolResult: () => undefined,
+    shouldEmitToolOutput: true,
+    onToggleShouldEmitToolOutput: () => undefined,
     onSend: () => undefined,
     onQueueRemove: () => undefined,
+    onQueueEdit: () => undefined,
     onNewSession: () => undefined,
     ...overrides,
   };
@@ -181,6 +188,105 @@ describe("chat view", () => {
     nowSpy.mockRestore();
   });
 
+  it("renders inter-session peer messages with workspace agent metadata", () => {
+    const container = document.createElement("div");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "Can you review this?" }],
+              provenance: {
+                kind: "inter_session",
+                sourceSessionKey: "agent:frontend-engineer:clawport",
+                sourceTool: "sessions_send",
+              },
+              timestamp: 1_000_000 - 5 * 60_000,
+            },
+          ],
+          agentDirectory: [
+            {
+              id: "frontend-engineer",
+              name: "Frontend Engineer",
+              color: "#22c55e",
+              emoji: "🎨",
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelector(".chat-sender-name")?.textContent).toContain(
+      "Frontend Engineer",
+    );
+    expect(container.querySelector(".chat-group-timestamp")?.textContent).toContain("5m ago");
+    expect(container.querySelector(".chat-group.is-peer")?.getAttribute("style")).toContain(
+      "#22c55e",
+    );
+    expect(container.querySelector(".chat-avatar.assistant")?.textContent).toContain("🎨");
+    nowSpy.mockRestore();
+  });
+
+  it("highlights @agent_id mentions using the agent color", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "Please sync with @frontend_engineer today." }],
+              timestamp: 1_000,
+            },
+          ],
+          agentDirectory: [
+            {
+              id: "frontend_engineer",
+              name: "Frontend Engineer",
+              color: "#22c55e",
+              emoji: "🎨",
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const mention = container.querySelector(".chat-agent-mention");
+    expect(mention?.textContent).toBe("@frontend_engineer");
+    expect(mention?.style.getPropertyValue("--chat-agent-mention-accent")).toBe("#22c55e");
+  });
+
+  it("deduplicates repeated messages that share the same idempotency key", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "user",
+              idempotencyKey: "idem-1",
+              content: [{ type: "text", text: "Review this change" }],
+              timestamp: 1_000,
+            },
+            {
+              role: "user",
+              idempotencyKey: "idem-1",
+              content: [{ type: "text", text: "Review this change" }],
+              timestamp: 1_001,
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-group.user .chat-bubble")).toHaveLength(1);
+  });
+
   it("shows a stop button when aborting is available", () => {
     const container = document.createElement("div");
     const onAbort = vi.fn();
@@ -194,13 +300,50 @@ describe("chat view", () => {
       container,
     );
 
-    const stopButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "Stop",
-    );
+    const stopButton = container.querySelector('button[aria-label="Stop"]');
     expect(stopButton).not.toBeUndefined();
     stopButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onAbort).toHaveBeenCalledTimes(1);
-    expect(container.textContent).not.toContain("New session");
+    expect(container.querySelector('button[aria-label="New session"]')).toBeNull();
+  });
+
+  it("renders mention suggestions and inserts the selected mention", () => {
+    const container = document.createElement("div");
+    const onDraftChange = vi.fn();
+    render(
+      renderChat(
+        createProps({
+          draft: "hey @front",
+          mentionSuggestions: [
+            {
+              id: "frontend_engineer",
+              mention: "@frontend_engineer",
+              name: "Frontend Engineer",
+              emoji: "🖥️",
+              color: "#22c55e",
+            },
+          ],
+          mentionSelectedIndex: 0,
+          mentionRangeStart: 4,
+          mentionRangeEnd: 10,
+          onDraftChange,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelector(".chat-mention-menu__mention")?.textContent).toContain(
+      "@frontend_engineer",
+    );
+    container
+      .querySelector<HTMLButtonElement>(".chat-mention-menu__item")
+      ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(onDraftChange).toHaveBeenCalledWith(
+      "hey @frontend_engineer ",
+      "hey @frontend_engineer ".length,
+      "hey @frontend_engineer ".length,
+    );
   });
 
   it("shows a new session button when aborting is unavailable", () => {
@@ -216,12 +359,264 @@ describe("chat view", () => {
       container,
     );
 
-    const newSessionButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "New session",
-    );
+    const newSessionButton = container.querySelector('button[aria-label="New session"]');
     expect(newSessionButton).not.toBeUndefined();
     newSessionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onNewSession).toHaveBeenCalledTimes(1);
-    expect(container.textContent).not.toContain("Stop");
+    expect(container.querySelector('button[aria-label="Stop"]')).toBeNull();
+  });
+
+  it("dedupes live tool card when assistant final embeds same tool card without top-level id", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              content: [
+                { type: "text", text: "Done." },
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "result text" },
+              ],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              toolCallId: "live-tool-1",
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "result text" },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+    expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
+  });
+
+  it("renders a single tool card when one message contains toolcall + toolresult", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [],
+          toolMessages: [
+            {
+              role: "assistant",
+              timestamp: Date.now(),
+              toolCallId: "live-tool-paired",
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: { team: "frontend" } },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const toolCards = container.querySelectorAll(".chat-tool-card");
+    expect(toolCards).toHaveLength(1);
+    expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("drops pending-only history tool row when same tool key later has output", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              toolCallId: "discover-1",
+              runId: "run-1",
+              content: [{ type: "toolcall", name: "discover_teammates", arguments: {} }],
+            },
+            {
+              role: "assistant",
+              timestamp: ts + 1000,
+              toolCallId: "discover-1",
+              runId: "run-1",
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const toolCards = container.querySelectorAll(".chat-tool-card");
+    expect(toolCards).toHaveLength(1);
+    expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("normalizes history rows without tool ids so call/result map to one card", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              runId: "run-1",
+              timestamp: ts,
+              content: [{ type: "toolcall", name: "discover_teammates", arguments: {} }],
+            },
+            {
+              role: "assistant",
+              runId: "run-1",
+              timestamp: ts + 1000,
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const toolCards = container.querySelectorAll(".chat-tool-card");
+    expect(toolCards).toHaveLength(1);
+    expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("reuses pending history tool id when a later output row is missing id", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              runId: "run-1",
+              timestamp: ts,
+              toolCallId: "tool-live-id-1",
+              content: [{ type: "toolcall", name: "discover_teammates", arguments: {} }],
+            },
+            {
+              role: "assistant",
+              runId: "run-1",
+              timestamp: ts + 1000,
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const toolCards = container.querySelectorAll(".chat-tool-card");
+    expect(toolCards).toHaveLength(1);
+    expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("links assistant toolCall content.id with toolResult toolCallId and renders one tool card", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              content: [
+                { type: "toolCall", id: "952872387", name: "discover_teammates", arguments: {} },
+              ],
+            },
+            {
+              role: "toolResult",
+              timestamp: ts + 1000,
+              toolCallId: "952872387",
+              toolName: "discover_teammates",
+              content: [{ type: "text", text: "Found 3 teammates." }],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
+    expect(container.querySelectorAll(".chat-text")).toHaveLength(0);
+  });
+
+  it("prefers canonical tool invocations and strips embedded history tool blocks", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              content: [
+                { type: "text", text: "Done." },
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              toolCallId: "discover-1",
+              __openclaw: { canonicalToolInvocation: true },
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
+    expect(container.textContent ?? "").toContain("Done.");
   });
 });

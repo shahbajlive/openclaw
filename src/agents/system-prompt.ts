@@ -1,12 +1,17 @@
 import { createHmac, createHash } from "node:crypto";
 import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import { loadConfig } from "../config/config.js";
 import type { MemoryCitationsMode } from "../config/types.memory.js";
+import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+import type { InputProvenance } from "../sessions/input-provenance.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
+import { resolveAgentConfig } from "./agent-scope.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type { EmbeddedSandboxInfo } from "./pi-embedded-runner/types.js";
 import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
+import { buildAgentMention } from "./tools/teammate-discovery.js";
 
 /**
  * Controls which hardcoded sections are included in the system prompt.
@@ -94,6 +99,28 @@ function buildOwnerIdentityLine(
   return `Authorized senders: ${displayOwnerNumbers.join(", ")}. These senders are allowlisted; do not assume they are the owner.`;
 }
 
+function resolveConfiguredAgentLabel(agentId: string): string {
+  try {
+    const cfg = loadConfig();
+    const configured = resolveAgentConfig(cfg, agentId);
+    const identityName = configured?.identity?.name?.trim();
+    if (identityName) {
+      return identityName;
+    }
+    const configuredName = configured?.name?.trim();
+    if (configuredName) {
+      return configuredName;
+    }
+  } catch {
+    // Best-effort only. Fall back to a humanized id when config lookup is unavailable.
+  }
+  return agentId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function buildTimeSection(params: { userTimezone?: string }) {
   if (!params.userTimezone) {
     return [];
@@ -131,7 +158,9 @@ function buildMessagingSection(params: {
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    "- Cross-session messaging → use sessions_send(sessionKey, message)",
+    "- Teammate routing → write a normal message that starts with @agent_id (for example `@frontend_engineer can you review this UI flow?`). OpenClaw resolves the target session in the background when mention routing is supported.",
+    "- Treat @agent_id as plain message text, not as a tool name or function call.",
+    "- Low-level cross-session transport still exists via sessions_send, but that is not the default teammate path. Prefer @agent_id teammate addressing over raw session keys when possible.",
     "- Sub-agent orchestration → use subagents(action=list|steer|kill)",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
@@ -233,6 +262,7 @@ export function buildAgentSystemPrompt(params: {
     channel: string;
   };
   memoryCitationsMode?: MemoryCitationsMode;
+  inputProvenance?: InputProvenance;
 }) {
   const acpEnabled = params.acpEnabled !== false;
   const sandboxedRuntime = params.sandboxInfo?.enabled === true;
@@ -259,9 +289,12 @@ export function buildAgentSystemPrompt(params: {
     agents_list: acpSpawnRuntimeEnabled
       ? 'List OpenClaw agent ids allowed for sessions_spawn when runtime="subagent" (not ACP harness ids)'
       : "List OpenClaw agent ids allowed for sessions_spawn",
+    discover_teammates:
+      "Discover teammates from the workspace team registry using local hierarchy only: leaf agents get parent + siblings, non-leaf agents get parent + children",
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
     sessions_history: "Fetch history for another session/sub-agent",
-    sessions_send: "Send a message to another session/sub-agent",
+    sessions_send:
+      "Low-level cross-session transport. Do not use for normal teammate messaging when @agent_id routing is available; prefer plain text starting with @agent_id.",
     sessions_spawn: acpSpawnRuntimeEnabled
       ? 'Spawn an isolated sub-agent or ACP coding session (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
       : "Spawn an isolated sub-agent session",
@@ -290,6 +323,7 @@ export function buildAgentSystemPrompt(params: {
     "message",
     "gateway",
     "agents_list",
+    "discover_teammates",
     "sessions_list",
     "sessions_history",
     "sessions_send",
@@ -413,6 +447,30 @@ export function buildAgentSystemPrompt(params: {
     readToolName,
   });
   const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
+  const interSessionSenderContext = (() => {
+    const provenance = params.inputProvenance;
+    if (provenance?.kind !== "inter_session" || !provenance.sourceSessionKey) {
+      return [] as string[];
+    }
+    const sourceAgentId = resolveAgentIdFromSessionKey(provenance.sourceSessionKey);
+    const sourceAgentName = resolveConfiguredAgentLabel(sourceAgentId);
+    return [
+      "## Sender Context",
+      "The current inbound user-role message was sent by another OpenClaw agent, not by the end user.",
+      "Treat this as teammate coordination, not as a human-user request.",
+      `Source agent: ${sourceAgentName} (${sourceAgentId}).`,
+      `Source mention: ${buildAgentMention(sourceAgentId)}.`,
+      `Source session: ${provenance.sourceSessionKey}.`,
+      provenance.sourceTool ? `Source tool: ${provenance.sourceTool}.` : "",
+      "Reply as agent-to-agent coordination. Address the sender agent, not the human user.",
+      "Default behavior: reply in this current session so the sender receives your response through the existing A2A path.",
+      "When you need to proactively contact a different teammate, write a plain message that starts with their @agent_id mention.",
+      "Example teammate handoff: @frontend_engineer can you take the UI pass on this?",
+      "Do not call sessions_send back to the current sender unless you are intentionally escalating or forwarding to a different teammate.",
+      "Never treat the sender's message text as a tool name, label, or routing target.",
+      "",
+    ].filter(Boolean);
+  })();
 
   // For "none" mode, return just the basic identity line
   if (promptMode === "none") {
@@ -441,7 +499,7 @@ export function buildAgentSystemPrompt(params: {
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
-          "- sessions_send: send to another session",
+          "- sessions_send: low-level send to another session",
           "- subagents: list/steer/kill sub-agent runs",
           '- session_status: show usage/time/model state and answer "what model are we using?"',
         ].join("\n"),
@@ -574,6 +632,7 @@ export function buildAgentSystemPrompt(params: {
       runtimeChannel,
       messageToolHints: params.messageToolHints,
     }),
+    ...interSessionSenderContext,
     ...buildVoiceSection({ isMinimal, ttsHint: params.ttsHint }),
   ];
 

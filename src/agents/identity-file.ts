@@ -9,6 +9,7 @@ export type AgentIdentityFile = {
   creature?: string;
   vibe?: string;
   avatar?: string;
+  color?: string;
 };
 
 const IDENTITY_PLACEHOLDER_VALUES = new Set([
@@ -17,6 +18,7 @@ const IDENTITY_PLACEHOLDER_VALUES = new Set([
   "how do you come across? sharp? warm? chaotic? calm?",
   "your signature - pick one that feels right",
   "workspace-relative path, http(s) url, or data uri",
+  "hex color like #a855f7",
 ]);
 
 function normalizeIdentityValue(value: string): string {
@@ -73,6 +75,9 @@ export function parseIdentityMarkdown(content: string): AgentIdentityFile {
     if (label === "avatar") {
       identity.avatar = value;
     }
+    if (label === "color") {
+      identity.color = value;
+    }
   }
   return identity;
 }
@@ -84,7 +89,8 @@ export function identityHasValues(identity: AgentIdentityFile): boolean {
     identity.theme ||
     identity.creature ||
     identity.vibe ||
-    identity.avatar,
+    identity.avatar ||
+    identity.color,
   );
 }
 

@@ -40,6 +40,7 @@ import {
   resolveInternalSessionKey,
   resolveMainSessionAlias,
   createAgentToAgentPolicy,
+  resolveTeammateAllowTargetIds,
 } from "./sessions-helpers.js";
 
 const SessionStatusToolSchema = Type.Object({
@@ -175,6 +176,7 @@ async function resolveModelOverride(params: {
 export function createSessionStatusTool(opts?: {
   agentSessionKey?: string;
   config?: OpenClawConfig;
+  workspaceDir?: string;
 }): AnyAgentTool {
   return {
     label: "Session Status",
@@ -197,6 +199,12 @@ export function createSessionStatusTool(opts?: {
       const requesterAgentId = resolveAgentIdFromSessionKey(
         opts?.agentSessionKey ?? requestedKeyRaw,
       );
+      const teammateAllowTargetIds = await resolveTeammateAllowTargetIds({
+        cfg,
+        requesterAgentId,
+        workspaceDir: opts?.workspaceDir,
+        policy: a2aPolicy,
+      });
       const ensureAgentAccess = (targetAgentId: string) => {
         if (targetAgentId === requesterAgentId) {
           return;
@@ -207,7 +215,10 @@ export function createSessionStatusTool(opts?: {
             "Agent-to-agent status is disabled. Set tools.agentToAgent.enabled=true to allow cross-agent access.",
           );
         }
-        if (!a2aPolicy.isAllowed(requesterAgentId, targetAgentId)) {
+        if (
+          !a2aPolicy.isAllowed(requesterAgentId, targetAgentId) &&
+          !teammateAllowTargetIds.has(targetAgentId)
+        ) {
           throw new Error("Agent-to-agent session status denied by tools.agentToAgent.allow.");
         }
       };

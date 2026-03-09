@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   createAgentToAgentPolicy,
@@ -8,6 +11,24 @@ import {
   resolveSandboxedSessionToolContext,
   resolveSessionToolsVisibility,
 } from "./sessions-access.js";
+
+const tempDirs: string[] = [];
+
+async function createWorkspaceRegistry(entries: unknown[]): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-access-"));
+  tempDirs.push(dir);
+  await fs.mkdir(path.join(dir, "clawport"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "clawport", "agents.json"),
+    JSON.stringify(entries, null, 2),
+    "utf8",
+  );
+  return dir;
+}
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
 
 describe("resolveSessionToolsVisibility", () => {
   it("defaults to tree when unset or invalid", () => {
@@ -105,6 +126,21 @@ describe("createAgentToAgentPolicy", () => {
     expect(policy.isAllowed("main", "ops-a")).toBe(true);
     expect(policy.isAllowed("guest", "ops-a")).toBe(false);
   });
+
+  it("treats @teammates as a relation selector instead of a static agent id", () => {
+    const policy = createAgentToAgentPolicy({
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["@teammates"],
+        },
+      },
+    } as unknown as OpenClawConfig);
+
+    expect(policy.usesTeammatesAllow).toBe(true);
+    expect(policy.matchesAllow("developer-lead")).toBe(false);
+    expect(policy.isAllowed("developer-lead", "developer-lead-backend-engineer")).toBe(false);
+  });
 });
 
 describe("createSessionVisibilityGuard", () => {
@@ -138,6 +174,62 @@ describe("createSessionVisibilityGuard", () => {
       status: "forbidden",
       error:
         "Session history visibility is restricted to the current session (tools.sessions.visibility=self).",
+    });
+  });
+
+  it("allows hierarchy-derived teammate access when @teammates is configured", async () => {
+    const workspaceDir = await createWorkspaceRegistry([
+      {
+        id: "main",
+        name: "Main",
+        directReports: ["developer-lead"],
+      },
+      {
+        id: "developer-lead",
+        name: "Developer Lead",
+        reportsTo: "main",
+        directReports: ["developer-lead-backend-engineer", "developer-lead-frontend-engineer"],
+      },
+      {
+        id: "developer-lead-backend-engineer",
+        name: "Backend Engineer",
+        reportsTo: "developer-lead",
+      },
+      {
+        id: "developer-lead-frontend-engineer",
+        name: "Frontend Engineer",
+        reportsTo: "developer-lead",
+      },
+      {
+        id: "ops-lead",
+        name: "Ops Lead",
+      },
+    ]);
+    const cfg = {
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["@teammates"],
+        },
+      },
+    } as unknown as OpenClawConfig;
+    const guard = await createSessionVisibilityGuard({
+      action: "send",
+      requesterSessionKey: "agent:developer-lead-backend-engineer:main",
+      visibility: "all",
+      a2aPolicy: createAgentToAgentPolicy(cfg),
+      cfg,
+      workspaceDir,
+    });
+
+    expect(guard.check("agent:developer-lead:main")).toEqual({ allowed: true });
+    expect(guard.check("agent:developer-lead-frontend-engineer:main")).toEqual({
+      allowed: true,
+    });
+    expect(guard.check("agent:ops-lead:main")).toEqual({
+      allowed: false,
+      status: "forbidden",
+      error: "Agent-to-agent messaging denied by tools.agentToAgent.allow.",
     });
   });
 });

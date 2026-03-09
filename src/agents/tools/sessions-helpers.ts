@@ -11,6 +11,7 @@ export {
   resolveSandboxSessionToolsVisibility,
   resolveSandboxedSessionToolContext,
   resolveSessionToolsVisibility,
+  resolveTeammateAllowTargetIds,
 } from "./sessions-access.js";
 export type { SessionReferenceResolution } from "./sessions-resolution.js";
 export {

@@ -26,6 +26,7 @@ type AgentsSetIdentityOptions = {
   emoji?: string;
   theme?: string;
   avatar?: string;
+  color?: string;
   fromIdentity?: boolean;
   json?: boolean;
 };
@@ -79,7 +80,8 @@ export async function agentsSetIdentityCommand(
   const emojiRaw = coerceTrimmed(opts.emoji);
   const themeRaw = coerceTrimmed(opts.theme);
   const avatarRaw = coerceTrimmed(opts.avatar);
-  const hasExplicitIdentity = Boolean(nameRaw || emojiRaw || themeRaw || avatarRaw);
+  const colorRaw = coerceTrimmed(opts.color);
+  const hasExplicitIdentity = Boolean(nameRaw || emojiRaw || themeRaw || avatarRaw || colorRaw);
 
   const identityFileRaw = coerceTrimmed(opts.identityFile);
   const workspaceRaw = coerceTrimmed(opts.workspace);
@@ -148,16 +150,18 @@ export async function agentsSetIdentityCommand(
     ...(avatarRaw || identityFromFile?.avatar
       ? { avatar: avatarRaw ?? identityFromFile?.avatar }
       : {}),
+    ...(colorRaw || identityFromFile?.color ? { color: colorRaw ?? identityFromFile?.color } : {}),
   };
 
   if (
     !incomingIdentity.name &&
     !incomingIdentity.emoji &&
     !incomingIdentity.theme &&
-    !incomingIdentity.avatar
+    !incomingIdentity.avatar &&
+    !incomingIdentity.color
   ) {
     runtime.error(
-      "No identity fields provided. Use --name/--emoji/--theme/--avatar or --from-identity.",
+      "No identity fields provided. Use --name/--emoji/--theme/--avatar/--color or --from-identity.",
     );
     runtime.exit(1);
     return;
@@ -226,6 +230,9 @@ export async function agentsSetIdentityCommand(
   }
   if (nextIdentity.avatar) {
     runtime.log(`Avatar: ${nextIdentity.avatar}`);
+  }
+  if (nextIdentity.color) {
+    runtime.log(`Color: ${nextIdentity.color}`);
   }
   if (workspaceDir) {
     runtime.log(`Workspace: ${shortenHomePath(workspaceDir)}`);

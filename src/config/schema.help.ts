@@ -313,7 +313,7 @@ export const FIELD_HELP: Record<string, string> = {
   "tools.agentToAgent.enabled":
     "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
   "tools.agentToAgent.allow":
-    "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+    'Allowlist of target agent IDs, glob patterns, or relation selectors (for example "@teammates") permitted for agent_to_agent calls when orchestration is enabled.',
   "tools.elevated":
     "Elevated tool access controls for privileged command surfaces that should only be reachable from trusted senders. Keep disabled unless operator workflows explicitly require elevated actions.",
   "tools.elevated.enabled":

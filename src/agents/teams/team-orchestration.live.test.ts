@@ -4,9 +4,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { OpenClawConfig } from "../../config/types.js";
-import type { Task } from "./types.js";
 import { loadConfig } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/types.js";
 import { GatewayClient } from "../../gateway/client.js";
 import { startGatewayServer } from "../../gateway/server.js";
 import { getFreePort } from "../../gateway/test-helpers.server.js";
@@ -15,6 +14,7 @@ import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-
 import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
 import { listTasks } from "./task-list.js";
 import { cleanupTeam, getTeam, listCreatorTeams } from "./team-registry.js";
+import type { LegacyTask as Task } from "./types.js";
 
 type TeamExample = {
   name: string;
@@ -113,8 +113,8 @@ function renderTaskGraph(tasks: Task[]): string[] {
   lines.push("graph TD");
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
-    const safeTitle = task.title.replace(/\"/g, "'");
-    lines.push(`  t_${shortId}[\"${safeTitle} (${task.status})\"]`);
+    const safeTitle = task.title.replace(/"/g, "'");
+    lines.push(`  t_${shortId}["${safeTitle} (${task.status})"]`);
   }
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);

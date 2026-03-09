@@ -203,7 +203,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.openclaw.ai/cli/age
 
   agents
     .command("set-identity")
-    .description("Update an agent identity (name/theme/emoji/avatar)")
+    .description("Update an agent identity (name/theme/emoji/avatar/color)")
     .option("--agent <id>", "Agent id to update")
     .option("--workspace <dir>", "Workspace directory used to locate the agent + IDENTITY.md")
     .option("--identity-file <path>", "Explicit IDENTITY.md path to read")
@@ -212,6 +212,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.openclaw.ai/cli/age
     .option("--theme <theme>", "Identity theme")
     .option("--emoji <emoji>", "Identity emoji")
     .option("--avatar <value>", "Identity avatar (workspace path, http(s) URL, or data URI)")
+    .option("--color <hex>", "Identity accent color")
     .option("--json", "Output JSON summary", false)
     .addHelpText(
       "after",
@@ -221,6 +222,7 @@ ${theme.heading("Examples:")}
 ${formatHelpExamples([
   ['openclaw agents set-identity --agent main --name "OpenClaw" --emoji "🦞"', "Set name + emoji."],
   ["openclaw agents set-identity --agent main --avatar avatars/openclaw.png", "Set avatar path."],
+  ["openclaw agents set-identity --agent main --color '#a855f7'", "Set accent color."],
   [
     "openclaw agents set-identity --workspace ~/.openclaw/workspace --from-identity",
     "Load from IDENTITY.md.",
@@ -244,6 +246,7 @@ ${formatHelpExamples([
             theme: opts.theme as string | undefined,
             emoji: opts.emoji as string | undefined,
             avatar: opts.avatar as string | undefined,
+            color: opts.color as string | undefined,
             json: Boolean(opts.json),
           },
           defaultRuntime,

@@ -23,6 +23,7 @@ import {
   applyLoggingDefaults,
   applyMessageDefaults,
   applyModelDefaults,
+  applyTeamDefaults,
   applySessionDefaults,
   applyTalkConfigNormalization,
   applyTalkApiKey,

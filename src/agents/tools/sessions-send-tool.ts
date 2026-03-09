@@ -16,6 +16,7 @@ import {
   createAgentToAgentPolicy,
   extractAssistantText,
   resolveEffectiveSessionToolsVisibility,
+  resolveTeammateAllowTargetIds,
   resolveSessionReference,
   resolveSandboxedSessionToolContext,
   resolveVisibleSessionReference,
@@ -37,6 +38,7 @@ export function createSessionsSendTool(opts?: {
   agentChannel?: GatewayMessageChannel;
   sandboxed?: boolean;
   allowTeamSessionTarget?: boolean;
+  workspaceDir?: string;
 }): AnyAgentTool {
   return {
     label: "Session Send",
@@ -96,7 +98,16 @@ export function createSessionsSendTool(opts?: {
                 "Agent-to-agent messaging is disabled. Set tools.agentToAgent.enabled=true to allow cross-agent sends.",
             });
           }
-          if (!a2aPolicy.isAllowed(requesterAgentId, requestedAgentId)) {
+          const teammateAllowTargetIds = await resolveTeammateAllowTargetIds({
+            cfg,
+            requesterAgentId,
+            workspaceDir: opts?.workspaceDir,
+            policy: a2aPolicy,
+          });
+          if (
+            !a2aPolicy.isAllowed(requesterAgentId, requestedAgentId) &&
+            !teammateAllowTargetIds.has(requestedAgentId)
+          ) {
             return jsonResult({
               runId: crypto.randomUUID(),
               status: "forbidden",
@@ -202,6 +213,8 @@ export function createSessionsSendTool(opts?: {
         requesterSessionKey: effectiveRequesterKey,
         visibility: sessionVisibility,
         a2aPolicy,
+        cfg,
+        workspaceDir: opts?.workspaceDir,
       });
       const access = visibilityGuard.check(resolvedKey);
       if (!access.allowed) {

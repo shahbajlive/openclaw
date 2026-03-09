@@ -352,6 +352,41 @@ export type GatewayToolsConfig = {
   allow?: string[];
 };
 
+export type GatewayTeamsDisplayTmuxConfig = {
+  /** Prefix used when creating tmux session names for team views. */
+  sessionPrefix?: string;
+};
+
+export type GatewayTeamsDisplayConfig = {
+  /** Team display mode in TUI and onboarding surfaces. */
+  mode?: "inline" | "tmux";
+  /** tmux-specific display settings. */
+  tmux?: GatewayTeamsDisplayTmuxConfig;
+};
+
+export type GatewayTeamsConfig = {
+  /** Enable team/swarm workflows. */
+  enabled?: boolean;
+  /** Maximum concurrent active teams. */
+  maxActiveTeams?: number;
+  /** Optional default model for teammate sessions. */
+  defaultModel?: string;
+  /** Bootstrap behavior for team workspaces. */
+  bootstrapMode?: "full" | "minimal" | "none";
+  /** Heartbeat behavior for team sessions. */
+  heartbeatMode?: "none" | "lead" | "all";
+  /** Optional idle-claim interval override (ms). */
+  idleClaimIntervalMs?: number;
+  /** Optional team retention window (days). */
+  retentionDays?: number;
+  /** Optional persistent storage settings for teams. */
+  storage?: {
+    basePath?: string;
+  };
+  /** Display preferences for teams. */
+  display?: GatewayTeamsDisplayConfig;
+};
+
 export type GatewayConfig = {
   /** Single multiplexed port for Gateway WS + HTTP (default: 18789). */
   port?: number;
@@ -393,6 +428,8 @@ export type GatewayConfig = {
   allowRealIpFallback?: boolean;
   /** Tool access restrictions for HTTP /tools/invoke endpoint. */
   tools?: GatewayToolsConfig;
+  /** Team/swarm configuration. */
+  teams?: GatewayTeamsConfig;
   /**
    * Channel health monitor interval in minutes.
    * Periodically checks channel health and restarts unhealthy channels.

@@ -218,6 +218,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "discover_teammates",
+    label: "discover_teammates",
+    description: "Discover parent + siblings or children",
+    sectionId: "agents",
+    profiles: [],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "image",
     label: "image",
     description: "Image understanding",

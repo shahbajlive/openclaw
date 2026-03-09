@@ -33,6 +33,7 @@ const SessionsListToolSchema = Type.Object({
 export function createSessionsListTool(opts?: {
   agentSessionKey?: string;
   sandboxed?: boolean;
+  workspaceDir?: string;
 }): AnyAgentTool {
   return {
     label: "Sessions",
@@ -95,6 +96,8 @@ export function createSessionsListTool(opts?: {
         requesterSessionKey: effectiveRequesterKey,
         visibility,
         a2aPolicy,
+        cfg,
+        workspaceDir: opts?.workspaceDir,
       });
       const rows: SessionListRow[] = [];
       const historyTargets: Array<{ row: SessionListRow; resolvedKey: string }> = [];

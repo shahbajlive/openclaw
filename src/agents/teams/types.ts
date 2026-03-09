@@ -260,3 +260,115 @@ export type SwarmToolOptions =
   | TaskSubmitToolOptions
   | TaskPlanToolOptions
   | TaskSearchToolOptions;
+
+// ---- Legacy team/task compatibility types ----
+
+export const LEAD_STATUS_INIT = "init";
+export const LEAD_STATUS_IDLE = "idle";
+export const LEAD_STATUS_WORKING = "working";
+export const LEAD_STATUS_FAILED = "failed";
+
+export type LeadStatus =
+  | typeof LEAD_STATUS_INIT
+  | typeof LEAD_STATUS_IDLE
+  | typeof LEAD_STATUS_WORKING
+  | typeof LEAD_STATUS_FAILED;
+
+export const TEAMMATE_STATUS_INIT = "init";
+export const TEAMMATE_STATUS_IDLE = "idle";
+export const TEAMMATE_STATUS_WORKING = "working";
+export const TEAMMATE_STATUS_FAILED = "failed";
+
+export type TeammateStatus =
+  | typeof TEAMMATE_STATUS_INIT
+  | typeof TEAMMATE_STATUS_IDLE
+  | typeof TEAMMATE_STATUS_WORKING
+  | typeof TEAMMATE_STATUS_FAILED;
+
+export type TeamStatus = "init" | "working" | "failed" | "idle";
+
+export type TeamConfig = {
+  notifyOnUnblock: boolean;
+};
+
+export type Teammate = {
+  teammateId: string;
+  role: string;
+  sessionKey: string;
+  workspaceDir?: string;
+  status: TeammateStatus;
+  model?: string;
+  isChore?: boolean;
+  requirePlanApproval: boolean;
+  planApproved: boolean;
+  currentTask?: string;
+  currentTaskId?: string;
+  claimedTasks: number;
+  completedTasks: number;
+  createdAt: number;
+  timeout?: number;
+};
+
+export type Team = {
+  teamId: string;
+  teamName: string;
+  description?: string;
+  creatorSessionKey?: string;
+  teamAgentId: string;
+  leadSessionKey: string;
+  leadWorkspaceDir?: string;
+  status: TeamStatus;
+  persistent: boolean;
+  boundSessionKey?: string;
+  createdAt: number;
+  updatedAt: number;
+  teammates: Record<string, Teammate>;
+  config: TeamConfig;
+  tmuxPanes?: {
+    sessionName: string;
+    leadPaneId?: string;
+    teammatePaneIds: Record<string, string>;
+    updatedAt: number;
+  };
+  idleNotificationSent?: boolean;
+  leadStatus?: LeadStatus;
+  leadRunId?: string;
+  answerBroadcasted?: boolean;
+};
+
+export type LegacyTaskStatus =
+  | "pending"
+  | "blocked"
+  | "claimed"
+  | "in-progress"
+  | "completed"
+  | "failed";
+
+export type LegacyTaskPriority = "low" | "normal" | "high" | "critical";
+
+export type LegacyTask = {
+  taskId: string;
+  title: string;
+  description?: string;
+  status: LegacyTaskStatus;
+  assignee?: string;
+  dependsOn: string[];
+  priority: LegacyTaskPriority;
+  taskClass?: "primary" | "secondary";
+  metadata?: Record<string, unknown>;
+  result?: "success" | "failure";
+  summary?: string;
+  artifacts?: string[];
+  createdAt: number;
+  claimedAt?: number;
+  completedAt?: number;
+};
+
+export type TaskSummary = {
+  total: number;
+  pending: number;
+  blocked: number;
+  inProgress: number;
+  completed: number;
+  failed: number;
+};

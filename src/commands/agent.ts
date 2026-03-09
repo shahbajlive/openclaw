@@ -562,6 +562,7 @@ async function agentCommandInternal(
       const startedAt = Date.now();
       registerAgentRunContext(runId, {
         sessionKey,
+        inputProvenance: opts.inputProvenance,
       });
       emitAgentEvent({
         runId,
@@ -682,6 +683,7 @@ async function agentCommandInternal(
       registerAgentRunContext(runId, {
         sessionKey,
         verboseLevel: resolvedVerboseLevel,
+        inputProvenance: opts.inputProvenance,
       });
     }
 

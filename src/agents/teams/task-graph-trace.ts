@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Task } from "./types.js";
 import {
   generateTaskGraphDashboardHtml,
   generateTaskGraphHtmlFromHistory,
 } from "./test-graph-gif.js";
+import type { LegacyTask as Task } from "./types.js";
 
 const TRACE_ENABLED = "OPENCLAW_TEAM_GRAPH_TRACE";
 const TRACE_DIR = "OPENCLAW_TEAM_GRAPH_TRACE_DIR";

@@ -1,13 +1,12 @@
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { OpenClawConfig } from "../../config/types.js";
-import type { Task } from "./types.js";
 import { loadConfig } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
+import type { OpenClawConfig } from "../../config/types.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
 import { getApiKeyForModel, requireApiKey } from "../model-auth.js";
 import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
@@ -21,6 +20,7 @@ import {
   updateTeammateStatus,
 } from "./team-registry.js";
 import { createTaskAnswerTool, createTaskQuestionTool } from "./tools/index.js";
+import type { LegacyTask as Task } from "./types.js";
 
 const LIVE =
   isTruthyEnvValue(process.env.OPENCLAW_LIVE_TEAM_REAL) ||
@@ -68,8 +68,8 @@ function renderTaskGraph(tasks: Task[]): string[] {
   lines.push("graph TD");
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
-    const safeTitle = task.title.replace(/\"/g, "'");
-    lines.push(`  t_${shortId}[\"${safeTitle} (${task.status})\"]`);
+    const safeTitle = task.title.replace(/"/g, "'");
+    lines.push(`  t_${shortId}["${safeTitle} (${task.status})"]`);
   }
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
@@ -219,7 +219,7 @@ async function generateModelAnswer(params: {
   cfg: OpenClawConfig;
   agentDir: string;
 }) {
-  const model = getModel(params.modelRef.provider, params.modelRef.id);
+  const model = getModel("zai", params.modelRef.id as never);
   const apiKeyInfo = await getApiKeyForModel({ model, cfg: params.cfg, agentDir: params.agentDir });
   const apiKey = requireApiKey(apiKeyInfo, params.modelRef.provider);
   const res = await completeSimple(
@@ -327,7 +327,7 @@ describeLive("team orchestration real model (live)", () => {
   }, 180_000);
 
   it("runs deterministic question/review flow with real model answers", async () => {
-    const modelRef = parseModelRef(MODEL as string);
+    const modelRef = parseModelRef(MODEL);
     const cfg = loadConfig();
 
     const team = createTeam({

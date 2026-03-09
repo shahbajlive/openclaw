@@ -1,4 +1,3 @@
-import Handlebars from "handlebars";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -15,35 +14,16 @@ type PromptTeammate = {
 };
 
 const PROMPTS_DIR = path.join(import.meta.dirname, "prompts");
-const PROMPT_PARTIALS_DIR = path.join(PROMPTS_DIR, "partials");
 
-// Cache compiled templates
-const templateCache = new Map<string, HandlebarsTemplateDelegate>();
-let partialsRegistered = false;
+// Cache loaded templates.
+const templateCache = new Map<string, string>();
 
-function registerPromptPartials(): void {
-  if (partialsRegistered) return;
-  partialsRegistered = true;
-
-  if (!fs.existsSync(PROMPT_PARTIALS_DIR)) return;
-
-  for (const entry of fs.readdirSync(PROMPT_PARTIALS_DIR, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const partialName = path.basename(entry.name, ".md");
-    const content = fs.readFileSync(path.join(PROMPT_PARTIALS_DIR, entry.name), "utf-8");
-    Handlebars.registerPartial(partialName, content);
-  }
-}
-
-function loadTemplate(filename: string): HandlebarsTemplateDelegate {
-  if (templateCache.has(filename)) return templateCache.get(filename)!;
-
-  registerPromptPartials();
-
+function loadTemplate(filename: string): string {
+  const cached = templateCache.get(filename);
+  if (cached) return cached;
   const content = fs.readFileSync(path.join(PROMPTS_DIR, filename), "utf-8");
-  const template = Handlebars.compile(content);
-  templateCache.set(filename, template);
-  return template;
+  templateCache.set(filename, content);
+  return content;
 }
 
 function readOptionalStringField(value: unknown, key: string): string | undefined {
@@ -52,6 +32,22 @@ function readOptionalStringField(value: unknown, key: string): string | undefine
   if (typeof raw !== "string") return undefined;
   const text = raw.trim();
   return text || undefined;
+}
+
+function renderPromptTemplate(template: string, vars: Record<string, string | number | undefined>) {
+  // Handle simple Handlebars-style if blocks used by team.md.
+  const withIfBlocks = template.replace(
+    /{{#if\s+([a-zA-Z0-9_]+)}}([\s\S]*?){{\/if}}/g,
+    (_match, key: string, body: string) => {
+      const value = vars[key];
+      return value === undefined || value === null || value === "" ? "" : body;
+    },
+  );
+  // Handle simple value interpolation.
+  return withIfBlocks.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_match, key: string) => {
+    const value = vars[key];
+    return value === undefined || value === null ? "" : String(value);
+  });
 }
 
 /**
@@ -68,7 +64,7 @@ export function buildTeamLeadSystemPrompt(params: {
   const description = readOptionalStringField(params.team, "description");
   const teamSize = params.teammatesList.length;
 
-  return template({
+  return renderPromptTemplate(template, {
     teamId: params.team.teamId,
     teamName: params.team.teamName,
     teamSize,
@@ -93,7 +89,7 @@ export function buildTeammateSystemPrompt(params: {
   const role = readOptionalStringField(params.teammate, "role") ?? params.teammate.teammateId;
   const teamSize = params.otherTeammates.length + 1;
 
-  return template({
+  return renderPromptTemplate(template, {
     teamId: params.team.teamId,
     teamName: params.team.teamName,
     description,

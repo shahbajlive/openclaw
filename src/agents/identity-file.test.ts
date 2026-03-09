@@ -11,6 +11,7 @@ describe("parseIdentityMarkdown", () => {
 - **Vibe:** *(how do you come across? sharp? warm? chaotic? calm?)*
 - **Emoji:** *(your signature - pick one that feels right)*
 - **Avatar:** *(workspace-relative path, http(s) URL, or data URI)*
+- **Color:** *(hex color like #a855f7)*
 `;
     const parsed = parseIdentityMarkdown(content);
     expect(parsed).toEqual({});
@@ -23,6 +24,7 @@ describe("parseIdentityMarkdown", () => {
 - **Vibe:** Warm
 - **Emoji:** :robot:
 - **Avatar:** avatars/openclaw.png
+- **Color:** #3b82f6
 `;
     const parsed = parseIdentityMarkdown(content);
     expect(parsed).toEqual({
@@ -31,6 +33,7 @@ describe("parseIdentityMarkdown", () => {
       vibe: "Warm",
       emoji: ":robot:",
       avatar: "avatars/openclaw.png",
+      color: "#3b82f6",
     });
   });
 });

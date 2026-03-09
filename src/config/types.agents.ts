@@ -62,6 +62,10 @@ export type AgentConfig = {
   id: string;
   default?: boolean;
   name?: string;
+  /** Optional parent agent id for hierarchy-aware UIs and teammate discovery. */
+  reportsTo?: string;
+  /** Optional convenience field. OpenClaw derives effective direct reports from reportsTo. */
+  directReports?: string[];
   workspace?: string;
   agentDir?: string;
   model?: AgentModelConfig;

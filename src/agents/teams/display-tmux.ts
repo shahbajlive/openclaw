@@ -72,19 +72,19 @@ const execFileAsync = promisify(execFile);
 
 async function tmuxExists(): Promise<boolean> {
   try {
-    await execFileAsync("tmux", ["-V"], { stdio: "ignore" });
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
   }
 }
 
-async function tmux(args: string[], opts: any = {}) {
+async function tmux(args: string[], opts: Parameters<typeof execFileAsync>[2] = {}) {
   const { stdout } = await execFileAsync("tmux", args, {
     encoding: "utf-8",
     ...opts,
   });
-  return stdout.trim();
+  return String(stdout).trim();
 }
 
 /* =========================================================
@@ -233,7 +233,7 @@ async function listPanes(session: string) {
   return out
     .split("\n")
     .filter(Boolean)
-    .map((line) => {
+    .map((line: string) => {
       const [id, paneSession, title] = line.split("\t");
       return { id, paneSession: paneSession || undefined, title };
     });
@@ -300,7 +300,9 @@ export async function createTeamTmuxView(params: {
 
   const panes = await listPanes(session);
 
-  const existingLead = panes.find((p) => matchesSession(p, params.leadSessionKey));
+  const existingLead = panes.find((p: { paneSession?: string; title?: string }) =>
+    matchesSession(p, params.leadSessionKey),
+  );
   const leadPaneId = existingLead?.id ?? panes[0]?.id ?? `${session}:0.0`;
 
   // Lead
@@ -322,10 +324,12 @@ export async function createTeamTmuxView(params: {
   const teammatePaneIds: Record<string, string> = {};
 
   for (let i = 0; i < params.teammates.length; i++) {
-    const tm = params.teammates[i]!;
-    const plan = layout[i + 1] as any;
+    const tm = params.teammates[i];
+    const plan = layout[i + 1] as Exclude<PlannedPane, { id: "lead" }>;
 
-    const existing = panes.find((p) => matchesSession(p, tm.sessionKey));
+    const existing = panes.find((p: { paneSession?: string; title?: string }) =>
+      matchesSession(p, tm.sessionKey),
+    );
     if (existing) {
       paneByPlan.set(plan.id, existing.id);
       await tmux([

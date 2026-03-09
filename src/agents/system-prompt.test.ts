@@ -182,6 +182,29 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("Voice (TTS) is enabled.");
   });
 
+  it("includes sender context for inter-session messages", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:frontend_engineer:clawport",
+        sourceTool: "sessions_send",
+      },
+    });
+
+    expect(prompt).toContain("## Sender Context");
+    expect(prompt).toContain("another OpenClaw agent, not by the end user");
+    expect(prompt).toContain("Source agent: Frontend Engineer (frontend_engineer).");
+    expect(prompt).toContain("Source mention: @frontend_engineer.");
+    expect(prompt).toContain("Source tool: sessions_send.");
+    expect(prompt).toContain(
+      "When you need to proactively contact a different teammate, write a plain message that starts with their @agent_id mention.",
+    );
+    expect(prompt).toContain(
+      "Example teammate handoff: @frontend_engineer can you take the UI pass on this?",
+    );
+  });
+
   it("adds reasoning tag hint when enabled", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
@@ -238,6 +261,18 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("sessions_list");
     expect(prompt).toContain("sessions_history");
     expect(prompt).toContain("sessions_send");
+    expect(prompt).toContain("Do not use for normal teammate messaging");
+    expect(prompt).toContain("prefer plain text starting with @agent_id");
+  });
+
+  it("explains teammate messaging as plain @agent_id text", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      toolNames: ["sessions_send"],
+    });
+
+    expect(prompt).toContain("write a normal message that starts with @agent_id");
+    expect(prompt).toContain("Treat @agent_id as plain message text, not as a tool name");
   });
 
   it("documents ACP sessions_spawn agent targeting requirements", () => {

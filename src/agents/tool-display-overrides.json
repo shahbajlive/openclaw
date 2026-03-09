@@ -72,6 +72,11 @@
       "title": "Agents",
       "detailKeys": []
     },
+    "discover_teammates": {
+      "emoji": "🧩",
+      "title": "Teammates",
+      "detailKeys": []
+    },
     "memory_search": {
       "emoji": "🧠",
       "title": "Memory Search",

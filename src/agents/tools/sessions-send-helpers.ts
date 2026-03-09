@@ -84,6 +84,11 @@ export function buildAgentToAgentMessageContext(params: {
       ? `Agent 1 (requester) channel: ${params.requesterChannel}.`
       : undefined,
     `Agent 2 (target) session: ${params.targetSessionKey}.`,
+    "The inbound message came from another OpenClaw agent.",
+    "Normal teammate messaging should use plain text that starts with @agent_id, not a tool call.",
+    "Reply to the sender agent in the current session unless you are intentionally escalating to a different teammate.",
+    "Do not call sessions_send back to the current sender for a normal reply.",
+    "Never interpret the sender's message text as a tool name, label, or session identifier.",
   ].filter(Boolean);
   return lines.join("\n");
 }
@@ -111,6 +116,9 @@ export function buildAgentToAgentReplyContext(params: {
       : undefined,
     `Agent 2 (target) session: ${params.targetSessionKey}.`,
     params.targetChannel ? `Agent 2 (target) channel: ${params.targetChannel}.` : undefined,
+    "If you need to contact a different teammate, write a normal message starting with @agent_id.",
+    "Reply in the current session. Do not call sessions_send back to the current sender unless you are intentionally escalating to a third party.",
+    "Never use the other agent's message text as a tool name, label, or session key.",
     `If you want to stop the ping-pong, reply exactly "${REPLY_SKIP_TOKEN}".`,
   ].filter(Boolean);
   return lines.join("\n");
@@ -141,6 +149,7 @@ export function buildAgentToAgentAnnounceContext(params: {
       : "Round 1 reply: (not available).",
     params.latestReply ? `Latest reply: ${params.latestReply}` : "Latest reply: (not available).",
     `If you want to remain silent, reply exactly "${ANNOUNCE_SKIP_TOKEN}".`,
+    "Do not call sessions_send during the announce step.",
     "Any other reply will be posted to the target channel.",
     "After this reply, the agent-to-agent conversation is over.",
   ].filter(Boolean);

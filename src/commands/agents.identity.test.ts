@@ -64,6 +64,7 @@ describe("agents set-identity command", () => {
       "- Creature: helpful sloth",
       "- Emoji: :)",
       "- Avatar: avatars/openclaw.png",
+      "- Color: #f5c518",
       "",
     ]);
 
@@ -87,6 +88,7 @@ describe("agents set-identity command", () => {
       theme: "helpful sloth",
       emoji: ":)",
       avatar: "avatars/openclaw.png",
+      color: "#f5c518",
     });
   });
 
@@ -135,6 +137,7 @@ describe("agents set-identity command", () => {
         name: "Nova",
         emoji: "🦞",
         avatar: "https://example.com/override.png",
+        color: "#22c55e",
       },
       runtime,
     );
@@ -144,6 +147,7 @@ describe("agents set-identity command", () => {
       theme: "space lobster",
       emoji: "🦞",
       avatar: "https://example.com/override.png",
+      color: "#22c55e",
     });
   });
 

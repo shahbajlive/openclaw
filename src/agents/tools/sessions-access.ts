@@ -1,15 +1,26 @@
 import type { OpenClawConfig } from "../../config/config.js";
-import { isSubagentSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import { isSubagentSessionKey } from "../../routing/session-key.js";
+import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import { listAgentIds } from "../agent-scope.js";
 import {
   listSpawnedSessionKeys,
   resolveInternalSessionKey,
   resolveMainSessionAlias,
 } from "./sessions-resolution.js";
+import {
+  buildAgentMention,
+  buildAgentSessionKey,
+  deriveHierarchyPeerAgentIds,
+  discoverTeammatesForAgent,
+  normalizeAgentMention,
+  TEAMMATE_AGENT_TO_AGENT_ALLOW,
+} from "./teammate-discovery.js";
 
 export type SessionToolsVisibility = "self" | "tree" | "agent" | "all";
 
 export type AgentToAgentPolicy = {
   enabled: boolean;
+  usesTeammatesAllow: boolean;
   matchesAllow: (agentId: string) => boolean;
   isAllowed: (requesterAgentId: string, targetAgentId: string) => boolean;
 };
@@ -91,11 +102,23 @@ export function createAgentToAgentPolicy(cfg: OpenClawConfig): AgentToAgentPolic
   const routingA2A = cfg.tools?.agentToAgent;
   const enabled = routingA2A?.enabled === true;
   const allowPatterns = Array.isArray(routingA2A?.allow) ? routingA2A.allow : [];
+  const usesTeammatesAllow = allowPatterns.some(
+    (pattern) =>
+      String(pattern ?? "")
+        .trim()
+        .toLowerCase() === TEAMMATE_AGENT_TO_AGENT_ALLOW,
+  );
+  const staticPatterns = allowPatterns.filter(
+    (pattern) =>
+      String(pattern ?? "")
+        .trim()
+        .toLowerCase() !== TEAMMATE_AGENT_TO_AGENT_ALLOW,
+  );
   const matchesAllow = (agentId: string) => {
-    if (allowPatterns.length === 0) {
-      return true;
+    if (staticPatterns.length === 0) {
+      return allowPatterns.length === 0;
     }
-    return allowPatterns.some((pattern) => {
+    return staticPatterns.some((pattern) => {
       const raw = String(pattern ?? "").trim();
       if (!raw) {
         return false;
@@ -120,7 +143,101 @@ export function createAgentToAgentPolicy(cfg: OpenClawConfig): AgentToAgentPolic
     }
     return matchesAllow(requesterAgentId) && matchesAllow(targetAgentId);
   };
-  return { enabled, matchesAllow, isAllowed };
+  return { enabled, usesTeammatesAllow, matchesAllow, isAllowed };
+}
+
+export async function resolveTeammateAllowTargetIds(params: {
+  cfg: OpenClawConfig;
+  requesterAgentId: string;
+  workspaceDir?: string;
+  policy?: AgentToAgentPolicy;
+}): Promise<Set<string>> {
+  const policy = params.policy ?? createAgentToAgentPolicy(params.cfg);
+  if (!policy.enabled || !policy.usesTeammatesAllow || !params.workspaceDir?.trim()) {
+    return new Set<string>();
+  }
+  try {
+    const discovery = await discoverTeammatesForAgent({
+      config: params.cfg,
+      requesterAgentId: params.requesterAgentId,
+      workspaceDir: params.workspaceDir,
+    });
+    return deriveHierarchyPeerAgentIds(discovery);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export async function resolveAllowedAgentMentionTarget(params: {
+  cfg: OpenClawConfig;
+  requesterSessionKey: string;
+  mention: string;
+  workspaceDir?: string;
+  action?: SessionAccessAction;
+  policy?: AgentToAgentPolicy;
+}): Promise<
+  | { ok: true; agentId: string; mention: string; sessionKey: string }
+  | { ok: false; status: "forbidden" | "error"; error: string }
+> {
+  const normalizedMention = normalizeAgentMention(params.mention);
+  if (!normalizedMention) {
+    return {
+      ok: false,
+      status: "error",
+      error: `Invalid teammate mention: ${params.mention}`,
+    };
+  }
+
+  const requesterAgentId = resolveAgentIdFromSessionKey(params.requesterSessionKey);
+  const policy = params.policy ?? createAgentToAgentPolicy(params.cfg);
+  const teammateAllowTargetIds = await resolveTeammateAllowTargetIds({
+    cfg: params.cfg,
+    requesterAgentId,
+    workspaceDir: params.workspaceDir,
+    policy,
+  });
+
+  let matchedAgentId: string | null = null;
+  let matchedAllowedAgentId: string | null = null;
+  for (const candidateId of listAgentIds(params.cfg)) {
+    if (candidateId === requesterAgentId) {
+      continue;
+    }
+    if (buildAgentMention(candidateId) !== normalizedMention) {
+      continue;
+    }
+    matchedAgentId = candidateId;
+    if (
+      policy.isAllowed(requesterAgentId, candidateId) ||
+      teammateAllowTargetIds.has(candidateId)
+    ) {
+      matchedAllowedAgentId = candidateId;
+      break;
+    }
+  }
+
+  if (!matchedAgentId) {
+    return {
+      ok: false,
+      status: "error",
+      error: `No agent found for mention: ${normalizedMention}`,
+    };
+  }
+
+  if (!matchedAllowedAgentId) {
+    return {
+      ok: false,
+      status: "forbidden",
+      error: a2aDeniedMessage(params.action ?? "send"),
+    };
+  }
+
+  return {
+    ok: true,
+    agentId: matchedAllowedAgentId,
+    mention: buildAgentMention(matchedAllowedAgentId),
+    sessionKey: buildAgentSessionKey(matchedAllowedAgentId),
+  };
 }
 
 function actionPrefix(action: SessionAccessAction): string {
@@ -176,10 +293,18 @@ export async function createSessionVisibilityGuard(params: {
   requesterSessionKey: string;
   visibility: SessionToolsVisibility;
   a2aPolicy: AgentToAgentPolicy;
+  cfg?: OpenClawConfig;
+  workspaceDir?: string;
 }): Promise<{
   check: (targetSessionKey: string) => SessionAccessResult;
 }> {
   const requesterAgentId = resolveAgentIdFromSessionKey(params.requesterSessionKey);
+  const teammateAllowTargetIds = await resolveTeammateAllowTargetIds({
+    cfg: params.cfg ?? ({} as OpenClawConfig),
+    requesterAgentId,
+    workspaceDir: params.workspaceDir,
+    policy: params.a2aPolicy,
+  });
   const spawnedKeys =
     params.visibility === "tree"
       ? await listSpawnedSessionKeys({ requesterSessionKey: params.requesterSessionKey })
@@ -203,7 +328,10 @@ export async function createSessionVisibilityGuard(params: {
           error: a2aDisabledMessage(params.action),
         };
       }
-      if (!params.a2aPolicy.isAllowed(requesterAgentId, targetAgentId)) {
+      if (
+        !params.a2aPolicy.isAllowed(requesterAgentId, targetAgentId) &&
+        !teammateAllowTargetIds.has(targetAgentId)
+      ) {
         return {
           allowed: false,
           status: "forbidden",

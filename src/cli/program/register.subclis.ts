@@ -299,6 +299,7 @@ const entries: SubCliEntry[] = [
   {
     name: "team",
     description: "Agent team management",
+    hasSubcommands: true,
     register: async (program) => {
       const mod = await import("../team-cli.js");
       mod.registerTeamCli(program);

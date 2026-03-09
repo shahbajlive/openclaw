@@ -169,6 +169,7 @@ function enforceSessionsHistoryHardCap(params: {
 export function createSessionsHistoryTool(opts?: {
   agentSessionKey?: string;
   sandboxed?: boolean;
+  workspaceDir?: string;
 }): AnyAgentTool {
   return {
     label: "Session History",
@@ -223,6 +224,8 @@ export function createSessionsHistoryTool(opts?: {
         requesterSessionKey: effectiveRequesterKey,
         visibility,
         a2aPolicy,
+        cfg,
+        workspaceDir: opts?.workspaceDir,
       });
       const access = visibilityGuard.check(resolvedKey);
       if (!access.allowed) {

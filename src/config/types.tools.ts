@@ -551,7 +551,7 @@ export type ToolsConfig = {
   agentToAgent?: {
     /** Enable agent-to-agent messaging tools. Default: false. */
     enabled?: boolean;
-    /** Allowlist of agent ids or patterns (implementation-defined). */
+    /** Allowlist of agent ids, glob patterns, or relation selectors such as "@teammates". */
     allow?: string[];
   };
   /**

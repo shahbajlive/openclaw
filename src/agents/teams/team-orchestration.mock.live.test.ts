@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.js";
-import type { Task } from "./types.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
 import { generateTeamTaskGraphDashboard } from "./task-graph-trace.js";
+import type { LegacyTask as Task } from "./types.js";
 
 let addTask: typeof import("./task-list.js").addTask;
 let listTasks: typeof import("./task-list.js").listTasks;
@@ -62,7 +62,7 @@ function isReservedOrchestrationTitle(title: string): boolean {
 }
 
 function addScenarioTask(teamId: string, params: Parameters<typeof addTask>[1]): Task {
-  const metadata: Record<string, unknown> = { ...(params.metadata ?? {}) };
+  const metadata: Record<string, unknown> = { ...params.metadata };
   const hasTaskClass = metadata.taskClass === "primary" || metadata.taskClass === "secondary";
   const dependencyCount = params.dependsOn?.length ?? 0;
   const shouldPromoteToPrimary = dependencyCount === 0 || dependencyCount > 1;
@@ -81,8 +81,8 @@ function renderTaskGraph(tasks: Task[]): string[] {
   lines.push("graph TD");
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
-    const safeTitle = task.title.replace(/\"/g, "'");
-    lines.push(`  t_${shortId}[\"${safeTitle} (${task.status})\"]`);
+    const safeTitle = task.title.replace(/"/g, "'");
+    lines.push(`  t_${shortId}["${safeTitle} (${task.status})"]`);
   }
   for (const task of tasks) {
     const shortId = task.taskId.slice(0, 8);
@@ -320,7 +320,10 @@ describeLive("team orchestration deterministic flow (mock model)", () => {
       dependencyTaskId: prevTask.taskId,
       questionText: "What did you decide in prev_task?",
     });
-    const qnRequestId = String(resultDetails(qnRequest).questionTaskId ?? "");
+    const qnRequestId =
+      typeof resultDetails(qnRequest).questionTaskId === "string"
+        ? resultDetails(qnRequest).questionTaskId
+        : "";
 
     const afterBlock = getTeam(teamId);
     expect(afterBlock?.teammates.y.status).toBe("idle");

@@ -1,4 +1,5 @@
 import type { VerboseLevel } from "../auto-reply/thinking.js";
+import type { InputProvenance } from "../sessions/input-provenance.js";
 
 export type AgentEventStream = "lifecycle" | "tool" | "assistant" | "error" | (string & {});
 
@@ -14,6 +15,7 @@ export type AgentEventPayload = {
 export type AgentRunContext = {
   sessionKey?: string;
   verboseLevel?: VerboseLevel;
+  inputProvenance?: InputProvenance;
   isHeartbeat?: boolean;
   /** Whether control UI clients should receive chat/agent updates for this run. */
   isControlUiVisible?: boolean;
@@ -38,6 +40,9 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
   }
   if (context.verboseLevel && existing.verboseLevel !== context.verboseLevel) {
     existing.verboseLevel = context.verboseLevel;
+  }
+  if (context.inputProvenance) {
+    existing.inputProvenance = context.inputProvenance;
   }
   if (context.isControlUiVisible !== undefined) {
     existing.isControlUiVisible = context.isControlUiVisible;
@@ -69,6 +74,13 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   const sessionKey = isControlUiVisible ? (eventSessionKey ?? context?.sessionKey) : undefined;
   const enriched: AgentEventPayload = {
     ...event,
+    data:
+      context?.inputProvenance && !("inputProvenance" in event.data)
+        ? {
+            ...event.data,
+            inputProvenance: context.inputProvenance,
+          }
+        : event.data,
     sessionKey,
     seq: nextSeq,
     ts: Date.now(),

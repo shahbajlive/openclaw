@@ -340,20 +340,42 @@ export function listAgentsForGateway(cfg: OpenClawConfig): {
   const defaultId = normalizeAgentId(resolveDefaultAgentId(cfg));
   const mainKey = normalizeMainKey(cfg.session?.mainKey);
   const scope = cfg.session?.scope ?? "per-sender";
+  const reportsToById = new Map<string, string | null>();
+  const directReportsById = new Map<string, string[]>();
   const configuredById = new Map<
     string,
-    { name?: string; identity?: GatewayAgentRow["identity"] }
+    {
+      name?: string;
+      identity?: GatewayAgentRow["identity"];
+      reportsTo?: string | null;
+      directReports?: string[];
+    }
   >();
   for (const entry of cfg.agents?.list ?? []) {
     if (!entry?.id) {
       continue;
     }
+    const normalizedId = normalizeAgentId(entry.id);
+    const reportsToRaw = typeof entry.reportsTo === "string" ? entry.reportsTo.trim() : "";
+    const reportsTo =
+      reportsToRaw && normalizeAgentId(reportsToRaw) !== normalizedId
+        ? normalizeAgentId(reportsToRaw)
+        : null;
+    const directReports = Array.isArray(entry.directReports)
+      ? entry.directReports
+          .map((value) => normalizeAgentId(typeof value === "string" ? value : ""))
+          .filter(Boolean)
+          .filter(
+            (value, index, values) => values.indexOf(value) === index && value !== normalizedId,
+          )
+      : [];
     const identity = entry.identity
       ? {
           name: entry.identity.name?.trim() || undefined,
           theme: entry.identity.theme?.trim() || undefined,
           emoji: entry.identity.emoji?.trim() || undefined,
           avatar: entry.identity.avatar?.trim() || undefined,
+          color: entry.identity.color?.trim() || undefined,
           avatarUrl: resolveIdentityAvatarUrl(
             cfg,
             normalizeAgentId(entry.id),
@@ -361,10 +383,23 @@ export function listAgentsForGateway(cfg: OpenClawConfig): {
           ),
         }
       : undefined;
-    configuredById.set(normalizeAgentId(entry.id), {
+    configuredById.set(normalizedId, {
       name: typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : undefined,
       identity,
+      reportsTo,
+      directReports,
     });
+    reportsToById.set(normalizedId, reportsTo);
+    directReportsById.set(normalizedId, directReports);
+  }
+  for (const [agentId, managerId] of reportsToById.entries()) {
+    if (!managerId) {
+      continue;
+    }
+    const existing = directReportsById.get(managerId) ?? [];
+    if (!existing.includes(agentId)) {
+      directReportsById.set(managerId, [...existing, agentId]);
+    }
   }
   const explicitIds = new Set(
     (cfg.agents?.list ?? [])
@@ -380,9 +415,13 @@ export function listAgentsForGateway(cfg: OpenClawConfig): {
   }
   const agents = agentIds.map((id) => {
     const meta = configuredById.get(id);
+    const effectiveReportsTo = meta?.reportsTo ?? null;
+    const effectiveDirectReports = directReportsById.get(id) ?? meta?.directReports ?? [];
     return {
       id,
       name: meta?.name,
+      reportsTo: effectiveReportsTo,
+      directReports: effectiveDirectReports,
       identity: meta?.identity,
     };
   });

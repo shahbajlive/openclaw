@@ -289,11 +289,6 @@ export function createOpenClawCodingTools(options?: {
     senderUsername: options?.senderUsername,
     senderE164: options?.senderE164,
   });
-  // Resolve team context early so we can ensure team tools are available
-  // even when restrictive tool profiles are configured.
-  const teamContext = options?.sessionKey ? resolveCallerTeamContext(options.sessionKey) : null;
-  const creatorTeams = options?.sessionKey ? listCreatorTeams(options.sessionKey) : [];
-
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
 

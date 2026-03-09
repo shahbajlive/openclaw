@@ -37,7 +37,14 @@ function createSingleAgentAvatarConfig(workspace: string): OpenClawConfig {
   return {
     session: { mainKey: "main" },
     agents: {
-      list: [{ id: "main", default: true, workspace, identity: { avatar: "avatar-link.png" } }],
+      list: [
+        {
+          id: "main",
+          default: true,
+          workspace,
+          identity: { avatar: "avatar-link.png", color: "#a855f7" },
+        },
+      ],
     },
   } as OpenClawConfig;
 }
@@ -147,6 +154,45 @@ describe("gateway session utils", () => {
     } as OpenClawConfig;
     expect(resolveSessionStoreKey({ cfg, sessionKey: "main" })).toBe("agent:main:work");
     expect(resolveSessionStoreKey({ cfg, sessionKey: "thread-1" })).toBe("agent:main:thread-1");
+  });
+
+  test("listAgentsForGateway exposes reportsTo and derives directReports", () => {
+    const cfg = {
+      agents: {
+        list: [
+          { id: "main", default: true, directReports: ["developer-lead"] },
+          { id: "developer-lead", reportsTo: "main", identity: { color: "#a855f7" } },
+          { id: "backend", reportsTo: "developer-lead" },
+          { id: "frontend", reportsTo: "developer-lead", directReports: [] },
+        ],
+      },
+    } as OpenClawConfig;
+
+    const result = listAgentsForGateway(cfg);
+    expect(result.defaultId).toBe("main");
+    expect(result.agents).toEqual([
+      expect.objectContaining({
+        id: "main",
+        reportsTo: null,
+        directReports: ["developer-lead"],
+      }),
+      expect.objectContaining({
+        id: "backend",
+        reportsTo: "developer-lead",
+        directReports: [],
+      }),
+      expect.objectContaining({
+        id: "developer-lead",
+        reportsTo: "main",
+        directReports: expect.arrayContaining(["backend", "frontend"]),
+        identity: expect.objectContaining({ color: "#a855f7" }),
+      }),
+      expect.objectContaining({
+        id: "frontend",
+        reportsTo: "developer-lead",
+        directReports: [],
+      }),
+    ]);
   });
 
   test("resolveSessionStoreKey normalizes session key casing", () => {

@@ -16,6 +16,8 @@ export const AgentSummarySchema = Type.Object(
   {
     id: NonEmptyString,
     name: Type.Optional(NonEmptyString),
+    reportsTo: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+    directReports: Type.Optional(Type.Array(NonEmptyString)),
     identity: Type.Optional(
       Type.Object(
         {
@@ -24,6 +26,7 @@ export const AgentSummarySchema = Type.Object(
           emoji: Type.Optional(NonEmptyString),
           avatar: Type.Optional(NonEmptyString),
           avatarUrl: Type.Optional(NonEmptyString),
+          color: Type.Optional(NonEmptyString),
         },
         { additionalProperties: false },
       ),

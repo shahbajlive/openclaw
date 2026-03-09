@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { openBoundaryFile } from "../infra/boundary-file-read.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
-import { runCommandWithTimeout } from "../process/exec.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
@@ -37,7 +36,6 @@ const WORKSPACE_STATE_FILENAME = "workspace-state.json";
 const WORKSPACE_STATE_VERSION = 1;
 
 const workspaceTemplateCache = new Map<string, Promise<string>>();
-let gitAvailabilityPromise: Promise<boolean> | null = null;
 const MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES = 2 * 1024 * 1024;
 
 // File content cache keyed by stable file identity to avoid stale reads.
@@ -277,49 +275,6 @@ async function writeWorkspaceOnboardingState(
   }
 }
 
-async function hasGitRepo(dir: string): Promise<boolean> {
-  try {
-    await fs.stat(path.join(dir, ".git"));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isGitAvailable(): Promise<boolean> {
-  if (gitAvailabilityPromise) {
-    return gitAvailabilityPromise;
-  }
-
-  gitAvailabilityPromise = (async () => {
-    try {
-      const result = await runCommandWithTimeout(["git", "--version"], { timeoutMs: 2_000 });
-      return result.code === 0;
-    } catch {
-      return false;
-    }
-  })();
-
-  return gitAvailabilityPromise;
-}
-
-async function ensureGitRepo(dir: string, isBrandNewWorkspace: boolean) {
-  if (!isBrandNewWorkspace) {
-    return;
-  }
-  if (await hasGitRepo(dir)) {
-    return;
-  }
-  if (!(await isGitAvailable())) {
-    return;
-  }
-  try {
-    await runCommandWithTimeout(["git", "init"], { cwd: dir, timeoutMs: 10_000 });
-  } catch {
-    // Ignore git init failures; workspace creation should still succeed.
-  }
-}
-
 export type WorkspaceBootstrapMode = "full" | "minimal" | "none";
 export type WorkspaceHeartbeatMode = "none" | "lead" | "all";
 
@@ -351,7 +306,7 @@ export async function ensureAgentWorkspace(params?: {
     : ensureBootstrapFiles
       ? "full"
       : "none";
-  const heartbeatMode: WorkspaceHeartbeatMode = params?.heartbeatMode
+  const _heartbeatMode: WorkspaceHeartbeatMode = params?.heartbeatMode
     ? params.heartbeatMode
     : bootstrapMode === "full"
       ? "all"
@@ -369,9 +324,10 @@ export async function ensureAgentWorkspace(params?: {
   const userPath = path.join(dir, DEFAULT_USER_FILENAME);
   const heartbeatPath = path.join(dir, DEFAULT_HEARTBEAT_FILENAME);
   const bootstrapPath = path.join(dir, DEFAULT_BOOTSTRAP_FILENAME);
+  const memoryPath = path.join(dir, DEFAULT_MEMORY_FILENAME);
   const statePath = resolveWorkspaceStatePath(dir);
 
-  const isBrandNewWorkspace = await (async () => {
+  const _isBrandNewWorkspace = await (async () => {
     const templatePaths = [agentsPath, soulPath, toolsPath, identityPath, userPath, heartbeatPath];
     const userContentPaths = [
       path.join(dir, "memory"),

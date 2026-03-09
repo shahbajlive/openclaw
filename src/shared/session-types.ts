@@ -4,11 +4,14 @@ export type GatewayAgentIdentity = {
   emoji?: string;
   avatar?: string;
   avatarUrl?: string;
+  color?: string;
 };
 
 export type GatewayAgentRow = {
   id: string;
   name?: string;
+  reportsTo?: string | null;
+  directReports?: string[];
   identity?: GatewayAgentIdentity;
 };
 

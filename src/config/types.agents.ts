@@ -60,6 +60,8 @@ export type AgentBinding = AgentRouteBinding | AgentAcpBinding;
 
 export type AgentConfig = {
   id: string;
+  /** Optional teammate mention alias used for @mention routing. */
+  alias?: string;
   default?: boolean;
   name?: string;
   /** Optional parent agent id for hierarchy-aware UIs and teammate discovery. */

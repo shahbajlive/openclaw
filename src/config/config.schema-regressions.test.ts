@@ -75,6 +75,20 @@ describe("config schema regressions", () => {
     expect(res.ok).toBe(true);
   });
 
+  it("rejects duplicate effective teammate mentions across ids and aliases", () => {
+    const res = validateConfigObject({
+      agents: {
+        list: [{ id: "frontend-engineer" }, { id: "reviewer", alias: "frontend_engineer" }],
+      },
+    });
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues[0]?.path).toBe("agents.list.1.alias");
+      expect(res.issues[0]?.message).toContain("duplicate teammate mention @frontend_engineer");
+    }
+  });
+
   it("rejects unsafe iMessage remoteHost", () => {
     const res = validateConfigObject({
       channels: {

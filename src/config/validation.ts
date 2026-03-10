@@ -1,5 +1,6 @@
 import path from "node:path";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { buildAgentMention, normalizeAgentAlias } from "../agents/tools/teammate-discovery.js";
 import { CHANNEL_IDS, normalizeChatChannelId } from "../channels/registry.js";
 import {
   normalizePluginsConfig,
@@ -139,6 +140,39 @@ function mapZodIssueToConfigIssue(issue: unknown): ConfigValidationIssue {
   };
 }
 
+function validateAgentAliases(config: OpenClawConfig): ConfigValidationIssue[] {
+  const issues: ConfigValidationIssue[] = [];
+  const seenMentions = new Map<string, number>();
+  const entries = Array.isArray(config.agents?.list) ? config.agents.list : [];
+
+  for (const [index, entry] of entries.entries()) {
+    if (!entry?.id) {
+      continue;
+    }
+    const rawAlias = typeof entry.alias === "string" ? entry.alias : undefined;
+    if (rawAlias != null && !normalizeAgentAlias(rawAlias)) {
+      issues.push({
+        path: `agents.list.${index}.alias`,
+        message:
+          "agent alias must be a teammate mention token using only letters, numbers, and underscores",
+      });
+      continue;
+    }
+    const mention = buildAgentMention(entry.id, rawAlias);
+    const previousIndex = seenMentions.get(mention);
+    if (previousIndex != null) {
+      issues.push({
+        path: `agents.list.${index}.alias`,
+        message: `duplicate teammate mention ${mention}; already claimed by agents.list.${previousIndex}`,
+      });
+      continue;
+    }
+    seenMentions.set(mention, index);
+  }
+
+  return issues;
+}
+
 function isWorkspaceAvatarPath(value: string, workspaceDir: string): boolean {
   const workspaceRoot = path.resolve(workspaceDir);
   const resolved = path.resolve(workspaceRoot, value);
@@ -257,6 +291,10 @@ export function validateConfigObjectRaw(
         },
       ],
     };
+  }
+  const aliasIssues = validateAgentAliases(validated.data as OpenClawConfig);
+  if (aliasIssues.length > 0) {
+    return { ok: false, issues: aliasIssues };
   }
   const avatarIssues = validateIdentityAvatar(validated.data as OpenClawConfig);
   if (avatarIssues.length > 0) {

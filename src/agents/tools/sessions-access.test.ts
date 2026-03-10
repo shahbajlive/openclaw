@@ -7,6 +7,7 @@ import {
   createAgentToAgentPolicy,
   createSessionVisibilityGuard,
   resolveEffectiveSessionToolsVisibility,
+  resolveAllowedAgentMentionTarget,
   resolveSandboxSessionToolsVisibility,
   resolveSandboxedSessionToolContext,
   resolveSessionToolsVisibility,
@@ -230,6 +231,47 @@ describe("createSessionVisibilityGuard", () => {
       allowed: false,
       status: "forbidden",
       error: "Agent-to-agent messaging denied by tools.agentToAgent.allow.",
+    });
+  });
+
+  it("routes explicit teammate aliases instead of derived @id mentions", async () => {
+    const cfg = {
+      agents: {
+        list: [{ id: "developer_lead" }, { id: "frontend_engineer", alias: "ui_review" }],
+      },
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["developer_lead", "frontend_engineer"],
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const resolved = await resolveAllowedAgentMentionTarget({
+      cfg,
+      requesterSessionKey: "agent:developer_lead:clawport",
+      mention: "@ui_review",
+      action: "send",
+    });
+
+    expect(resolved).toEqual({
+      ok: true,
+      agentId: "frontend_engineer",
+      mention: "@ui_review",
+      sessionKey: "agent:frontend_engineer:clawport",
+    });
+
+    const rejectedLegacyMention = await resolveAllowedAgentMentionTarget({
+      cfg,
+      requesterSessionKey: "agent:developer_lead:clawport",
+      mention: "@frontend_engineer",
+      action: "send",
+    });
+
+    expect(rejectedLegacyMention).toEqual({
+      ok: false,
+      status: "error",
+      error: "No agent found for mention: @frontend_engineer",
     });
   });
 });

@@ -1,7 +1,7 @@
 import type { OpenClawConfig } from "../../config/config.js";
 import { isSubagentSessionKey } from "../../routing/session-key.js";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
-import { listAgentIds } from "../agent-scope.js";
+import { listAgentIds, resolveAgentConfig } from "../agent-scope.js";
 import {
   listSpawnedSessionKeys,
   resolveInternalSessionKey,
@@ -203,7 +203,10 @@ export async function resolveAllowedAgentMentionTarget(params: {
     if (candidateId === requesterAgentId) {
       continue;
     }
-    if (buildAgentMention(candidateId) !== normalizedMention) {
+    if (
+      buildAgentMention(candidateId, resolveAgentConfig(params.cfg, candidateId)?.alias) !==
+      normalizedMention
+    ) {
       continue;
     }
     matchedAgentId = candidateId;
@@ -235,7 +238,10 @@ export async function resolveAllowedAgentMentionTarget(params: {
   return {
     ok: true,
     agentId: matchedAllowedAgentId,
-    mention: buildAgentMention(matchedAllowedAgentId),
+    mention: buildAgentMention(
+      matchedAllowedAgentId,
+      resolveAgentConfig(params.cfg, matchedAllowedAgentId)?.alias,
+    ),
     sessionKey: buildAgentSessionKey(matchedAllowedAgentId),
   };
 }

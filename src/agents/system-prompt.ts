@@ -11,7 +11,7 @@ import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type { EmbeddedSandboxInfo } from "./pi-embedded-runner/types.js";
 import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
-import { buildAgentMention } from "./tools/teammate-discovery.js";
+import { normalizeAgentMention } from "./tools/teammate-discovery.js";
 
 /**
  * Controls which hardcoded sections are included in the system prompt.
@@ -121,6 +121,15 @@ function resolveConfiguredAgentLabel(agentId: string): string {
     .join(" ");
 }
 
+function resolveConfiguredAgentAlias(agentId: string): string | undefined {
+  try {
+    const cfg = loadConfig();
+    return normalizeAgentMention(resolveAgentConfig(cfg, agentId)?.alias) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function buildTimeSection(params: { userTimezone?: string }) {
   if (!params.userTimezone) {
     return [];
@@ -158,9 +167,9 @@ function buildMessagingSection(params: {
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    "- Teammate routing → write a normal message that starts with @agent_id (for example `@frontend_engineer can you review this UI flow?`). OpenClaw resolves the target session in the background when mention routing is supported.",
-    "- Treat @agent_id as plain message text, not as a tool name or function call.",
-    "- Low-level cross-session transport still exists via sessions_send, but that is not the default teammate path. Prefer @agent_id teammate addressing over raw session keys when possible.",
+    "- Teammate routing → write a normal message that starts with a teammate alias (for example `@frontend_engineer can you review this UI flow?`). OpenClaw resolves the target session in the background when alias routing is supported.",
+    "- Treat teammate aliases as plain message text, not as a tool name or function call.",
+    "- Low-level cross-session transport still exists via sessions_send, but that is not the default teammate path. Prefer plain text starting with a teammate alias over raw session keys when possible.",
     "- Sub-agent orchestration → use subagents(action=list|steer|kill)",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
@@ -294,7 +303,7 @@ export function buildAgentSystemPrompt(params: {
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
     sessions_history: "Fetch history for another session/sub-agent",
     sessions_send:
-      "Low-level cross-session transport. Do not use for normal teammate messaging when @agent_id routing is available; prefer plain text starting with @agent_id.",
+      "Low-level cross-session transport. Do not use for normal teammate messaging when teammate alias routing is available; prefer plain text starting with a teammate alias.",
     sessions_spawn: acpSpawnRuntimeEnabled
       ? 'Spawn an isolated sub-agent or ACP coding session (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
       : "Spawn an isolated sub-agent session",
@@ -454,20 +463,22 @@ export function buildAgentSystemPrompt(params: {
     }
     const sourceAgentId = resolveAgentIdFromSessionKey(provenance.sourceSessionKey);
     const sourceAgentName = resolveConfiguredAgentLabel(sourceAgentId);
+    const sourceAgentAlias = resolveConfiguredAgentAlias(sourceAgentId);
+    const sourceIdentity = sourceAgentAlias
+      ? `${sourceAgentName} (alias ${sourceAgentAlias})`
+      : `${sourceAgentName} (session ${provenance.sourceSessionKey})`;
+    const handoffAlias = sourceAgentAlias ?? "@teammate_alias";
     return [
       "## Sender Context",
       "The current inbound user-role message was sent by another OpenClaw agent, not by the end user.",
       "Treat this as teammate coordination, not as a human-user request.",
-      `Source agent: ${sourceAgentName} (${sourceAgentId}).`,
-      `Source mention: ${buildAgentMention(sourceAgentId)}.`,
-      `Source session: ${provenance.sourceSessionKey}.`,
+      `Source: ${sourceIdentity}.`,
       provenance.sourceTool ? `Source tool: ${provenance.sourceTool}.` : "",
       "Reply as agent-to-agent coordination. Address the sender agent, not the human user.",
       "Default behavior: reply in this current session so the sender receives your response through the existing A2A path.",
-      "When you need to proactively contact a different teammate, write a plain message that starts with their @agent_id mention.",
-      "Example teammate handoff: @frontend_engineer can you take the UI pass on this?",
-      "Do not call sessions_send back to the current sender unless you are intentionally escalating or forwarding to a different teammate.",
-      "Never treat the sender's message text as a tool name, label, or routing target.",
+      "If you need to contact a different teammate directly, start a normal message with that teammate's alias.",
+      `Example teammate handoff: ${handoffAlias} can you take the UI pass on this?`,
+      "Treat teammate aliases as normal message text, not as a tool name or routing command.",
       "",
     ].filter(Boolean);
   })();

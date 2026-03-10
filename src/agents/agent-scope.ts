@@ -26,6 +26,7 @@ type AgentEntry = NonNullable<NonNullable<OpenClawConfig["agents"]>["list"]>[num
 
 type ResolvedAgentConfig = {
   name?: string;
+  alias?: string;
   workspace?: string;
   agentDir?: string;
   model?: AgentEntry["model"];
@@ -125,6 +126,7 @@ export function resolveAgentConfig(
   }
   return {
     name: typeof entry.name === "string" ? entry.name : undefined,
+    alias: typeof entry.alias === "string" ? entry.alias : undefined,
     workspace: typeof entry.workspace === "string" ? entry.workspace : undefined,
     agentDir: typeof entry.agentDir === "string" ? entry.agentDir : undefined,
     model:

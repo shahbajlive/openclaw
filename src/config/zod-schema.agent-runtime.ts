@@ -709,6 +709,10 @@ const AgentRuntimeSchema = z
 export const AgentEntrySchema = z
   .object({
     id: z.string(),
+    alias: z
+      .string()
+      .regex(/^@?[a-z0-9_]{1,64}$/i)
+      .optional(),
     default: z.boolean().optional(),
     name: z.string().optional(),
     reportsTo: z.string().optional(),

@@ -2,10 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
-import { resolveAgentWorkspaceDir } from "../agent-scope.js";
+import { resolveAgentConfig, resolveAgentWorkspaceDir } from "../agent-scope.js";
 import { resolveDefaultAgentWorkspaceDir } from "../workspace.js";
 
 export const TEAMMATE_AGENT_TO_AGENT_ALLOW = "@teammates";
+const VALID_AGENT_ALIAS_RE = /^@?[a-z0-9_]{1,64}$/i;
 
 type RegistryAgent = {
   id: string;
@@ -134,20 +135,22 @@ export function buildAgentSessionKey(agentId: string): string {
   return `agent:${normalizeAgentId(agentId)}:clawport`;
 }
 
-export function buildAgentMention(agentId: string): string {
-  return `@${normalizeAgentId(agentId).replaceAll("-", "_")}`;
+export function normalizeAgentAlias(value: string | undefined | null): string | null {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed || !VALID_AGENT_ALIAS_RE.test(trimmed)) {
+    return null;
+  }
+  return trimmed.replace(/^@/, "").toLowerCase();
+}
+
+export function buildAgentMention(agentId: string, alias?: string | null): string {
+  const token = normalizeAgentAlias(alias) ?? normalizeAgentId(agentId).replaceAll("-", "_");
+  return `@${token}`;
 }
 
 export function normalizeAgentMention(value: string | undefined | null): string | null {
-  const trimmed = (value ?? "").trim();
-  if (!trimmed.startsWith("@")) {
-    return null;
-  }
-  const normalized = normalizeAgentId(trimmed.slice(1).replaceAll("_", "-"));
-  if (!normalized) {
-    return null;
-  }
-  return buildAgentMention(normalized);
+  const normalized = normalizeAgentAlias(value);
+  return normalized ? `@${normalized}` : null;
 }
 
 export function displayName(agent: Pick<RegistryAgent, "id" | "name" | "title">): string {
@@ -160,6 +163,13 @@ export function displayName(agent: Pick<RegistryAgent, "id" | "name" | "title">)
     return title;
   }
   return agent.id;
+}
+
+function resolveMentionAlias(
+  config: OpenClawConfig | undefined,
+  agentId: string,
+): string | undefined {
+  return normalizeAgentAlias(resolveAgentConfig(config ?? {}, agentId)?.alias) ?? undefined;
 }
 
 async function loadRegistry(workspaceDir: string): Promise<{
@@ -306,7 +316,10 @@ export async function discoverTeammatesForAgent(params: {
   const requesterSummary: RelatedAgentSummary = {
     id: requesterAgentId,
     name: requester ? displayName(requester) : requesterAgentId,
-    mention: buildAgentMention(requesterAgentId),
+    mention: buildAgentMention(
+      requesterAgentId,
+      resolveMentionAlias(params.config, requesterAgentId),
+    ),
   };
   if (!requester) {
     return {
@@ -378,7 +391,7 @@ export async function discoverTeammatesForAgent(params: {
     teammates.push({
       id: target.id,
       name: displayName(target),
-      mention: buildAgentMention(target.id),
+      mention: buildAgentMention(target.id, resolveMentionAlias(params.config, target.id)),
       title: target.title,
       brief,
       relation: requesterHasReports ? "direct_report" : "sibling",
@@ -404,7 +417,7 @@ export async function discoverTeammatesForAgent(params: {
   const reportsTo: RelatedAgentSummary = {
     id: parent.id,
     name: displayName(parent),
-    mention: buildAgentMention(parent.id),
+    mention: buildAgentMention(parent.id, resolveMentionAlias(params.config, parent.id)),
     brief: parentBrief,
   };
 
@@ -412,7 +425,7 @@ export async function discoverTeammatesForAgent(params: {
     requester: {
       id: requester.id,
       name: displayName(requester),
-      mention: buildAgentMention(requester.id),
+      mention: buildAgentMention(requester.id, resolveMentionAlias(params.config, requester.id)),
     },
     reportsTo,
     parent: reportsTo,

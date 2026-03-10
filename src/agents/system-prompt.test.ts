@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import * as configModule from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.js";
 import { typedCases } from "../test-utils/typed-cases.js";
 import { buildSubagentSystemPrompt } from "./subagent-announce.js";
 import { buildAgentSystemPrompt, buildRuntimeLine } from "./system-prompt.js";
 
 describe("buildAgentSystemPrompt", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("formats owner section for plain, hash, and missing owner lists", () => {
     const cases = typedCases<{
       name: string;
@@ -183,6 +189,19 @@ describe("buildAgentSystemPrompt", () => {
   });
 
   it("includes sender context for inter-session messages", () => {
+    const config: OpenClawConfig = {
+      agents: {
+        list: [
+          {
+            id: "frontend_engineer",
+            name: "Frontend Engineer",
+            alias: "frontend_ui",
+          },
+        ],
+      },
+    };
+    vi.spyOn(configModule, "loadConfig").mockReturnValue(config);
+
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
       inputProvenance: {
@@ -194,15 +213,51 @@ describe("buildAgentSystemPrompt", () => {
 
     expect(prompt).toContain("## Sender Context");
     expect(prompt).toContain("another OpenClaw agent, not by the end user");
-    expect(prompt).toContain("Source agent: Frontend Engineer (frontend_engineer).");
-    expect(prompt).toContain("Source mention: @frontend_engineer.");
+    expect(prompt).toContain("Source: Frontend Engineer (alias @frontend_ui).");
     expect(prompt).toContain("Source tool: sessions_send.");
+    expect(prompt).not.toContain("Source agent:");
+    expect(prompt).not.toContain("Source mention:");
+    expect(prompt).not.toContain("Source session:");
     expect(prompt).toContain(
-      "When you need to proactively contact a different teammate, write a plain message that starts with their @agent_id mention.",
+      "Default behavior: reply in this current session so the sender receives your response through the existing A2A path.",
     );
     expect(prompt).toContain(
-      "Example teammate handoff: @frontend_engineer can you take the UI pass on this?",
+      "If you need to contact a different teammate directly, start a normal message with that teammate's alias.",
     );
+    expect(prompt).toContain(
+      "Example teammate handoff: @frontend_ui can you take the UI pass on this?",
+    );
+    expect(prompt).toContain(
+      "Treat teammate aliases as normal message text, not as a tool name or routing command.",
+    );
+  });
+
+  it("falls back to the sender session key when no alias is configured", () => {
+    const config: OpenClawConfig = {
+      agents: {
+        list: [
+          {
+            id: "frontend_engineer",
+            name: "Frontend Engineer",
+          },
+        ],
+      },
+    };
+    vi.spyOn(configModule, "loadConfig").mockReturnValue(config);
+
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:frontend_engineer:clawport",
+      },
+    });
+
+    expect(prompt).toContain(
+      "Source: Frontend Engineer (session agent:frontend_engineer:clawport).",
+    );
+    expect(prompt).not.toContain("alias @");
+    expect(prompt).not.toContain("Source session:");
   });
 
   it("adds reasoning tag hint when enabled", () => {
@@ -262,17 +317,17 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("sessions_history");
     expect(prompt).toContain("sessions_send");
     expect(prompt).toContain("Do not use for normal teammate messaging");
-    expect(prompt).toContain("prefer plain text starting with @agent_id");
+    expect(prompt).toContain("prefer plain text starting with a teammate alias");
   });
 
-  it("explains teammate messaging as plain @agent_id text", () => {
+  it("explains teammate messaging as plain alias text", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
       toolNames: ["sessions_send"],
     });
 
-    expect(prompt).toContain("write a normal message that starts with @agent_id");
-    expect(prompt).toContain("Treat @agent_id as plain message text, not as a tool name");
+    expect(prompt).toContain("write a normal message that starts with a teammate alias");
+    expect(prompt).toContain("Treat teammate aliases as plain message text, not as a tool name");
   });
 
   it("documents ACP sessions_spawn agent targeting requirements", () => {

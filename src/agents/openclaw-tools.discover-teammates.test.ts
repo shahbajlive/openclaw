@@ -119,6 +119,12 @@ describe("discover_teammates", () => {
         tools: ["read", "write", "exec", "message"],
       },
     ]);
+    configOverride = {
+      session: createPerSenderSessionConfig(),
+      agents: {
+        list: [{ id: "frontend_engineer", alias: "ui_review" }],
+      },
+    };
 
     const result = await requireTool(workspaceDir, "agent:backend_engineer:clawport").execute(
       "call1",
@@ -142,6 +148,11 @@ describe("discover_teammates", () => {
       "frontend_engineer",
       "security_engineer",
     ]);
+    expect(
+      (details.siblings as Array<{ id: string; mention: string }>).find(
+        (entry) => entry.id === "frontend_engineer",
+      )?.mention,
+    ).toBe("@ui_review");
     expect(details.commands).toEqual([]);
     expect(readText(result)).toContain("Whom to report:");
     expect(readText(result)).toContain(

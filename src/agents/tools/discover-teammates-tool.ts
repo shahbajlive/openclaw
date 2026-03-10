@@ -17,9 +17,7 @@ function buildText(params: {
   missingChildIds?: string[];
 }): string {
   const lines: string[] = [];
-  lines.push(
-    `You are ${params.requester.name} (${params.requester.id}) [mention: ${params.requester.mention}].`,
-  );
+  lines.push(`You are ${params.requester.name}.`);
   if (!params.reportsTo) {
     if (params.missingParentId) {
       lines.push(`Configured parent ${params.missingParentId} was not found in agents.list.`);
@@ -33,16 +31,14 @@ function buildText(params: {
   lines.push("Whom to report:");
   {
     const brief = params.reportsTo.brief?.trim() ? ` - ${params.reportsTo.brief.trim()}` : "";
-    lines.push(
-      `- ${params.reportsTo.name} (${params.reportsTo.id})${brief} [mention: ${params.reportsTo.mention}]`,
-    );
+    lines.push(`- ${params.reportsTo.name} (${params.reportsTo.mention})${brief}`);
   }
 
   if (params.commands.length > 0) {
     lines.push("Who are on my command:");
     for (const command of params.commands) {
       const brief = command.brief?.trim() ? ` - ${command.brief.trim()}` : "";
-      lines.push(`- ${command.name} (${command.id})${brief} [mention: ${command.mention}]`);
+      lines.push(`- ${command.name} (${command.mention})${brief}`);
     }
   }
 
@@ -50,7 +46,7 @@ function buildText(params: {
     lines.push("Siblings:");
     for (const sibling of params.siblings) {
       const brief = sibling.brief?.trim() ? ` - ${sibling.brief.trim()}` : "";
-      lines.push(`- ${sibling.name} (${sibling.id})${brief} [mention: ${sibling.mention}]`);
+      lines.push(`- ${sibling.name} (${sibling.mention})${brief}`);
     }
   }
 
@@ -100,8 +96,14 @@ export function createDiscoverTeammatesTool(opts: {
           };
         }
 
+        const exampleMention =
+          details.siblings[0]?.mention ??
+          details.commands[0]?.mention ??
+          details.reportsTo?.mention;
         const guidance = details.canDirectMessage
-          ? "Use files and contracts for substantive handoff. Use direct messages only for urgency, blockers, or short coordination. To contact a teammate, write a normal message starting with their mention, for example @frontend_engineer can you review this?"
+          ? `Use files and contracts for substantive handoff. Use direct messages only for urgency, blockers, or short coordination. To contact a teammate, put their mention at the very start of a normal message. Only a leading mention block routes, and those leading mentions are removed before delivery${
+              exampleMention ? `, for example ${exampleMention} can you review this?` : "."
+            }`
           : `Use files and contracts for substantive handoff. Route urgent coordination through ${
               details.reportsTo?.id ?? "your parent"
             } when needed.`;

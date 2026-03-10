@@ -13,6 +13,7 @@ export type AgentMentionToken = {
 };
 
 const AGENT_MENTION_TOKEN_RE = /(^|[^a-z0-9_])(@[a-z0-9_]+)(?=$|[^a-z0-9_])/gi;
+const LEADING_AGENT_MENTION_RE = /@[a-z0-9_]+/i;
 
 export function extractAgentMentionTokens(text: string): AgentMentionToken[] {
   const tokens: AgentMentionToken[] = [];
@@ -30,6 +31,40 @@ export function extractAgentMentionTokens(text: string): AgentMentionToken[] {
   return tokens;
 }
 
+function extractLeadingAgentMentionTokens(text: string): {
+  tokens: AgentMentionToken[];
+  removalEnd: number;
+} {
+  const tokens: AgentMentionToken[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length && /\s/.test(text[cursor] ?? "")) {
+    cursor += 1;
+  }
+
+  const firstTokenStart = cursor;
+  while (cursor < text.length) {
+    const remaining = text.slice(cursor);
+    const match = LEADING_AGENT_MENTION_RE.exec(remaining);
+    if (!match || match.index !== 0) {
+      break;
+    }
+    const mention = match[0];
+    const start = cursor;
+    const end = start + mention.length;
+    tokens.push({ mention, start, end });
+    cursor = end;
+    while (cursor < text.length && /\s/.test(text[cursor] ?? "")) {
+      cursor += 1;
+    }
+  }
+
+  if (tokens.length === 0) {
+    return { tokens: [], removalEnd: firstTokenStart };
+  }
+  return { tokens, removalEnd: cursor };
+}
+
 function normalizeRemovedMentionBody(text: string): string {
   return text
     .replace(/[ \t]+\n/g, "\n")
@@ -45,6 +80,10 @@ export function removeAgentMentionToken(text: string, token: AgentMentionToken):
   const before = text.slice(0, token.start);
   const after = text.slice(token.end);
   return normalizeRemovedMentionBody(`${before}${after}`);
+}
+
+function removeLeadingAgentMentionTokens(text: string, removalEnd: number): string {
+  return normalizeRemovedMentionBody(text.slice(removalEnd));
 }
 
 export async function resolveMentionRouteInText(params: {
@@ -67,7 +106,7 @@ export async function resolveMentionRouteInText(params: {
   | { ok: false; status: "forbidden" | "error"; error: string }
   | null
 > {
-  const tokens = extractAgentMentionTokens(params.text);
+  const { tokens, removalEnd } = extractLeadingAgentMentionTokens(params.text);
   if (tokens.length === 0) {
     return null;
   }
@@ -98,21 +137,16 @@ export async function resolveMentionRouteInText(params: {
       }
       continue;
     }
-    if (resolved) {
-      return {
-        ok: false,
-        status: "error",
-        error: "Only one teammate mention can be used per message.",
+    if (!resolved) {
+      resolved = {
+        mention: target.mention,
+        body: params.text.trim(),
+        bodyWithoutMention: removeLeadingAgentMentionTokens(params.text, removalEnd),
+        agentId: target.agentId,
+        sessionKey: target.sessionKey,
+        token,
       };
     }
-    resolved = {
-      mention: target.mention,
-      body: params.text.trim(),
-      bodyWithoutMention: removeAgentMentionToken(params.text, token),
-      agentId: target.agentId,
-      sessionKey: target.sessionKey,
-      token,
-    };
   }
 
   if (resolved) {

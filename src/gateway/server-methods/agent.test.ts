@@ -67,6 +67,8 @@ vi.mock("../../config/config.js", async () => {
 vi.mock("../../agents/agent-scope.js", () => ({
   listAgentIds: mocks.listAgentIds,
   resolveAgentWorkspaceDir: mocks.resolveAgentWorkspaceDir,
+  resolveAgentConfig: (cfg: { agents?: { list?: Array<{ id?: string }> } }, agentId: string) =>
+    cfg.agents?.list?.find((entry) => entry.id === agentId),
 }));
 
 vi.mock("../../agents/teams/team-registry.js", () => ({
@@ -689,6 +691,9 @@ describe("gateway agent handler", () => {
   it("routes leading @agent_id mentions to the allowed teammate session with the mention removed", async () => {
     mocks.listAgentIds.mockReturnValue(["developer_lead", "frontend_engineer"]);
     mocks.loadConfigReturn = {
+      agents: {
+        list: [{ id: "developer_lead" }, { id: "frontend_engineer" }],
+      },
       tools: {
         agentToAgent: {
           enabled: true,
@@ -738,9 +743,12 @@ describe("gateway agent handler", () => {
     });
   });
 
-  it("routes mid-sentence @agent_id mentions to the allowed teammate session with the mention removed", async () => {
+  it("routes only the leading teammate mention block and strips all leading mentions", async () => {
     mocks.listAgentIds.mockReturnValue(["developer_lead", "frontend_engineer"]);
     mocks.loadConfigReturn = {
+      agents: {
+        list: [{ id: "developer_lead" }, { id: "frontend_engineer" }],
+      },
       tools: {
         agentToAgent: {
           enabled: true,
@@ -763,7 +771,7 @@ describe("gateway agent handler", () => {
     const respond = vi.fn();
     await agentHandlers.agent({
       params: {
-        message: "Please sync with @frontend_engineer on the UI polish",
+        message: "@frontend_engineer @frontend_engineer please review the UI polish",
         sessionKey: "agent:developer_lead:clawport",
         idempotencyKey: "test-mid-mention-route",
       },
@@ -780,7 +788,7 @@ describe("gateway agent handler", () => {
       sessionKey?: string;
       inputProvenance?: { kind?: string; sourceSessionKey?: string; sourceTool?: string };
     };
-    expect(callArgs.message).toContain("Please sync with on the UI polish");
+    expect(callArgs.message).toContain("please review the UI polish");
     expect(callArgs.message).not.toContain("@frontend_engineer");
     expect(callArgs.sessionKey).toBe("agent:frontend_engineer:clawport");
     expect(callArgs.inputProvenance).toMatchObject({
@@ -788,5 +796,55 @@ describe("gateway agent handler", () => {
       sourceSessionKey: "agent:developer_lead:clawport",
       sourceTool: "mention_route",
     });
+  });
+
+  it("does not route mid-sentence teammate mentions and leaves them in the message", async () => {
+    mocks.listAgentIds.mockReturnValue(["developer_lead", "frontend_engineer"]);
+    mocks.loadConfigReturn = {
+      agents: {
+        list: [{ id: "developer_lead" }, { id: "frontend_engineer" }],
+      },
+      tools: {
+        agentToAgent: {
+          enabled: true,
+          allow: ["developer_lead", "frontend_engineer"],
+        },
+      },
+    };
+    mocks.loadSessionEntry.mockReturnValue({
+      cfg: mocks.loadConfigReturn,
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "existing-session-id", updatedAt: Date.now() },
+      canonicalKey: "agent:developer_lead:clawport",
+    });
+    mocks.updateSessionStore.mockResolvedValue(undefined);
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    const respond = vi.fn();
+    await agentHandlers.agent({
+      params: {
+        message: "Please sync with @frontend_engineer on the UI polish",
+        sessionKey: "agent:developer_lead:clawport",
+        idempotencyKey: "test-nonleading-mention-route",
+      },
+      respond,
+      context: makeContext(),
+      req: { type: "req", id: "8", method: "agent" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
+    const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as {
+      message?: string;
+      sessionKey?: string;
+      inputProvenance?: { kind?: string };
+    };
+    expect(callArgs.message).toContain("Please sync with @frontend_engineer on the UI polish");
+    expect(callArgs.sessionKey).toBe("agent:developer_lead:clawport");
+    expect(callArgs.inputProvenance).toBeUndefined();
   });
 });

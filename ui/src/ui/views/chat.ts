@@ -118,6 +118,8 @@ function adjustTextareaHeight(el: HTMLTextAreaElement) {
   el.style.height = `${el.scrollHeight}px`;
 }
 
+const MENTION_NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Escape", "Enter", "Tab"]);
+
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {
   if (!status) {
     return nothing;
@@ -293,6 +295,7 @@ function renderAttachmentPreview(props: ChatProps) {
 export function renderChat(props: ChatProps) {
   let attachmentInput: HTMLInputElement | null = null;
   let composerInput: HTMLTextAreaElement | null = null;
+  let mentionMenu: HTMLDivElement | null = null;
   const canCompose = props.connected;
   const isBusy = props.sending || props.stream !== null;
   const canAbort = Boolean(props.canAbort && props.onAbort);
@@ -312,6 +315,36 @@ export function renderChat(props: ChatProps) {
     mentionSuggestions.length > 0 &&
     typeof props.mentionRangeStart === "number" &&
     typeof props.mentionRangeEnd === "number";
+  const mentionSelectedIndex = props.mentionSelectedIndex ?? 0;
+  const syncMentionMenuSelectionIntoView = () => {
+    if (!mentionMenuOpen || !mentionMenu) {
+      return;
+    }
+    const previousIndex = Number(mentionMenu.dataset.syncedIndex ?? "-1");
+    if (previousIndex === mentionSelectedIndex) {
+      return;
+    }
+    mentionMenu.dataset.syncedIndex = String(mentionSelectedIndex);
+    requestAnimationFrame(() => {
+      const selected = mentionMenu?.querySelector<HTMLElement>(
+        ".chat-mention-menu__item.is-selected",
+      );
+      if (!mentionMenu || !selected) {
+        return;
+      }
+      const itemTop = selected.offsetTop;
+      const itemBottom = itemTop + selected.offsetHeight;
+      const viewTop = mentionMenu.scrollTop;
+      const viewBottom = viewTop + mentionMenu.clientHeight;
+      if (itemTop < viewTop) {
+        mentionMenu.scrollTop = itemTop - 6;
+        return;
+      }
+      if (itemBottom > viewBottom) {
+        mentionMenu.scrollTop = itemBottom - mentionMenu.clientHeight + 6;
+      }
+    });
+  };
   const composePlaceholder = props.connected
     ? hasAttachments
       ? "Add a message or paste more images..."
@@ -564,9 +597,17 @@ export function renderChat(props: ChatProps) {
             ${
               mentionMenuOpen
                 ? html`
-                  <div class="chat-mention-menu" role="listbox" aria-label="Agent mentions">
+                  <div
+                    ${ref((el) => {
+                      mentionMenu = (el as HTMLDivElement | null) ?? null;
+                      syncMentionMenuSelectionIntoView();
+                    })}
+                    class="chat-mention-menu"
+                    role="listbox"
+                    aria-label="Agent mentions"
+                  >
                     ${mentionSuggestions.map((suggestion, index) => {
-                      const selected = index === (props.mentionSelectedIndex ?? 0);
+                      const selected = index === mentionSelectedIndex;
                       const accent = suggestion.color?.trim();
                       const style = accent ? `--chat-mention-accent: ${accent};` : nothing;
                       return html`
@@ -586,13 +627,15 @@ export function renderChat(props: ChatProps) {
                           </span>
                           <span class="chat-mention-menu__meta">
                             <span class="chat-mention-menu__name">${suggestion.name}</span>
-                            <span class="chat-mention-menu__mention">${suggestion.mention}</span>
+                            <span class="chat-mention-menu__details">
+                              <span class="chat-mention-menu__mention">${suggestion.mention}</span>
+                              ${
+                                suggestion.title
+                                  ? html`<span class="chat-mention-menu__title">${suggestion.title}</span>`
+                                  : nothing
+                              }
+                            </span>
                           </span>
-                          ${
-                            suggestion.title
-                              ? html`<span class="chat-mention-menu__title">${suggestion.title}</span>`
-                              : nothing
-                          }
                         </button>
                       `;
                     })}
@@ -615,16 +658,16 @@ export function renderChat(props: ChatProps) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();
                     props.onMentionHighlight?.(
-                      ((props.mentionSelectedIndex ?? 0) + 1) % mentionSuggestions.length,
+                      Math.min(
+                        (props.mentionSelectedIndex ?? 0) + 1,
+                        mentionSuggestions.length - 1,
+                      ),
                     );
                     return;
                   }
                   if (e.key === "ArrowUp") {
                     e.preventDefault();
-                    props.onMentionHighlight?.(
-                      ((props.mentionSelectedIndex ?? 0) - 1 + mentionSuggestions.length) %
-                        mentionSuggestions.length,
-                    );
+                    props.onMentionHighlight?.(Math.max((props.mentionSelectedIndex ?? 0) - 1, 0));
                     return;
                   }
                   if (e.key === "Escape") {
@@ -665,6 +708,10 @@ export function renderChat(props: ChatProps) {
                 props.onDraftChange(target.value, target.selectionStart, target.selectionEnd);
               }}
               @keyup=${(e: Event) => {
+                const key = (e as KeyboardEvent).key;
+                if (mentionMenuOpen && MENTION_NAVIGATION_KEYS.has(key)) {
+                  return;
+                }
                 const target = e.target as HTMLTextAreaElement;
                 props.onDraftChange(target.value, target.selectionStart, target.selectionEnd);
               }}

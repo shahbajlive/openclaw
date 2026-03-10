@@ -222,7 +222,13 @@ describe("buildAgentSystemPrompt", () => {
       "Default behavior: reply in this current session so the sender receives your response through the existing A2A path.",
     );
     expect(prompt).toContain(
-      "If you need to contact a different teammate directly, start a normal message with that teammate's alias.",
+      "If you need to contact a different teammate directly, put one or more teammate aliases at the very start of a normal message.",
+    );
+    expect(prompt).toContain(
+      "Only a leading alias block routes teammate messages. Aliases in the middle or end of a sentence do not route.",
+    );
+    expect(prompt).toContain(
+      "Any leading teammate aliases are removed before the routed message is delivered.",
     );
     expect(prompt).toContain(
       "Example teammate handoff: @frontend_ui can you take the UI pass on this?",

@@ -179,15 +179,12 @@ export function renderApp(state: AppViewState) {
     state.chatMessage = next;
     const previousQuery = state.chatMentionQuery;
     const previousStart = state.chatMentionStart;
-    const previousEnd = state.chatMentionEnd;
     const mention = findDraftMentionAtSelection(next, selectionStart, selectionEnd);
     state.chatMentionQuery = mention?.query ?? null;
     state.chatMentionStart = mention?.start ?? null;
     state.chatMentionEnd = mention?.end ?? null;
     const mentionChanged =
-      previousQuery !== state.chatMentionQuery ||
-      previousStart !== state.chatMentionStart ||
-      previousEnd !== state.chatMentionEnd;
+      previousQuery !== state.chatMentionQuery || previousStart !== state.chatMentionStart;
     if (mentionChanged) {
       state.chatMentionSelectedIndex = 0;
     }

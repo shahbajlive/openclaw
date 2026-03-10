@@ -95,7 +95,10 @@ export function normalizeAgentAlias(value: string | undefined | null): string | 
 }
 
 export function buildAgentMention(agentId: string, alias?: string | null): string {
-  const token = normalizeAgentAlias(alias) ?? normalizeAgentId(agentId).replaceAll("-", "_");
+  const token =
+    normalizeAgentAlias(alias) ??
+    normalizeAgentAlias(agentId) ??
+    normalizeAgentId(agentId).replaceAll("-", "_");
   return `@${token}`;
 }
 

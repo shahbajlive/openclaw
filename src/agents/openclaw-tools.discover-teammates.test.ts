@@ -182,8 +182,11 @@ Owns UI implementation and review quality.
         (entry) => entry.id === "frontend_engineer",
       )?.brief,
     ).toBe("Owns UI implementation and review quality.");
+    expect(readText(result)).toContain("You are Backend Engineer.");
     expect(readText(result)).toContain("Whom to report:");
     expect(readText(result)).toContain("Siblings:");
+    expect(readText(result)).toContain("Frontend Engineer (@ui_review)");
+    expect(readText(result)).not.toContain("@frontend_engineer");
   });
 
   it("shows direct reports for non-leaf agents", async () => {

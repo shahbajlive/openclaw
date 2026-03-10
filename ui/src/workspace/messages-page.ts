@@ -78,15 +78,6 @@ function agentMention(agent: WorkspaceAgentRow | null | undefined): string | nul
   return agentId ? `@${agentId}` : null;
 }
 
-function formatAgentDisplayLabel(
-  agent: WorkspaceAgentRow | null | undefined,
-  fallback: string,
-): string {
-  const name = agent?.name?.trim() || fallback;
-  const mention = agentMention(agent);
-  return mention ? `${name} · ${mention}` : name;
-}
-
 export function selectWorkspaceMessagesAgent(state: AppViewState, agent: WorkspaceAgentRow) {
   state.workspaceSelectedAgentId = agent.id;
   const sessionKey = `agent:${agent.id}:clawport`;
@@ -299,10 +290,8 @@ export function renderWorkspaceMessagesThread(
     error: state.lastError,
     sessions: state.sessionsResult,
     focusMode: false,
-    assistantName: formatAgentDisplayLabel(
-      selectedAgent,
-      selectedAgent?.name || state.assistantName || "Assistant",
-    ),
+    assistantName: selectedAgent?.name?.trim() || state.assistantName || "Assistant",
+    assistantLabelTooltip: agentMention(selectedAgent),
     assistantAvatar: selectedAgent?.emoji || state.assistantAvatar || null,
     assistantAccent: normalizeAgentAccent(selectedAgent) ?? null,
     agentDirectory: state.workspaceAgentsList?.agents ?? [],
@@ -369,15 +358,11 @@ export function renderWorkspaceMessagesThread(
             }
           >${selectedAgent ? agentEmoji(selectedAgent) : "🤖"}</div>
           <div>
-            <div class="workspace-msg-thread__name">${selectedAgent?.name || "Select an agent"}</div>
+            <div class="workspace-msg-thread__name" title=${agentMention(selectedAgent) || nothing}>
+              ${selectedAgent?.name || "Select an agent"}
+            </div>
             <div class="workspace-msg-thread__title">
-              ${
-                selectedAgent
-                  ? [agentMention(selectedAgent), agentTitle(selectedAgent)]
-                      .filter(Boolean)
-                      .join(" · ")
-                  : "Workspace agent"
-              }
+              ${selectedAgent ? agentTitle(selectedAgent) : "Workspace agent"}
             </div>
           </div>
         </button>

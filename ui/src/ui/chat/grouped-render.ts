@@ -115,6 +115,7 @@ export function renderStreamingGroup(
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
   assistant?: AssistantIdentity,
+  assistantLabelTooltip?: string | null,
   assistantAccent?: string | null,
   agentDirectory?: WorkspaceAgentRow[],
 ) {
@@ -141,7 +142,7 @@ export function renderStreamingGroup(
           agentDirectory,
         )}
         <div class="chat-group-footer">
-          <span class="chat-sender-name">${name}</span>
+          <span class="chat-sender-name" title=${assistantLabelTooltip || nothing}>${name}</span>
           <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
         </div>
       </div>
@@ -156,6 +157,7 @@ export function renderMessageGroup(
     showReasoning: boolean;
     showToolOutput: boolean;
     assistantName?: string;
+    assistantLabelTooltip?: string | null;
     assistantAvatar?: string | null;
     assistantAccent?: string | null;
     agentDirectory?: WorkspaceAgentRow[];
@@ -175,6 +177,10 @@ export function renderMessageGroup(
   const isPeer = normalizedRole === "peer";
   const groupClasses = ["chat-group", roleClass, isPeer ? "is-peer" : ""].filter(Boolean).join(" ");
   const groupStyle = group.speakerAccent ? `--chat-peer-accent: ${group.speakerAccent};` : nothing;
+  const senderTitle =
+    identityRole === "assistant" && !group.speakerLabel
+      ? (opts.assistantLabelTooltip ?? null)
+      : null;
 
   return html`
     <div class=${groupClasses} style=${groupStyle}>
@@ -203,7 +209,7 @@ export function renderMessageGroup(
           ),
         )}
         <div class="chat-group-footer">
-          <span class="chat-sender-name">${who}</span>
+          <span class="chat-sender-name" title=${senderTitle || nothing}>${who}</span>
           <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
         </div>
       </div>

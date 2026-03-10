@@ -128,7 +128,7 @@ describe("workspace messages thread", () => {
     expect(container.querySelector(".workspace-msg-thread__icon-btn.is-active")).not.toBeNull();
   });
 
-  it("shows the selected agent id in the header and assistant label", () => {
+  it("shows the selected agent name and keeps the agent id in hover text", () => {
     const container = document.createElement("div");
     const state = createState();
     state.chatMessages = [
@@ -142,10 +142,19 @@ describe("workspace messages thread", () => {
 
     render(renderWorkspaceMessagesThread(state, selectedAgent), container);
 
-    expect(container.querySelector(".workspace-msg-thread__title")?.textContent).toContain(
+    expect(container.querySelector(".workspace-msg-thread__name")?.textContent).toContain(
+      "Developer Lead",
+    );
+    expect(container.querySelector(".workspace-msg-thread__title")?.textContent).toContain("Lead");
+    expect(container.querySelector(".workspace-msg-thread__title")?.textContent).not.toContain("@");
+    expect(container.querySelector(".chat-sender-name")?.textContent).toContain("Developer Lead");
+    expect(container.querySelector(".chat-sender-name")?.textContent).not.toContain("@");
+    expect(container.querySelector(".workspace-msg-thread__name")?.getAttribute("title")).toBe(
       "@developer_lead",
     );
-    expect(container.querySelector(".chat-sender-name")?.textContent).toContain("@developer_lead");
+    expect(container.querySelector(".chat-sender-name")?.getAttribute("title")).toBe(
+      "@developer_lead",
+    );
   });
 
   it("toggles the workspace conversations sidebar state", () => {

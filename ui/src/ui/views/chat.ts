@@ -72,6 +72,7 @@ export type ChatProps = {
   sidebarError?: string | null;
   splitRatio?: number;
   assistantName: string;
+  assistantLabelTooltip?: string | null;
   assistantAvatar: string | null;
   assistantAccent?: string | null;
   agentDirectory?: WorkspaceAgentRow[];
@@ -387,6 +388,7 @@ export function renderChat(props: ChatProps) {
               item.startedAt,
               props.onOpenSidebar,
               assistantIdentity,
+              props.assistantLabelTooltip ?? null,
               props.assistantAccent,
               props.agentDirectory,
             );
@@ -398,6 +400,7 @@ export function renderChat(props: ChatProps) {
               showReasoning,
               showToolOutput: props.shouldEmitToolOutput,
               assistantName: props.assistantName,
+              assistantLabelTooltip: props.assistantLabelTooltip ?? null,
               assistantAvatar: assistantIdentity.avatar,
               assistantAccent: props.assistantAccent,
               agentDirectory: props.agentDirectory,

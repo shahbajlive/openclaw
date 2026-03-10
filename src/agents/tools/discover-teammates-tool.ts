@@ -1,4 +1,3 @@
-import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { loadConfig, type OpenClawConfig } from "../../config/config.js";
 import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
@@ -16,7 +15,6 @@ function buildText(params: {
   guidance: string;
   missingParentId?: string | null;
   missingChildIds?: string[];
-  registryPath: string;
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -24,9 +22,7 @@ function buildText(params: {
   );
   if (!params.reportsTo) {
     if (params.missingParentId) {
-      lines.push(
-        `Configured parent ${params.missingParentId} was not found in ${params.registryPath}.`,
-      );
+      lines.push(`Configured parent ${params.missingParentId} was not found in agents.list.`);
     } else {
       lines.push("No parent is configured, so parent-and-siblings discovery is unavailable.");
     }
@@ -94,12 +90,11 @@ export function createDiscoverTeammatesTool(opts: {
           workspaceDir: opts.workspaceDir,
         });
         if (details.error === "requester_not_found") {
-          const text = `No teammate registry entry was found for ${requesterAgentId} in ${details.registryPath}.`;
+          const text = `No configured teammate entry was found for ${requesterAgentId} in agents.list.`;
           return {
             content: [{ type: "text", text }],
             details: {
               requester: requesterAgentId,
-              registryPath: details.registryPath,
               error: "requester_not_found",
             },
           };
@@ -119,7 +114,6 @@ export function createDiscoverTeammatesTool(opts: {
           guidance,
           missingChildIds: details.missingChildIds,
           missingParentId: details.missingParentId,
-          registryPath: details.registryPath,
         });
         return {
           content: [{ type: "text", text }],
@@ -127,18 +121,16 @@ export function createDiscoverTeammatesTool(opts: {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const registryPath = path.join(opts.workspaceDir, "clawport", "agents.json");
         return {
           content: [
             {
               type: "text",
-              text: `Could not load teammate registry from ${registryPath}: ${message}`,
+              text: `Could not resolve teammates from agents.list: ${message}`,
             },
           ],
           details: {
             requester: requesterAgentId,
-            registryPath,
-            error: "registry_unavailable",
+            error: "discovery_unavailable",
             message,
           },
         };

@@ -7,6 +7,16 @@ import {
   normalizeToolList,
   resolveToolProfilePolicy,
 } from "../../agents/tool-policy-shared.js";
+import {
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_HEARTBEAT_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+  DEFAULT_MEMORY_ALT_FILENAME,
+  DEFAULT_MEMORY_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  DEFAULT_TOOLS_FILENAME,
+  DEFAULT_USER_FILENAME,
+} from "../../agents/workspace.js";
 import { type OpenClawConfig, loadConfig } from "../../config/config.js";
 import { readFileWithinRoot, SafeOpenError } from "../../infra/fs-safe.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
@@ -20,7 +30,6 @@ type WorkspaceRegistryAgent = {
   title?: string | null;
   reportsTo?: string | null;
   directReports?: string[];
-  soulPath?: string | null;
   color?: string | null;
   emoji?: string | null;
   tools?: string[];
@@ -30,7 +39,6 @@ type WorkspaceRegistryAgent = {
 
 type WorkspaceRegistryResult = {
   workspaceDir: string;
-  registryPath: string | null;
   defaultId: string;
   agents: WorkspaceRegistryAgent[];
 };
@@ -154,51 +162,6 @@ function assignClawPortColors(agents: WorkspaceRegistryAgent[]): Map<string, str
   return colors;
 }
 
-function childWorkspaceSegment(agentId: string, parentId: string | null): string {
-  if (!parentId) {
-    return agentId;
-  }
-  const prefix = `${parentId}-`;
-  return agentId.startsWith(prefix) ? agentId.slice(prefix.length) : agentId;
-}
-
-function buildSoulPaths(agents: WorkspaceRegistryAgent[]): Map<string, string> {
-  const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  const cache = new Map<string, string>();
-
-  const resolve = (agentId: string): string => {
-    const cached = cache.get(agentId);
-    if (cached) {
-      return cached;
-    }
-    const agent = byId.get(agentId);
-    if (!agent) {
-      return "SOUL.md";
-    }
-    const parentId = agent.reportsTo ?? null;
-    const relative = childWorkspaceSegment(agent.id, parentId);
-    let soulPath: string;
-    if (parentId && byId.has(parentId)) {
-      const parentDir = path.posix.dirname(resolve(parentId));
-      soulPath =
-        parentDir === "."
-          ? path.posix.join("agents", relative, "SOUL.md")
-          : path.posix.join(parentDir, relative, "SOUL.md");
-    } else if (parentId === null) {
-      soulPath = "SOUL.md";
-    } else {
-      soulPath = path.posix.join("agents", relative, "SOUL.md");
-    }
-    cache.set(agentId, soulPath);
-    return soulPath;
-  };
-
-  for (const agent of agents) {
-    resolve(agent.id);
-  }
-  return cache;
-}
-
 function truncateSentence(text: string, max = 120): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= max) {
@@ -251,12 +214,11 @@ function parseSoulMetadata(markdown: string): SoulMetadata {
 
 async function readSoulMetadata(agent: WorkspaceRegistryAgent): Promise<SoulMetadata | null> {
   const workspaceDir = agent.workspaceDir?.trim();
-  const soulPath = agent.soulPath?.trim();
-  if (!workspaceDir || !soulPath) {
+  if (!workspaceDir) {
     return null;
   }
   try {
-    const content = await fs.readFile(path.resolve(workspaceDir, soulPath), "utf8");
+    const content = await fs.readFile(path.resolve(workspaceDir, DEFAULT_SOUL_FILENAME), "utf8");
     return parseSoulMetadata(content);
   } catch {
     return null;
@@ -312,12 +274,6 @@ function buildWorkspaceAgentsFromOpenClaw() {
     }
     toolsByAgentId.set(normalizeAgentId(id), entry.tools);
   }
-  const soulPaths = buildSoulPaths(
-    gatewayAgents.agents.map((entry) => ({
-      id: entry.id,
-      reportsTo: entry.reportsTo ?? null,
-    })),
-  );
   const agents: WorkspaceRegistryAgent[] = gatewayAgents.agents.map((entry) => {
     const workspaceDir = resolveAgentWorkspaceDir(cfg, entry.id);
     const displayName = entry.name?.trim() || entry.identity?.name?.trim() || entry.id;
@@ -327,7 +283,6 @@ function buildWorkspaceAgentsFromOpenClaw() {
       title: entry.identity?.theme?.trim() || null,
       reportsTo: entry.reportsTo ?? null,
       directReports: entry.directReports ?? [],
-      soulPath: soulPaths.get(entry.id) ?? "SOUL.md",
       color: entry.identity?.color?.trim() || null,
       emoji: entry.identity?.emoji?.trim() || null,
       tools: resolveWorkspaceAgentTools(cfg, toolsByAgentId.get(entry.id)),
@@ -367,7 +322,6 @@ async function loadWorkspaceRegistry(): Promise<WorkspaceRegistryResult> {
   );
   return {
     workspaceDir,
-    registryPath: null,
     defaultId,
     agents:
       enrichedAgents.length > 0
@@ -419,22 +373,16 @@ async function listWorkspaceFilesForAgent(
   if (!workspaceDir) {
     return [];
   }
-  const candidates: Array<{ label: string; relativePath: string }> = [];
-  const soulPath = agent.soulPath?.trim();
-  if (soulPath) {
-    candidates.push({ label: "SOUL.md", relativePath: soulPath });
-    const dir = path.posix.dirname(soulPath);
-    if (dir && dir !== ".") {
-      for (const name of ["TOOLS.md", "USER.md", "MEMORY.md", "memory.md", "IDENTITY.md"]) {
-        candidates.push({ label: name, relativePath: path.posix.join(dir, name) });
-      }
-    }
-  }
-  if (agent.reportsTo == null) {
-    for (const name of ["IDENTITY.md", "MEMORY.md", "memory.md", "TOOLS.md", "USER.md"]) {
-      candidates.push({ label: name, relativePath: name });
-    }
-  }
+  const candidates: Array<{ label: string; relativePath: string }> = [
+    { label: DEFAULT_AGENTS_FILENAME, relativePath: DEFAULT_AGENTS_FILENAME },
+    { label: DEFAULT_SOUL_FILENAME, relativePath: DEFAULT_SOUL_FILENAME },
+    { label: DEFAULT_TOOLS_FILENAME, relativePath: DEFAULT_TOOLS_FILENAME },
+    { label: DEFAULT_IDENTITY_FILENAME, relativePath: DEFAULT_IDENTITY_FILENAME },
+    { label: DEFAULT_USER_FILENAME, relativePath: DEFAULT_USER_FILENAME },
+    { label: DEFAULT_HEARTBEAT_FILENAME, relativePath: DEFAULT_HEARTBEAT_FILENAME },
+    { label: DEFAULT_MEMORY_FILENAME, relativePath: DEFAULT_MEMORY_FILENAME },
+    { label: DEFAULT_MEMORY_ALT_FILENAME, relativePath: DEFAULT_MEMORY_ALT_FILENAME },
+  ];
 
   const entries: WorkspaceFileEntry[] = [];
   for (const candidate of uniqueById(

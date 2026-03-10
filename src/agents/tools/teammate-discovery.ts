@@ -1,22 +1,31 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { listCoreToolSections } from "../../agents/tool-catalog.js";
+import {
+  expandToolGroups,
+  normalizeToolList,
+  resolveToolProfilePolicy,
+} from "../../agents/tool-policy-shared.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { listAgentsForGateway } from "../../gateway/session-utils.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { resolveAgentConfig, resolveAgentWorkspaceDir } from "../agent-scope.js";
-import { resolveDefaultAgentWorkspaceDir } from "../workspace.js";
+import { DEFAULT_SOUL_FILENAME } from "../workspace.js";
 
 export const TEAMMATE_AGENT_TO_AGENT_ALLOW = "@teammates";
 const VALID_AGENT_ALIAS_RE = /^@?[a-z0-9_]{1,64}$/i;
+const CORE_TOOL_IDS = listCoreToolSections()
+  .flatMap((section) => section.tools.map((tool) => tool.id))
+  .toSorted((a, b) => a.localeCompare(b));
 
-type RegistryAgent = {
+type TeammateAgent = {
   id: string;
-  name?: string;
+  name: string;
   title?: string;
-  description?: string;
-  soulPath?: string;
   reportsTo?: string | null;
   directReports?: string[];
-  tools?: string[];
+  tools: string[];
+  workspaceDir: string;
 };
 
 export type TeammateEntry = {
@@ -45,21 +54,9 @@ export type DiscoverTeammatesData = {
   directReports: RelatedAgentSummary[];
   canDirectMessage: boolean;
   missingChildIds: string[];
-  registryPath: string;
   error?: "requester_not_found" | "parent_not_found";
   missingParentId?: string;
 };
-
-function normalizeOptionalAgentId(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return normalizeAgentId(trimmed);
-}
 
 function normalizeDirectReports(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -85,52 +82,6 @@ function normalizeDirectReports(value: unknown): string[] {
   return ids;
 }
 
-function normalizeTools(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const tools: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "string") {
-      continue;
-    }
-    const trimmed = entry.trim();
-    if (trimmed) {
-      tools.push(trimmed);
-    }
-  }
-  return tools;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
-function normalizeRegistryEntry(value: unknown): RegistryAgent | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const id = normalizeOptionalAgentId(raw.id);
-  if (!id) {
-    return null;
-  }
-  return {
-    id,
-    name: normalizeOptionalString(raw.name),
-    title: normalizeOptionalString(raw.title),
-    description: normalizeOptionalString(raw.description),
-    soulPath: normalizeOptionalString(raw.soulPath),
-    reportsTo: normalizeOptionalAgentId(raw.reportsTo),
-    directReports: normalizeDirectReports(raw.directReports),
-    tools: normalizeTools(raw.tools),
-  };
-}
-
 export function buildAgentSessionKey(agentId: string): string {
   return `agent:${normalizeAgentId(agentId)}:clawport`;
 }
@@ -153,18 +104,6 @@ export function normalizeAgentMention(value: string | undefined | null): string 
   return normalized ? `@${normalized}` : null;
 }
 
-export function displayName(agent: Pick<RegistryAgent, "id" | "name" | "title">): string {
-  const name = typeof agent.name === "string" ? agent.name.trim() : "";
-  if (name) {
-    return name;
-  }
-  const title = typeof agent.title === "string" ? agent.title.trim() : "";
-  if (title) {
-    return title;
-  }
-  return agent.id;
-}
-
 function resolveMentionAlias(
   config: OpenClawConfig | undefined,
   agentId: string,
@@ -172,57 +111,61 @@ function resolveMentionAlias(
   return normalizeAgentAlias(resolveAgentConfig(config ?? {}, agentId)?.alias) ?? undefined;
 }
 
-async function loadRegistry(workspaceDir: string): Promise<{
-  registryPath: string;
-  agents: RegistryAgent[];
-}> {
-  const registryPath = path.join(workspaceDir, "clawport", "agents.json");
-  const raw = await fs.readFile(registryPath, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
-  const source = Array.isArray(parsed)
-    ? parsed
-    : parsed &&
-        typeof parsed === "object" &&
-        Array.isArray((parsed as { agents?: unknown[] }).agents)
-      ? (parsed as { agents: unknown[] }).agents
-      : [];
-  const agents = source
-    .map((entry) => normalizeRegistryEntry(entry))
-    .filter(Boolean) as RegistryAgent[];
-  return { registryPath, agents };
+function resolveConfiguredAgentTools(cfg: OpenClawConfig, agentId: string): string[] {
+  const toolConfig = (resolveAgentConfig(cfg, agentId)?.tools ?? {}) as {
+    profile?: string;
+    allow?: string[];
+    alsoAllow?: string[];
+    deny?: string[];
+  };
+  const globalToolConfig = (cfg.tools ?? {}) as {
+    profile?: string;
+    allow?: string[];
+    alsoAllow?: string[];
+    deny?: string[];
+  };
+  const profile = toolConfig.profile ?? globalToolConfig.profile;
+  const profilePolicy = resolveToolProfilePolicy(profile);
+  const allowInputs = [
+    ...(profilePolicy?.allow ?? []),
+    ...(globalToolConfig.allow ?? []),
+    ...(globalToolConfig.alsoAllow ?? []),
+    ...(toolConfig.allow ?? []),
+    ...(toolConfig.alsoAllow ?? []),
+  ];
+  const hasExplicitAllow = allowInputs.length > 0;
+  const allowed = hasExplicitAllow
+    ? expandToolGroups(normalizeToolList(allowInputs))
+    : [...CORE_TOOL_IDS];
+  const denySet = new Set(
+    expandToolGroups(
+      normalizeToolList([
+        ...(profilePolicy?.deny ?? []),
+        ...(globalToolConfig.deny ?? []),
+        ...(toolConfig.deny ?? []),
+      ]),
+    ),
+  );
+  return allowed.filter((tool) => !denySet.has(tool)).toSorted((a, b) => a.localeCompare(b));
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
+function buildTeammateAgents(cfg: OpenClawConfig): TeammateAgent[] {
+  const gatewayAgents = listAgentsForGateway(cfg);
+  return gatewayAgents.agents.map((entry) => {
+    return {
+      id: entry.id,
+      name: entry.name?.trim() || entry.identity?.name?.trim() || entry.id,
+      title: entry.identity?.theme?.trim() || undefined,
+      reportsTo: entry.reportsTo ?? null,
+      directReports: normalizeDirectReports(entry.directReports),
+      tools: resolveConfiguredAgentTools(cfg, entry.id),
+      workspaceDir: resolveAgentWorkspaceDir(cfg, entry.id),
+    };
+  });
 }
 
-export async function resolveRegistryWorkspaceDir(params: {
-  config?: OpenClawConfig;
-  requesterAgentId: string;
-  workspaceDir: string;
-}): Promise<string> {
-  if (params.config) {
-    const agentWorkspaceDir = resolveAgentWorkspaceDir(params.config, params.requesterAgentId);
-    const agentRegistryPath = path.join(agentWorkspaceDir, "clawport", "agents.json");
-    if (await pathExists(agentRegistryPath)) {
-      return agentWorkspaceDir;
-    }
-  }
-  const defaultWorkspaceDir = resolveDefaultAgentWorkspaceDir(process.env);
-  const defaultRegistryPath = path.join(defaultWorkspaceDir, "clawport", "agents.json");
-  if (await pathExists(defaultRegistryPath)) {
-    return defaultWorkspaceDir;
-  }
-  return params.workspaceDir;
-}
-
-function hasMessageAccess(agent: RegistryAgent | null | undefined): boolean {
-  return (agent?.tools ?? []).some((tool) => tool.trim().toLowerCase() === "message");
+function hasMessageAccess(agent: TeammateAgent | null | undefined): boolean {
+  return agent?.tools.includes("message") ?? false;
 }
 
 function extractSoulBrief(raw: string): string | undefined {
@@ -274,48 +217,34 @@ function extractSoulBrief(raw: string): string | undefined {
 }
 
 async function resolveAgentBrief(
-  agent: RegistryAgent,
-  workspaceDir: string,
+  agent: TeammateAgent,
   soulCache: Map<string, string | null>,
 ): Promise<string | undefined> {
-  if (agent.description) {
-    return agent.description;
-  }
-  if (agent.soulPath) {
-    if (!soulCache.has(agent.soulPath)) {
-      const fullPath = path.join(workspaceDir, agent.soulPath);
-      try {
-        const raw = await fs.readFile(fullPath, "utf8");
-        soulCache.set(agent.soulPath, extractSoulBrief(raw) ?? null);
-      } catch {
-        soulCache.set(agent.soulPath, null);
-      }
-    }
-    const soulBrief = soulCache.get(agent.soulPath);
-    if (soulBrief) {
-      return soulBrief;
+  const soulPath = path.join(agent.workspaceDir, DEFAULT_SOUL_FILENAME);
+  if (!soulCache.has(soulPath)) {
+    try {
+      const raw = await fs.readFile(soulPath, "utf8");
+      soulCache.set(soulPath, extractSoulBrief(raw) ?? null);
+    } catch {
+      soulCache.set(soulPath, null);
     }
   }
-  return agent.title;
+  return soulCache.get(soulPath) ?? agent.title;
 }
 
 export async function discoverTeammatesForAgent(params: {
   config?: OpenClawConfig;
   requesterAgentId: string;
-  workspaceDir: string;
+  workspaceDir?: string;
 }): Promise<DiscoverTeammatesData> {
   const requesterAgentId = normalizeAgentId(params.requesterAgentId);
-  const registryWorkspaceDir = await resolveRegistryWorkspaceDir({
-    config: params.config,
-    requesterAgentId,
-    workspaceDir: params.workspaceDir,
-  });
-  const { registryPath, agents } = await loadRegistry(registryWorkspaceDir);
-  const byId = new Map<string, RegistryAgent>(agents.map((agent) => [agent.id, agent]));
+  const cfg = params.config ?? {};
+  const agents = buildTeammateAgents(cfg);
+  const byId = new Map<string, TeammateAgent>(agents.map((agent) => [agent.id, agent]));
   const requester = byId.get(requesterAgentId);
   const requesterSummary: RelatedAgentSummary = {
     id: requesterAgentId,
-    name: requester ? displayName(requester) : requesterAgentId,
+    name: requester?.name ?? requesterAgentId,
     mention: buildAgentMention(
       requesterAgentId,
       resolveMentionAlias(params.config, requesterAgentId),
@@ -332,7 +261,6 @@ export async function discoverTeammatesForAgent(params: {
       directReports: [],
       canDirectMessage: false,
       missingChildIds: [],
-      registryPath,
       error: "requester_not_found",
     };
   }
@@ -350,7 +278,6 @@ export async function discoverTeammatesForAgent(params: {
       directReports: [],
       canDirectMessage,
       missingChildIds: [],
-      registryPath,
     };
   }
 
@@ -366,7 +293,6 @@ export async function discoverTeammatesForAgent(params: {
       directReports: [],
       canDirectMessage,
       missingChildIds: [],
-      registryPath,
       error: "parent_not_found",
       missingParentId: parentId,
     };
@@ -375,7 +301,7 @@ export async function discoverTeammatesForAgent(params: {
   const missingChildIds: string[] = [];
   const teammates: TeammateEntry[] = [];
   const soulCache = new Map<string, string | null>();
-  const parentBrief = await resolveAgentBrief(parent, registryWorkspaceDir, soulCache);
+  const parentBrief = await resolveAgentBrief(parent, soulCache);
   const requesterHasReports = (requester.directReports?.length ?? 0) > 0;
   const targetIds = requesterHasReports
     ? (requester.directReports ?? [])
@@ -387,10 +313,10 @@ export async function discoverTeammatesForAgent(params: {
       missingChildIds.push(targetId);
       continue;
     }
-    const brief = await resolveAgentBrief(target, registryWorkspaceDir, soulCache);
+    const brief = await resolveAgentBrief(target, soulCache);
     teammates.push({
       id: target.id,
-      name: displayName(target),
+      name: target.name,
       mention: buildAgentMention(target.id, resolveMentionAlias(params.config, target.id)),
       title: target.title,
       brief,
@@ -416,7 +342,7 @@ export async function discoverTeammatesForAgent(params: {
     }));
   const reportsTo: RelatedAgentSummary = {
     id: parent.id,
-    name: displayName(parent),
+    name: parent.name,
     mention: buildAgentMention(parent.id, resolveMentionAlias(params.config, parent.id)),
     brief: parentBrief,
   };
@@ -424,7 +350,7 @@ export async function discoverTeammatesForAgent(params: {
   return {
     requester: {
       id: requester.id,
-      name: displayName(requester),
+      name: requester.name,
       mention: buildAgentMention(requester.id, resolveMentionAlias(params.config, requester.id)),
     },
     reportsTo,
@@ -435,7 +361,6 @@ export async function discoverTeammatesForAgent(params: {
     directReports,
     canDirectMessage,
     missingChildIds,
-    registryPath,
   };
 }
 

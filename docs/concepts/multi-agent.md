@@ -213,6 +213,7 @@ Common channels supporting this pattern include:
 - `accountId`: one channel account instance (e.g. WhatsApp account `"personal"` vs `"biz"`).
 - `binding`: routes inbound messages to an `agentId` by `(channel, accountId, peer)` and optionally guild/team ids.
 - Direct chats collapse to `agent:<agentId>:<mainKey>` (per-agent “main”; `session.mainKey`).
+- Team hierarchy lives in `agents.list` via `reportsTo` (with `directReports` exposed as convenience/output data).
 
 ## Platform examples
 

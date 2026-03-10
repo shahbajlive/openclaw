@@ -153,14 +153,13 @@ export async function resolveTeammateAllowTargetIds(params: {
   policy?: AgentToAgentPolicy;
 }): Promise<Set<string>> {
   const policy = params.policy ?? createAgentToAgentPolicy(params.cfg);
-  if (!policy.enabled || !policy.usesTeammatesAllow || !params.workspaceDir?.trim()) {
+  if (!policy.enabled || !policy.usesTeammatesAllow) {
     return new Set<string>();
   }
   try {
     const discovery = await discoverTeammatesForAgent({
       config: params.cfg,
       requesterAgentId: params.requesterAgentId,
-      workspaceDir: params.workspaceDir,
     });
     return deriveHierarchyPeerAgentIds(discovery);
   } catch {

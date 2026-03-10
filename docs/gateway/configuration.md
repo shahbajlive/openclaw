@@ -343,6 +343,10 @@ When validation fails:
     - **Relative paths**: resolved relative to the including file
     - **Error handling**: clear errors for missing files, parse errors, and circular includes
 
+    `agents.json5` here is just a config include filename. It is unrelated to
+    any workspace-local teammate registry file; agent hierarchy and identity are
+    resolved from `agents.list` plus each agent workspace root.
+
   </Accordion>
 </AccordionGroup>
 

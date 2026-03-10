@@ -15,15 +15,9 @@ import {
 
 const tempDirs: string[] = [];
 
-async function createWorkspaceRegistry(entries: unknown[]): Promise<string> {
+async function createWorkspace(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-access-"));
   tempDirs.push(dir);
-  await fs.mkdir(path.join(dir, "clawport"), { recursive: true });
-  await fs.writeFile(
-    path.join(dir, "clawport", "agents.json"),
-    JSON.stringify(entries, null, 2),
-    "utf8",
-  );
   return dir;
 }
 
@@ -179,34 +173,38 @@ describe("createSessionVisibilityGuard", () => {
   });
 
   it("allows hierarchy-derived teammate access when @teammates is configured", async () => {
-    const workspaceDir = await createWorkspaceRegistry([
-      {
-        id: "main",
-        name: "Main",
-        directReports: ["developer-lead"],
-      },
-      {
-        id: "developer-lead",
-        name: "Developer Lead",
-        reportsTo: "main",
-        directReports: ["developer-lead-backend-engineer", "developer-lead-frontend-engineer"],
-      },
-      {
-        id: "developer-lead-backend-engineer",
-        name: "Backend Engineer",
-        reportsTo: "developer-lead",
-      },
-      {
-        id: "developer-lead-frontend-engineer",
-        name: "Frontend Engineer",
-        reportsTo: "developer-lead",
-      },
-      {
-        id: "ops-lead",
-        name: "Ops Lead",
-      },
-    ]);
+    const workspaceDir = await createWorkspace();
     const cfg = {
+      agents: {
+        list: [
+          {
+            id: "main",
+            default: true,
+            workspace: path.join(workspaceDir, "main"),
+            directReports: ["developer-lead"],
+          },
+          {
+            id: "developer-lead",
+            workspace: path.join(workspaceDir, "developer-lead"),
+            reportsTo: "main",
+            directReports: ["developer-lead-backend-engineer", "developer-lead-frontend-engineer"],
+          },
+          {
+            id: "developer-lead-backend-engineer",
+            workspace: path.join(workspaceDir, "developer-lead-backend-engineer"),
+            reportsTo: "developer-lead",
+          },
+          {
+            id: "developer-lead-frontend-engineer",
+            workspace: path.join(workspaceDir, "developer-lead-frontend-engineer"),
+            reportsTo: "developer-lead",
+          },
+          {
+            id: "ops-lead",
+            workspace: path.join(workspaceDir, "ops-lead"),
+          },
+        ],
+      },
       tools: {
         agentToAgent: {
           enabled: true,

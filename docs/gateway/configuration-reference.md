@@ -1304,6 +1304,9 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 
 - `id`: stable agent id (required).
 - `default`: when multiple are set, first wins (warning logged). If none set, first list entry is default.
+- `workspace`: the agent's workspace root. Put identity/bootstrap files like `SOUL.md` and `IDENTITY.md` at this root so new sessions and resets keep the same persona.
+- `reportsTo`: optional parent agent id for hierarchy-aware tools and UIs.
+- `directReports`: optional convenience list. OpenClaw derives effective child relationships from the `reportsTo` graph at runtime.
 - `model`: string form overrides `primary` only; object form `{ primary, fallbacks }` overrides both (`[]` disables global fallbacks). Cron jobs that only override `primary` still inherit default fallbacks unless you set `fallbacks: []`.
 - `params`: per-agent stream params merged over the selected model entry in `agents.defaults.models`. Use this for agent-specific overrides like `cacheRetention`, `temperature`, or `maxTokens` without duplicating the whole model catalog.
 - `runtime`: optional per-agent runtime descriptor. Use `type: "acp"` with `runtime.acp` defaults (`agent`, `backend`, `mode`, `cwd`) when the agent should default to ACP harness sessions.

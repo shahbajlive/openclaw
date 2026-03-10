@@ -97,4 +97,19 @@ describe("clearBootstrapSnapshot", () => {
     await getOrLoadBootstrapFiles({ workspaceDir: "/ws", sessionKey: "sk2" });
     expect(mockLoad).toHaveBeenCalledTimes(2); // sk1 x1, sk2 x1
   });
+
+  it("reloads workspace-root identity files after reset clears the snapshot", async () => {
+    const workspaceOneFiles = [makeFile("SOUL.md", "# Workspace One")];
+    const workspaceTwoFiles = [makeFile("SOUL.md", "# Workspace Two")];
+    mockLoad.mockResolvedValueOnce(workspaceOneFiles).mockResolvedValueOnce(workspaceTwoFiles);
+
+    const first = await getOrLoadBootstrapFiles({ workspaceDir: "/ws-one", sessionKey: "sk" });
+    clearBootstrapSnapshot("sk");
+    const second = await getOrLoadBootstrapFiles({ workspaceDir: "/ws-two", sessionKey: "sk" });
+
+    expect(first).toBe(workspaceOneFiles);
+    expect(second).toBe(workspaceTwoFiles);
+    expect(mockLoad).toHaveBeenNthCalledWith(1, "/ws-one");
+    expect(mockLoad).toHaveBeenNthCalledWith(2, "/ws-two");
+  });
 });

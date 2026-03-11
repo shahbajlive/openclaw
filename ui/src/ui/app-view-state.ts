@@ -65,12 +65,15 @@ export type AppViewState = {
   chatMentionQuery: string | null;
   chatMentionStart: number | null;
   chatMentionEnd: number | null;
+  chatDraftSelectionStart: number | null;
+  chatDraftSelectionEnd: number | null;
   chatMentionSelectedIndex: number;
   chatAttachments: ChatAttachment[];
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatStream: string | null;
   chatStreamStartedAt: number | null;
+  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
   chatRunId: string | null;
   chatResetInFlight: boolean;
   compactionStatus: CompactionStatus | null;
@@ -81,6 +84,7 @@ export type AppViewState = {
   chatShouldEmitToolResult: boolean;
   chatShouldEmitToolOutput: boolean;
   chatQueue: ChatQueueItem[];
+  chatQueueRequestInFlight: boolean;
   chatManualRefreshInFlight: boolean;
   nodesLoading: boolean;
   nodes: Array<Record<string, unknown>>;
@@ -392,8 +396,9 @@ export type AppViewState = {
     setChatMessage: (next: string) => void;
     handleSendChat: (messageOverride?: string, opts?: { restoreDraft?: boolean }) => Promise<void>;
     handleAbortChat: () => Promise<void>;
-    removeQueuedMessage: (id: string) => void;
-    editQueuedMessage: (id: string) => void;
+    removeQueuedMessage: (id: string) => void | Promise<void>;
+    editQueuedMessage: (id: string) => void | Promise<void>;
+    sendQueuedMessageNow: (id: string) => void | Promise<void>;
     handleChatScroll: (event: Event) => void;
     resetToolStream: () => void;
     resetChatScroll: () => void;

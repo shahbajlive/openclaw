@@ -5,7 +5,7 @@ import { toSanitizedMarkdownHtml } from "../markdown.ts";
 import { openExternalUrlSafe } from "../open-external-url.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { WorkspaceAgentRow } from "../types.ts";
-import type { MessageGroup } from "../types/chat-types.ts";
+import type { MessageGroup, MessageGroupChild } from "../types/chat-types.ts";
 import { renderCopyAsMarkdownButton } from "./copy-as-markdown.ts";
 import {
   extractTextCached,
@@ -95,10 +95,13 @@ function formatAbsoluteTimestamp(timestamp: number): string {
   });
 }
 
-export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
+export function renderReadingIndicatorGroup(
+  assistant?: AssistantIdentity,
+  opts?: { compact?: boolean },
+) {
   return html`
-    <div class="chat-group assistant">
-      ${renderAvatar("assistant", assistant)}
+    <div class="chat-group assistant ${opts?.compact ? "chat-group--continuation" : ""}">
+      ${opts?.compact ? nothing : renderAvatar("assistant", assistant)}
       <div class="chat-group-messages">
         <div class="chat-bubble chat-reading-indicator" aria-hidden="true">
           <span class="chat-reading-indicator__dots">
@@ -110,26 +113,63 @@ export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
   `;
 }
 
+export function renderProcessingIndicatorGroup(
+  assistant?: AssistantIdentity,
+  phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null,
+  opts?: { compact?: boolean },
+) {
+  const startedAt = Date.now();
+  const absoluteTimestamp = formatAbsoluteTimestamp(startedAt);
+  return html`
+    <div class="chat-group assistant ${opts?.compact ? "chat-group--continuation" : ""}">
+      ${opts?.compact ? nothing : renderAvatar("assistant", assistant)}
+      <div class="chat-group-messages">
+        <div class="chat-bubble chat-reading-indicator" aria-hidden="true">
+          <span class="chat-reading-indicator__dots">
+            <span></span><span></span><span></span>
+          </span>
+        </div>
+        ${
+          phase === "thinking"
+            ? html`
+                <div class="chat-group-footer">
+                  <span class="chat-sender-name">${assistant?.name ?? "Assistant"}</span>
+                  <span class="chat-group-status" title=${absoluteTimestamp}>Thinking...</span>
+                </div>
+              `
+            : nothing
+        }
+      </div>
+    </div>
+  `;
+}
+
 export function renderStreamingGroup(
   text: string,
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
   assistant?: AssistantIdentity,
   assistantLabelTooltip?: string | null,
+  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null,
+  typingActive?: boolean,
   assistantAccent?: string | null,
   agentDirectory?: WorkspaceAgentRow[],
+  opts?: { compact?: boolean },
 ) {
-  const timestamp = formatRelativeTimestamp(startedAt);
   const name = assistant?.name ?? "Assistant";
   const absoluteTimestamp = formatAbsoluteTimestamp(startedAt);
 
   return html`
-    <div class="chat-group assistant">
-      ${renderAvatar("assistant", {
-        name,
-        avatar: assistant?.avatar ?? null,
-        accent: assistantAccent ?? null,
-      })}
+    <div class="chat-group assistant ${opts?.compact ? "chat-group--continuation" : ""}">
+      ${
+        opts?.compact
+          ? nothing
+          : renderAvatar("assistant", {
+              name,
+              avatar: assistant?.avatar ?? null,
+              accent: assistantAccent ?? null,
+            })
+      }
       <div class="chat-group-messages">
         ${renderGroupedMessage(
           {
@@ -143,7 +183,13 @@ export function renderStreamingGroup(
         )}
         <div class="chat-group-footer">
           <span class="chat-sender-name" title=${assistantLabelTooltip || nothing}>${name}</span>
-          <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
+          ${
+            runPhase === "thinking"
+              ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Thinking...</span>`
+              : typingActive
+                ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Typing...</span>`
+                : nothing
+          }
         </div>
       </div>
     </div>
@@ -169,23 +215,43 @@ export function renderMessageGroup(
   const assistantName = opts.assistantName ?? "Assistant";
   const who =
     group.speakerLabel ??
-    (identityRole === "user" ? "You" : identityRole === "assistant" ? assistantName : identityRole);
+    (identityRole === "user"
+      ? "You"
+      : identityRole === "assistant"
+        ? assistantName
+        : identityRole === "system"
+          ? "System"
+          : identityRole);
   const roleClass =
-    identityRole === "user" ? "user" : identityRole === "assistant" ? "assistant" : "other";
+    identityRole === "user" || identityRole === "system"
+      ? "user"
+      : identityRole === "assistant"
+        ? "assistant"
+        : "other";
   const timestamp = formatRelativeTimestamp(group.timestamp);
   const absoluteTimestamp = formatAbsoluteTimestamp(group.timestamp);
   const isPeer = normalizedRole === "peer";
-  const groupClasses = ["chat-group", roleClass, isPeer ? "is-peer" : ""].filter(Boolean).join(" ");
+  const lastChild = group.children[group.children.length - 1];
+  const hasActiveTail =
+    lastChild?.kind === "reading-indicator" || lastChild?.kind === "processing-indicator";
+  const groupClasses = [
+    "chat-group",
+    roleClass,
+    isPeer ? "is-peer" : "",
+    hasActiveTail ? "chat-group--has-active-tail" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const groupStyle = group.speakerAccent ? `--chat-peer-accent: ${group.speakerAccent};` : nothing;
   const senderTitle =
     identityRole === "assistant" && !group.speakerLabel
       ? (opts.assistantLabelTooltip ?? null)
       : null;
-
+  const hideFooterForDots = hasActiveTail;
   return html`
     <div class=${groupClasses} style=${groupStyle}>
       ${renderAvatar(identityRole, {
-        name: group.speakerLabel ?? assistantName,
+        name: group.speakerLabel ?? (identityRole === "system" ? "System" : assistantName),
         avatar:
           normalizedRole === "peer"
             ? (group.speakerAvatar ?? null)
@@ -196,23 +262,67 @@ export function renderMessageGroup(
             : (opts.assistantAccent ?? null),
       })}
       <div class="chat-group-messages">
-        ${group.messages.map((item, index) =>
-          renderGroupedMessage(
-            item.message,
-            {
-              isStreaming: group.isStreaming && index === group.messages.length - 1,
-              showReasoning: opts.showReasoning,
-              showToolOutput: opts.showToolOutput,
-            },
-            opts.onOpenSidebar,
-            opts.agentDirectory,
-          ),
+        ${group.children.map((child, index) =>
+          renderGroupChild(child, {
+            isLast: index === group.children.length - 1,
+            showReasoning: opts.showReasoning,
+            showToolOutput: opts.showToolOutput,
+            onOpenSidebar: opts.onOpenSidebar,
+            agentDirectory: opts.agentDirectory,
+          }),
         )}
-        <div class="chat-group-footer">
-          <span class="chat-sender-name" title=${senderTitle || nothing}>${who}</span>
-          <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
-        </div>
+        ${
+          hideFooterForDots
+            ? nothing
+            : html`
+              <div class="chat-group-footer">
+                <span class="chat-sender-name" title=${senderTitle || nothing}>${who}</span>
+                <span class="chat-group-timestamp" title=${absoluteTimestamp}>${timestamp}</span>
+              </div>
+            `
+        }
       </div>
+    </div>
+  `;
+}
+
+function renderGroupChild(
+  child: MessageGroupChild,
+  opts: {
+    isLast: boolean;
+    showReasoning: boolean;
+    showToolOutput: boolean;
+    onOpenSidebar?: (content: string) => void;
+    agentDirectory?: WorkspaceAgentRow[];
+  },
+) {
+  if (child.kind === "message") {
+    return renderGroupedMessage(
+      child.message,
+      {
+        isStreaming: false,
+        showReasoning: opts.showReasoning,
+        showToolOutput: opts.showToolOutput,
+      },
+      opts.onOpenSidebar,
+      opts.agentDirectory,
+    );
+  }
+  if (child.kind === "stream") {
+    return renderGroupedMessage(
+      {
+        role: "assistant",
+        content: [{ type: "text", text: child.text }],
+        timestamp: child.startedAt,
+      },
+      { isStreaming: true, showReasoning: false, showToolOutput: true },
+      opts.onOpenSidebar,
+      opts.agentDirectory,
+    );
+  }
+  return html`
+    <div class="chat-bubble chat-reading-indicator" aria-hidden="true">
+      <span class="chat-reading-indicator__dots"> <span></span><span></span><span></span> </span>
     </div>
   `;
 }
@@ -228,13 +338,15 @@ function renderAvatar(
   const initial =
     normalized === "user"
       ? "U"
-      : normalized === "assistant"
-        ? assistantName.charAt(0).toUpperCase() || "A"
-        : normalized === "tool"
-          ? "⚙"
-          : "?";
+      : normalized === "system"
+        ? "S"
+        : normalized === "assistant"
+          ? assistantName.charAt(0).toUpperCase() || "A"
+          : normalized === "tool"
+            ? "⚙"
+            : "?";
   const className =
-    normalized === "user"
+    normalized === "user" || normalized === "system"
       ? "user"
       : normalized === "assistant"
         ? "assistant"

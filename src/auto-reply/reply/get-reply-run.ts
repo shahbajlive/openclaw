@@ -522,6 +522,7 @@ export async function runPreparedReply(
       blockReplyBreak: resolvedBlockStreamingBreak,
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       extraSystemPrompt: extraSystemPromptParts.join("\n\n") || undefined,
+      persistedDisplayRole: isBareNewOrReset ? "system" : undefined,
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),
     },
   };

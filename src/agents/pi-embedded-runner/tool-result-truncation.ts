@@ -208,6 +208,7 @@ export async function truncateOversizedToolResultsInSession(params: {
   contextWindowTokens: number;
   sessionId?: string;
   sessionKey?: string;
+  runId?: string;
 }): Promise<{ truncated: boolean; truncatedCount: number; reason?: string }> {
   const { sessionFile, contextWindowTokens } = params;
   const maxChars = calculateMaxToolResultChars(contextWindowTokens);
@@ -215,6 +216,7 @@ export async function truncateOversizedToolResultsInSession(params: {
   try {
     const sessionManager = SessionManager.open(sessionFile);
     const branch = sessionManager.getBranch();
+    const persistedRunId = params.runId?.trim();
 
     if (branch.length === 0) {
       return { truncated: false, truncatedCount: 0, reason: "empty session" };
@@ -278,6 +280,20 @@ export async function truncateOversizedToolResultsInSession(params: {
               `originalEntry=${entry.id} newChars=${newLength} ` +
               `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
           );
+        }
+
+        if (
+          persistedRunId &&
+          (message.role === "assistant" || message.role === "toolResult") &&
+          !(
+            typeof (message as { runId?: unknown }).runId === "string" &&
+            (message as { runId?: string }).runId?.trim()
+          )
+        ) {
+          message = {
+            ...(message as Record<string, unknown>),
+            runId: persistedRunId,
+          } as AgentMessage;
         }
 
         // appendMessage expects Message | CustomMessage | BashExecutionMessage

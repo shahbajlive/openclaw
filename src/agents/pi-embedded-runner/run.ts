@@ -1081,6 +1081,7 @@ export async function runEmbeddedPiAgent(
                   contextWindowTokens,
                   sessionId: params.sessionId,
                   sessionKey: params.sessionKey,
+                  runId: params.runId,
                 });
                 if (truncResult.truncated) {
                   log.info(

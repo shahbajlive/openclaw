@@ -10,6 +10,7 @@ import { readConnectErrorDetailCode } from "../../../src/gateway/protocol/connec
 import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth.ts";
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity.ts";
 import { generateUUID } from "./uuid.ts";
+import { traceUiWs } from "./ws-trace.ts";
 
 export type GatewayEventFrame = {
   type: "event";
@@ -107,11 +108,26 @@ export class GatewayBrowserClient {
 
   start() {
     this.closed = false;
+    traceUiWs({
+      ts: Date.now(),
+      event: "gateway-client.start",
+      instanceId: this.opts.instanceId ?? null,
+      details: { url: this.opts.url, mode: this.opts.mode ?? null },
+    });
     this.connect();
   }
 
   stop() {
     this.closed = true;
+    traceUiWs({
+      ts: Date.now(),
+      event: "gateway-client.stop",
+      instanceId: this.opts.instanceId ?? null,
+      details: {
+        url: this.opts.url,
+        readyState: this.ws?.readyState ?? null,
+      },
+    });
     this.ws?.close();
     this.ws = null;
     this.pendingConnectError = undefined;
@@ -126,13 +142,39 @@ export class GatewayBrowserClient {
     if (this.closed) {
       return;
     }
+    traceUiWs({
+      ts: Date.now(),
+      event: "gateway-client.connect",
+      instanceId: this.opts.instanceId ?? null,
+      details: { url: this.opts.url, backoffMs: this.backoffMs },
+    });
     this.ws = new WebSocket(this.opts.url);
-    this.ws.addEventListener("open", () => this.queueConnect());
+    this.ws.addEventListener("open", () => {
+      traceUiWs({
+        ts: Date.now(),
+        event: "websocket.open",
+        instanceId: this.opts.instanceId ?? null,
+        details: { url: this.opts.url },
+      });
+      this.queueConnect();
+    });
     this.ws.addEventListener("message", (ev) => this.handleMessage(String(ev.data ?? "")));
     this.ws.addEventListener("close", (ev) => {
       const reason = String(ev.reason ?? "");
       const connectError = this.pendingConnectError;
       this.pendingConnectError = undefined;
+      traceUiWs({
+        ts: Date.now(),
+        event: "websocket.close",
+        instanceId: this.opts.instanceId ?? null,
+        details: {
+          url: this.opts.url,
+          code: ev.code,
+          reason,
+          wasClean: ev.wasClean,
+          connectErrorCode: connectError?.code ?? null,
+        },
+      });
       this.ws = null;
       this.flushPending(new Error(`gateway closed (${ev.code}): ${reason}`));
       this.opts.onClose?.({ code: ev.code, reason, error: connectError });

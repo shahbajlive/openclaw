@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_EVENT_UPDATE_AVAILABLE } from "../../../src/gateway/events.js";
 import { connectGateway, resolveControlUiClientVersion } from "./app-gateway.ts";
 
+const { traceUiWsMock } = vi.hoisted(() => ({
+  traceUiWsMock: vi.fn(),
+}));
+
 type GatewayClientMock = {
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
@@ -16,6 +20,16 @@ type GatewayClientMock = {
 };
 
 const gatewayClientInstances: GatewayClientMock[] = [];
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    },
+    configurable: true,
+  });
+});
 
 vi.mock("./gateway.ts", () => {
   function resolveGatewayErrorDetailCode(
@@ -69,6 +83,10 @@ vi.mock("./gateway.ts", () => {
   return { GatewayBrowserClient, resolveGatewayErrorDetailCode };
 });
 
+vi.mock("./ws-trace.ts", () => ({
+  traceUiWs: traceUiWsMock,
+}));
+
 function createHost() {
   return {
     settings: {
@@ -111,6 +129,10 @@ function createHost() {
     chatLiveToolEventsEnabled: true,
     sessionKey: "main",
     chatRunId: null,
+    chatToolMessages: [],
+    toolStreamById: new Map(),
+    toolStreamOrder: [],
+    toolStreamSyncTimer: null,
     chatResetInFlight: false,
     refreshSessionsAfterChat: new Set<string>(),
     execApprovalQueue: [],
@@ -122,6 +144,7 @@ function createHost() {
 describe("connectGateway", () => {
   beforeEach(() => {
     gatewayClientInstances.length = 0;
+    traceUiWsMock.mockReset();
   });
 
   it("ignores stale client onGap callbacks after reconnect", () => {
@@ -142,6 +165,26 @@ describe("connectGateway", () => {
     expect(host.lastError).toBe(
       "event gap detected (expected seq 20, got 24); refresh recommended",
     );
+  });
+
+  it("emits one connect trace per invocation and only stops the replaced client", () => {
+    const host = createHost();
+
+    connectGateway(host);
+    const firstClient = gatewayClientInstances[0];
+    expect(firstClient).toBeDefined();
+    expect(firstClient.stop).not.toHaveBeenCalled();
+
+    connectGateway(host);
+    const secondClient = gatewayClientInstances[1];
+    expect(secondClient).toBeDefined();
+
+    expect(firstClient.stop).toHaveBeenCalledTimes(1);
+    expect(secondClient.stop).not.toHaveBeenCalled();
+    const connectEvents = traceUiWsMock.mock.calls
+      .map((call) => call[0])
+      .filter((entry) => entry?.event === "app.connectGateway");
+    expect(connectEvents).toHaveLength(2);
   });
 
   it("ignores stale client onEvent callbacks after reconnect", () => {

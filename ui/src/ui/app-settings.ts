@@ -47,6 +47,7 @@ import { saveSettings, type UiSettings } from "./storage.ts";
 import { startThemeTransition, type ThemeTransitionContext } from "./theme-transition.ts";
 import { resolveTheme, type ResolvedTheme, type ThemeMode } from "./theme.ts";
 import type { AgentsListResult } from "./types.ts";
+import { traceUiWs } from "./ws-trace.ts";
 
 type SettingsHost = {
   settings: UiSettings;
@@ -191,6 +192,14 @@ export function setTheme(host: SettingsHost, next: ThemeMode, context?: ThemeTra
 }
 
 export async function refreshActiveTab(host: SettingsHost) {
+  traceUiWs({
+    ts: Date.now(),
+    event: "app.refreshActiveTab",
+    instanceId: null,
+    tab: host.tab,
+    sessionKey: host.sessionKey,
+    runId: host.chatRunId,
+  });
   if (host.tab === "overview") {
     await loadOverview(host);
   }
@@ -428,6 +437,15 @@ export function onPopState(host: SettingsHost) {
 }
 
 export function setTabFromRoute(host: SettingsHost, next: Tab) {
+  traceUiWs({
+    ts: Date.now(),
+    event: "route.setTabFromRoute",
+    instanceId: null,
+    tab: next,
+    sessionKey: host.sessionKey,
+    runId: host.chatRunId,
+    details: { previousTab: host.tab },
+  });
   applyTabSelection(host, next, { refreshPolicy: "connected" });
 }
 
@@ -481,8 +499,26 @@ export function syncUrlWithTab(host: SettingsHost, tab: Tab, replace: boolean) {
   }
 
   if (replace) {
+    traceUiWs({
+      ts: Date.now(),
+      event: "route.history.replaceState",
+      instanceId: null,
+      tab,
+      sessionKey: host.sessionKey,
+      runId: host.chatRunId,
+      details: { url: url.toString() },
+    });
     window.history.replaceState({}, "", url.toString());
   } else {
+    traceUiWs({
+      ts: Date.now(),
+      event: "route.history.pushState",
+      instanceId: null,
+      tab,
+      sessionKey: host.sessionKey,
+      runId: host.chatRunId,
+      details: { url: url.toString() },
+    });
     window.history.pushState({}, "", url.toString());
   }
 }
@@ -494,8 +530,26 @@ export function syncUrlWithSessionKey(host: SettingsHost, sessionKey: string, re
   const url = new URL(window.location.href);
   url.searchParams.set("session", sessionKey);
   if (replace) {
+    traceUiWs({
+      ts: Date.now(),
+      event: "route.session.replaceState",
+      instanceId: null,
+      tab: host.tab,
+      sessionKey,
+      runId: host.chatRunId,
+      details: { url: url.toString() },
+    });
     window.history.replaceState({}, "", url.toString());
   } else {
+    traceUiWs({
+      ts: Date.now(),
+      event: "route.session.pushState",
+      instanceId: null,
+      tab: host.tab,
+      sessionKey,
+      runId: host.chatRunId,
+      details: { url: url.toString() },
+    });
     window.history.pushState({}, "", url.toString());
   }
 }

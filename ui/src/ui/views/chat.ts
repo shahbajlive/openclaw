@@ -1,9 +1,9 @@
 import { html, nothing } from "lit";
 import { ref } from "lit/directives/ref.js";
-import { repeat } from "lit/directives/repeat.js";
 import { applyDraftMentionSuggestion, type MentionSuggestion } from "../chat/draft-mentions.ts";
 import {
   renderMessageGroup,
+  renderProcessingIndicatorGroup,
   renderReadingIndicatorGroup,
   renderStreamingGroup,
 } from "../chat/grouped-render.ts";
@@ -20,7 +20,7 @@ import { icons } from "../icons.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { SessionsListResult } from "../types.ts";
 import type { WorkspaceAgentRow } from "../types.ts";
-import type { ChatItem, MessageGroup } from "../types/chat-types.ts";
+import type { ChatItem, MessageGroup, MessageGroupChild } from "../types/chat-types.ts";
 import type { ChatAttachment, ChatQueueItem } from "../ui-types.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
 import "../components/resizable-divider.ts";
@@ -43,11 +43,13 @@ export type FallbackIndicatorStatus = {
 
 export type ChatProps = {
   sessionKey: string;
+  chatRunId?: string | null;
   onSessionKeyChange: (next: string) => void;
   thinkingLevel: string | null;
   showThinking: boolean;
   loading: boolean;
   sending: boolean;
+  activeRun?: boolean;
   canAbort?: boolean;
   hideNewSessionButton?: boolean;
   compactionStatus?: CompactionIndicatorStatus | null;
@@ -56,6 +58,8 @@ export type ChatProps = {
   toolMessages: unknown[];
   stream: string | null;
   streamStartedAt: number | null;
+  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  typingActive?: boolean;
   assistantAvatarUrl?: string | null;
   draft: string;
   queue: ChatQueueItem[];
@@ -102,6 +106,7 @@ export type ChatProps = {
   onAbort?: () => void;
   onQueueRemove: (id: string) => void;
   onQueueEdit: (id: string) => void;
+  onQueueSendNow: (id: string) => void;
   newSessionBusy?: boolean;
   onNewSession: () => void;
   onOpenSidebar?: (content: string) => void;
@@ -119,6 +124,20 @@ function adjustTextareaHeight(el: HTMLTextAreaElement) {
 }
 
 const MENTION_NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Escape", "Enter", "Tab"]);
+
+const queueChevronDown = html`
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="6 9 12 15 18 9"></polyline>
+  </svg>
+`;
 
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {
   if (!status) {
@@ -293,9 +312,37 @@ function renderAttachmentPreview(props: ChatProps) {
 }
 
 export function renderChat(props: ChatProps) {
+  let chatRoot: HTMLElement | null = null;
   let attachmentInput: HTMLInputElement | null = null;
   let composerInput: HTMLTextAreaElement | null = null;
+  let composerShell: HTMLDivElement | null = null;
   let mentionMenu: HTMLDivElement | null = null;
+  let composerResizeObserver: ResizeObserver | null = null;
+  const syncComposerClearance = () => {
+    if (!chatRoot || !composerShell) {
+      return;
+    }
+    const composerHeight = composerShell.getBoundingClientRect().height;
+    chatRoot.style.setProperty("--chat-compose-clearance", `${Math.ceil(composerHeight)}px`);
+  };
+  const bindComposerShell = (el: Element | undefined) => {
+    const next = (el as HTMLDivElement | null) ?? null;
+    if (composerShell === next) {
+      syncComposerClearance();
+      return;
+    }
+    composerResizeObserver?.disconnect();
+    composerResizeObserver = null;
+    composerShell = next;
+    if (!composerShell) {
+      return;
+    }
+    syncComposerClearance();
+    if (typeof ResizeObserver !== "undefined") {
+      composerResizeObserver = new ResizeObserver(() => syncComposerClearance());
+      composerResizeObserver.observe(composerShell);
+    }
+  };
   const canCompose = props.connected;
   const isBusy = props.sending || props.stream !== null;
   const canAbort = Boolean(props.canAbort && props.onAbort);
@@ -383,6 +430,7 @@ export function renderChat(props: ChatProps) {
       adjustTextareaHeight(composerInput);
     });
   };
+  const threadItems = buildChatItems(props);
   const thread = html`
     <div
       class="chat-thread"
@@ -397,57 +445,65 @@ export function renderChat(props: ChatProps) {
             `
           : nothing
       }
-      ${repeat(
-        buildChatItems(props),
-        (item) => item.key,
-        (item) => {
-          if (item.kind === "divider") {
-            return html`
+      ${threadItems.map((item) => {
+        if (item.kind === "divider") {
+          return html`
               <div class="chat-divider" role="separator" data-ts=${String(item.timestamp)}>
                 <span class="chat-divider__line"></span>
                 <span class="chat-divider__label">${item.label}</span>
                 <span class="chat-divider__line"></span>
               </div>
             `;
-          }
+        }
 
-          if (item.kind === "reading-indicator") {
-            return renderReadingIndicatorGroup(assistantIdentity);
-          }
+        if (item.kind === "reading-indicator") {
+          return renderReadingIndicatorGroup(assistantIdentity);
+        }
 
-          if (item.kind === "stream") {
-            return renderStreamingGroup(
-              item.text,
-              item.startedAt,
-              props.onOpenSidebar,
-              assistantIdentity,
-              props.assistantLabelTooltip ?? null,
-              props.assistantAccent,
-              props.agentDirectory,
-            );
-          }
+        if (item.kind === "processing-indicator") {
+          return renderProcessingIndicatorGroup(assistantIdentity, item.phase ?? null);
+        }
 
-          if (item.kind === "group") {
-            return renderMessageGroup(item, {
-              onOpenSidebar: props.onOpenSidebar,
-              showReasoning,
-              showToolOutput: props.shouldEmitToolOutput,
-              assistantName: props.assistantName,
-              assistantLabelTooltip: props.assistantLabelTooltip ?? null,
-              assistantAvatar: assistantIdentity.avatar,
-              assistantAccent: props.assistantAccent,
-              agentDirectory: props.agentDirectory,
-            });
-          }
+        if (item.kind === "stream") {
+          return renderStreamingGroup(
+            item.text,
+            item.startedAt,
+            props.onOpenSidebar,
+            assistantIdentity,
+            props.assistantLabelTooltip ?? null,
+            props.runPhase ?? null,
+            Boolean(props.typingActive),
+            props.assistantAccent,
+            props.agentDirectory,
+          );
+        }
 
-          return nothing;
-        },
-      )}
+        if (item.kind === "group") {
+          return renderMessageGroup(item, {
+            onOpenSidebar: props.onOpenSidebar,
+            showReasoning,
+            showToolOutput: props.shouldEmitToolOutput,
+            assistantName: props.assistantName,
+            assistantLabelTooltip: props.assistantLabelTooltip ?? null,
+            assistantAvatar: assistantIdentity.avatar,
+            assistantAccent: props.assistantAccent,
+            agentDirectory: props.agentDirectory,
+          });
+        }
+
+        return nothing;
+      })}
     </div>
   `;
 
   return html`
-    <section class="card chat">
+    <section
+      class="card chat"
+      ${ref((el) => {
+        chatRoot = (el as HTMLElement | null) ?? null;
+        syncComposerClearance();
+      })}
+    >
       ${props.disabledReason ? html`<div class="callout">${props.disabledReason}</div>` : nothing}
 
       ${props.error ? html`<div class="callout danger">${props.error}</div>` : nothing}
@@ -520,52 +576,74 @@ export function renderChat(props: ChatProps) {
           : nothing
       }
 
-      <div class="chat-compose">
+      <div class="chat-compose-stack" ${ref(bindComposerShell)}>
         ${
           props.queue.length
             ? html`
-              <div class="chat-queue" role="status" aria-live="polite">
-                <div class="chat-queue__title">Queued (${props.queue.length})</div>
+              <details class="chat-queue" open role="status" aria-live="polite">
+                <summary class="chat-queue__summary">
+                  <div class="chat-queue__summary-main">
+                    <span class="chat-queue__title">Queued</span>
+                    <span class="chat-queue__count">${props.queue.length}</span>
+                  </div>
+                  <span class="chat-queue__summary-icon" aria-hidden="true">${queueChevronDown}</span>
+                </summary>
                 <div class="chat-queue__list">
                   ${props.queue.map(
                     (item) => html`
                       <div class="chat-queue__item">
                         <div class="chat-queue__text">
-                          ${
-                            item.text ||
-                            (item.attachments?.length ? `Image (${item.attachments.length})` : "")
-                          }
+                          ${item.text || (item.attachments?.length ? `Image (${item.attachments.length})` : "")}
                         </div>
-                        <div class="chat-queue__actions">
-                          <button
-                            class="btn chat-queue__edit"
-                            type="button"
-                            aria-label="Edit queued message"
-                            title="Edit queued message"
-                            @click=${() => props.onQueueEdit(item.id)}
-                          >
-                            ${icons.edit}
-                          </button>
-                          <button
-                            class="btn chat-queue__remove"
-                            type="button"
-                            aria-label="Remove queued message"
-                            title="Remove queued message"
-                            @click=${() => props.onQueueRemove(item.id)}
-                          >
-                            ${icons.x}
-                          </button>
-                        </div>
+                        ${
+                          item.editable === false
+                            ? nothing
+                            : html`
+                                <div class="chat-queue__actions">
+                                  <button
+                                    class="btn chat-queue__send"
+                                    type="button"
+                                    aria-label=${item.steering ? "Steered for next turn" : "Steer next turn"}
+                                    data-tooltip=${item.steering ? "Steered for next turn" : "Steer next turn"}
+                                    ?disabled=${item.sendable === false || Boolean(item.pendingAction)}
+                                    @click=${() => props.onQueueSendNow(item.id)}
+                                  >
+                                    ${item.steering ? icons.check : icons.chevronRight}
+                                  </button>
+                                  <button
+                                    class="btn chat-queue__edit"
+                                    type="button"
+                                    aria-label="Edit queued message"
+                                    data-tooltip="Edit queued message"
+                                    ?disabled=${Boolean(item.pendingAction)}
+                                    @click=${() => props.onQueueEdit(item.id)}
+                                  >
+                                    ${icons.edit}
+                                  </button>
+                                  <button
+                                    class="btn chat-queue__remove"
+                                    type="button"
+                                    aria-label="Remove queued message"
+                                    data-tooltip="Remove queued message"
+                                    ?disabled=${Boolean(item.pendingAction)}
+                                    @click=${() => props.onQueueRemove(item.id)}
+                                  >
+                                    ${icons.x}
+                                  </button>
+                                </div>
+                              `
+                        }
                       </div>
                     `,
                   )}
                 </div>
-              </div>
+              </details>
             `
             : nothing
         }
-        ${renderAttachmentPreview(props)}
-        <div class="chat-compose__row">
+        <div class="chat-compose">
+          ${renderAttachmentPreview(props)}
+          <div class="chat-compose__row">
           <input
             ${ref((el) => {
               attachmentInput = el as HTMLInputElement | null;
@@ -765,6 +843,7 @@ export function renderChat(props: ChatProps) {
             >
               <span class="chat-compose__send-icon">${canAbort ? icons.stop : icons.arrowUp}</span>
             </button>
+          </div>
           </div>
         </div>
       </div>
@@ -1044,48 +1123,188 @@ function shareAnyKey(left: string[], right: Set<string>): boolean {
   return left.some((key) => right.has(key));
 }
 
+function resolveMessageRunId(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const record = message as Record<string, unknown>;
+  const runId = typeof record.runId === "string" ? record.runId.trim() : "";
+  if (runId) {
+    return runId;
+  }
+  const snakeRunId = typeof record.run_id === "string" ? record.run_id.trim() : "";
+  if (snakeRunId) {
+    return snakeRunId;
+  }
+  const abortMeta =
+    typeof record.openclawAbort === "object" && record.openclawAbort !== null
+      ? (record.openclawAbort as Record<string, unknown>)
+      : null;
+  const abortRunId = abortMeta && typeof abortMeta.runId === "string" ? abortMeta.runId.trim() : "";
+  if (abortRunId) {
+    return abortRunId;
+  }
+  const idempotencyKey =
+    typeof record.idempotencyKey === "string" ? record.idempotencyKey.trim() : "";
+  if (idempotencyKey) {
+    const assistantSuffixIndex = idempotencyKey.indexOf(":assistant");
+    if (assistantSuffixIndex > 0) {
+      return idempotencyKey.slice(0, assistantSuffixIndex);
+    }
+  }
+  return "";
+}
+
+function isAssistantOwnedMessage(message: unknown): boolean {
+  const normalized = normalizeMessage(message);
+  const role = normalizeRoleForGrouping(normalized.role);
+  return role === "assistant" || role === "tool";
+}
+
+function toGroupChild(item: ChatItem): MessageGroupChild | null {
+  if (item.kind === "message") {
+    return { kind: "message", message: item.message, key: item.key };
+  }
+  if (item.kind === "stream") {
+    return { kind: "stream", text: item.text, startedAt: item.startedAt };
+  }
+  if (item.kind === "reading-indicator") {
+    return { kind: "reading-indicator" };
+  }
+  if (item.kind === "processing-indicator") {
+    return { kind: "processing-indicator", phase: item.phase ?? null };
+  }
+  return null;
+}
+
 function groupMessages(
   items: ChatItem[],
   agentDirectory?: WorkspaceAgentRow[],
 ): Array<ChatItem | MessageGroup> {
   const result: Array<ChatItem | MessageGroup> = [];
   let currentGroup: MessageGroup | null = null;
+  let currentThreadKey: string | null = null;
+  const assistantGroupByRunId = new Map<string, MessageGroup>();
+
+  const resolveThreadKey = (message: unknown) => {
+    const normalized = normalizeMessage(message);
+    const role = normalizeRoleForGrouping(normalized.role);
+    const visualRole = role === "tool" ? "assistant" : role;
+    const runId = resolveMessageRunId(message);
+    const speakerKey = normalized.speakerKey ?? visualRole;
+    if (visualRole === "assistant") {
+      return {
+        normalized,
+        role: visualRole,
+        speakerKey,
+        threadKey: `assistant:${speakerKey}:${runId || "no-run"}`,
+      };
+    }
+    return {
+      normalized,
+      role: visualRole,
+      speakerKey,
+      threadKey: `${visualRole}:${speakerKey}`,
+    };
+  };
 
   for (const item of items) {
+    const isAssistantRunFragment =
+      item.kind !== "divider" &&
+      typeof item.runId === "string" &&
+      item.runId.length > 0 &&
+      (item.kind === "stream" ||
+        item.kind === "reading-indicator" ||
+        item.kind === "processing-indicator" ||
+        (item.kind === "message" && isAssistantOwnedMessage(item.message)));
+    if (isAssistantRunFragment) {
+      const runId = item.runId as string;
+      const child = toGroupChild(item);
+      if (child) {
+        const existing = assistantGroupByRunId.get(runId);
+        if (existing) {
+          existing.children.push(child);
+          continue;
+        }
+        const seedMessage =
+          item.kind === "message" ? item.message : { role: "assistant", timestamp: Date.now() };
+        const normalized = normalizeMessage(seedMessage);
+        const peerMeta = resolvePeerSpeakerMeta(normalized, agentDirectory);
+        const timestamp =
+          item.kind === "message"
+            ? normalized.timestamp || Date.now()
+            : item.kind === "stream"
+              ? item.startedAt
+              : item.startedAt;
+        const created: MessageGroup = {
+          kind: "group",
+          key: `group:assistant:run:${runId}`,
+          role: "assistant",
+          runId,
+          speakerKey: normalized.speakerKey ?? "assistant",
+          speakerLabel: peerMeta.speakerLabel ?? normalized.speakerLabel,
+          speakerInitial: normalized.speakerInitial,
+          speakerAvatar: peerMeta.speakerAvatar ?? normalized.speakerAvatar,
+          speakerAccent: peerMeta.speakerAccent ?? normalized.speakerAccent,
+          children: [child],
+          timestamp,
+          isStreaming: false,
+        };
+        if (currentGroup) {
+          result.push(currentGroup);
+          currentGroup = null;
+          currentThreadKey = null;
+        }
+        result.push(created);
+        assistantGroupByRunId.set(runId, created);
+        continue;
+      }
+    }
+
     if (item.kind !== "message") {
       if (currentGroup) {
         result.push(currentGroup);
         currentGroup = null;
+        currentThreadKey = null;
       }
       result.push(item);
       continue;
     }
 
-    const normalized = normalizeMessage(item.message);
-    const role = normalizeRoleForGrouping(normalized.role);
-    const speakerKey = normalized.speakerKey ?? role;
+    const thread = resolveThreadKey(item.message);
+    const normalized = thread.normalized;
+    const role = thread.role;
+    const speakerKey = thread.speakerKey;
     const peerMeta = resolvePeerSpeakerMeta(normalized, agentDirectory);
     const timestamp = normalized.timestamp || Date.now();
 
-    if (!currentGroup || currentGroup.role !== role || currentGroup.speakerKey !== speakerKey) {
+    if (!currentGroup || currentThreadKey !== thread.threadKey) {
       if (currentGroup) {
         result.push(currentGroup);
       }
+      const assistantRunId = thread.threadKey.startsWith("assistant:")
+        ? resolveMessageRunId(item.message)
+        : "";
       currentGroup = {
         kind: "group",
         key: `group:${role}:${item.key}`,
         role,
+        runId: assistantRunId || undefined,
         speakerKey,
         speakerLabel: peerMeta.speakerLabel ?? normalized.speakerLabel,
         speakerInitial: normalized.speakerInitial,
         speakerAvatar: peerMeta.speakerAvatar ?? normalized.speakerAvatar,
         speakerAccent: peerMeta.speakerAccent ?? normalized.speakerAccent,
-        messages: [{ message: item.message, key: item.key }],
+        children: [{ kind: "message", message: item.message, key: item.key }],
         timestamp,
         isStreaming: false,
       };
+      if (assistantRunId) {
+        assistantGroupByRunId.set(assistantRunId, currentGroup);
+      }
+      currentThreadKey = thread.threadKey;
     } else {
-      currentGroup.messages.push({ message: item.message, key: item.key });
+      currentGroup.children.push({ kind: "message", message: item.message, key: item.key });
     }
   }
 
@@ -1194,9 +1413,10 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
       kind: "message",
       key,
       message: msg,
+      runId: resolveMessageRunId(msg),
     });
   }
-  if (props.showThinking && props.shouldEmitToolResult) {
+  if (props.shouldEmitToolResult) {
     const toolItemsByKey = new Map<
       string,
       { item: ChatItem; hasOutput: boolean; timestamp: number; order: number }
@@ -1208,8 +1428,8 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
         continue;
       }
       liveToolIdentities.push(...liveEntries);
-      const dedupeAgainstHistory = liveEntries.some((entry) =>
-        shareAnyKey(entry.dedupeKeys, historyToolKeys),
+      const dedupeAgainstHistory = liveEntries.some(
+        (entry) => entry.hasOutput && shareAnyKey(entry.dedupeKeys, historyToolKeysWithOutput),
       );
       if (dedupeAgainstHistory) {
         continue;
@@ -1222,6 +1442,7 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
         kind: "message",
         key: messageKey(tools[i], i + history.length),
         message: tools[i],
+        runId: resolveMessageRunId(tools[i]),
       };
       const current = toolItemsByKey.get(primaryKey);
       if (!current) {
@@ -1273,17 +1494,26 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     }
   }
 
-  if (props.stream !== null) {
+  const hasActiveAssistantRun = Boolean(props.activeRun ?? props.canAbort) || props.stream !== null;
+  if (hasActiveAssistantRun) {
+    const streamText = typeof props.stream === "string" ? props.stream : "";
     const key = `stream:${props.sessionKey}:${props.streamStartedAt ?? "live"}`;
-    if (props.stream.trim().length > 0) {
+    if (streamText.trim().length > 0) {
       items.push({
         kind: "stream",
         key,
-        text: props.stream,
+        text: streamText,
         startedAt: props.streamStartedAt ?? Date.now(),
+        runId: props.chatRunId ?? null,
       });
     } else {
-      items.push({ kind: "reading-indicator", key });
+      items.push({
+        kind: "processing-indicator",
+        key,
+        startedAt: props.streamStartedAt ?? Date.now(),
+        runId: props.chatRunId ?? null,
+        phase: props.runPhase ?? null,
+      });
     }
   }
 

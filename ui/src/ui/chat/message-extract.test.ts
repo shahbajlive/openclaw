@@ -7,6 +7,11 @@ import {
 } from "./message-extract.ts";
 
 describe("extractTextCached", () => {
+  it("returns null for undefined messages", () => {
+    expect(extractText(undefined)).toBeNull();
+    expect(extractTextCached(undefined)).toBeNull();
+  });
+
   it("matches extractText output", () => {
     const message = {
       role: "assistant",
@@ -45,6 +50,11 @@ describe("extractTextCached", () => {
 });
 
 describe("extractThinkingCached", () => {
+  it("returns null for undefined messages", () => {
+    expect(extractThinking(undefined)).toBeNull();
+    expect(extractThinkingCached(undefined)).toBeNull();
+  });
+
   it("matches extractThinking output", () => {
     const message = {
       role: "assistant",

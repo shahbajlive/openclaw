@@ -71,6 +71,15 @@ export function handleMessageStart(
   // may deliver late text_end updates after message_end, which would otherwise
   // re-trigger block replies.
   ctx.resetAssistantMessageState(ctx.state.assistantTexts.length);
+  emitAgentEvent({
+    runId: ctx.params.runId,
+    stream: "assistant",
+    data: { phase: "start" },
+  });
+  void ctx.params.onAgentEvent?.({
+    stream: "assistant",
+    data: { phase: "start" },
+  });
   // Use assistant message_start as the earliest "writing" signal for typing.
   void ctx.params.onAssistantMessageStart?.();
 }
@@ -94,6 +103,23 @@ export function handleMessageUpdate(
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
 
   if (evtType === "thinking_start" || evtType === "thinking_delta" || evtType === "thinking_end") {
+    emitAgentEvent({
+      runId: ctx.params.runId,
+      stream: "reasoning",
+      data: {
+        phase: evtType === "thinking_end" ? "end" : "delta",
+        delta: typeof assistantRecord?.delta === "string" ? assistantRecord.delta : undefined,
+        content: typeof assistantRecord?.content === "string" ? assistantRecord.content : undefined,
+      },
+    });
+    void ctx.params.onAgentEvent?.({
+      stream: "reasoning",
+      data: {
+        phase: evtType === "thinking_end" ? "end" : "delta",
+        delta: typeof assistantRecord?.delta === "string" ? assistantRecord.delta : undefined,
+        content: typeof assistantRecord?.content === "string" ? assistantRecord.content : undefined,
+      },
+    });
     if (evtType === "thinking_start" || evtType === "thinking_delta") {
       ctx.state.reasoningStreamOpen = true;
     }
@@ -257,6 +283,15 @@ export function handleMessageEnd(
   if (msg?.role !== "assistant") {
     return;
   }
+  emitAgentEvent({
+    runId: ctx.params.runId,
+    stream: "assistant",
+    data: { phase: "end" },
+  });
+  void ctx.params.onAgentEvent?.({
+    stream: "assistant",
+    data: { phase: "end" },
+  });
 
   const assistantMessage = msg;
   ctx.noteLastAssistant(assistantMessage);

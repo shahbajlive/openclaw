@@ -177,6 +177,8 @@ export function renderApp(state: AppViewState) {
     selectionEnd = selectionStart,
   ) => {
     state.chatMessage = next;
+    state.chatDraftSelectionStart = selectionStart;
+    state.chatDraftSelectionEnd = selectionEnd;
     const previousQuery = state.chatMentionQuery;
     const previousStart = state.chatMentionStart;
     const mention = findDraftMentionAtSelection(next, selectionStart, selectionEnd);
@@ -1110,6 +1112,8 @@ export function renderApp(state: AppViewState) {
                 toolMessages: state.chatToolMessages,
                 stream: state.chatStream,
                 streamStartedAt: state.chatStreamStartedAt,
+                runPhase: state.chatRunPhase,
+                typingActive: state.chatRunPhase === "typing",
                 draft: state.chatMessage,
                 queue: state.chatQueue,
                 connected: state.connected,
@@ -1156,10 +1160,13 @@ export function renderApp(state: AppViewState) {
                 shouldEmitToolOutput: state.chatShouldEmitToolOutput,
                 onToggleShouldEmitToolOutput: () => state.handleToggleShouldEmitToolOutput(),
                 onSend: () => state.handleSendChat(),
+                chatRunId: state.chatRunId,
+                activeRun: Boolean(state.chatRunId || state.chatSending || state.chatResetInFlight),
                 canAbort: Boolean(state.chatRunId),
                 onAbort: () => void state.handleAbortChat(),
                 onQueueRemove: (id) => state.removeQueuedMessage(id),
                 onQueueEdit: (id) => state.editQueuedMessage(id),
+                onQueueSendNow: (id) => state.sendQueuedMessageNow(id),
                 newSessionBusy: state.chatResetInFlight,
                 onNewSession: () => state.handleSendChat("/new", { restoreDraft: true }),
                 showNewMessages: state.chatNewMessagesBelow && !state.chatManualRefreshInFlight,

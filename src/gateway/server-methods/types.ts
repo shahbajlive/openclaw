@@ -56,6 +56,7 @@ export type GatewayRequestContext = {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatAbortedRuns: Map<string, number>;
   chatRunBuffers: Map<string, string>;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
   chatDeltaSentAt: Map<string, number>;
   addChatRun: (sessionId: string, entry: { sessionKey: string; clientRunId: string }) => void;
   removeChatRun: (
@@ -64,6 +65,7 @@ export type GatewayRequestContext = {
     sessionKey?: string,
   ) => { sessionKey: string; clientRunId: string } | undefined;
   registerToolEventRecipient: (runId: string, connId: string) => void;
+  registerSessionToolEventRecipient: (sessionKey: string, connId: string) => void;
   dedupe: Map<string, DedupeEntry>;
   wizardSessions: Map<string, WizardSession>;
   findRunningWizard: () => string | null;

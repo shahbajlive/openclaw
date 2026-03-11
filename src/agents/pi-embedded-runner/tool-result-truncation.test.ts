@@ -1,5 +1,8 @@
+import os from "node:os";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   truncateToolResultText,
@@ -7,6 +10,7 @@ import {
   calculateMaxToolResultChars,
   getToolResultTextLength,
   truncateOversizedToolResultsInMessages,
+  truncateOversizedToolResultsInSession,
   isOversizedToolResult,
   sessionLikelyHasOversizedToolResults,
   HARD_MAX_TOOL_RESULT_CHARS,
@@ -256,6 +260,36 @@ describe("truncateOversizedToolResultsInMessages", () => {
       const text = firstBlock && "text" in firstBlock ? firstBlock.text : "";
       expect(text.length).toBeLessThan(500_000);
     }
+  });
+});
+
+describe("truncateOversizedToolResultsInSession", () => {
+  it("backfills runId onto rewritten assistant and toolResult rows when provided", async () => {
+    const sessionFile = path.join(os.tmpdir(), `openclaw-tool-trunc-${Date.now()}.jsonl`);
+    const sessionManager = SessionManager.open(sessionFile);
+    sessionManager.appendMessage(makeUserMessage("hello"));
+    sessionManager.appendMessage(makeAssistantMessage("reading file") as never);
+    sessionManager.appendMessage(makeToolResult("x".repeat(500_000)) as never);
+    sessionManager.appendMessage(makeAssistantMessage("done reading") as never);
+
+    const result = await truncateOversizedToolResultsInSession({
+      sessionFile,
+      contextWindowTokens: 128_000,
+      runId: "run-parent-1",
+    });
+
+    expect(result.truncated).toBe(true);
+
+    const rewritten = SessionManager.open(sessionFile)
+      .getBranch()
+      .filter((entry) => entry.type === "message")
+      .map((entry) => (entry as { message: AgentMessage }).message);
+
+    expect(rewritten[0]?.role).toBe("user");
+    expect((rewritten[0] as { runId?: string }).runId).toBeUndefined();
+    expect((rewritten[1] as { runId?: string }).runId).toBeUndefined();
+    expect((rewritten[2] as { runId?: string }).runId).toBe("run-parent-1");
+    expect((rewritten[3] as { runId?: string }).runId).toBe("run-parent-1");
   });
 });
 

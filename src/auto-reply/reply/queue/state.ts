@@ -1,3 +1,4 @@
+import { generateSecureUuid } from "../../../infra/secure-random.js";
 import { applyQueueRuntimeSettings } from "../../../utils/queue-helpers.js";
 import type { FollowupRun, QueueDropPolicy, QueueMode, QueueSettings } from "./types.js";
 
@@ -61,6 +62,91 @@ export function getFollowupQueue(key: string, settings: QueueSettings): Followup
   });
   FOLLOWUP_QUEUES.set(key, created);
   return created;
+}
+
+function maybeDeleteIdleQueue(key: string, queue: FollowupQueueState): void {
+  if (queue.draining || queue.items.length > 0 || queue.droppedCount > 0) {
+    return;
+  }
+  queue.summaryLines = [];
+  queue.lastRun = undefined;
+  queue.lastEnqueuedAt = 0;
+  FOLLOWUP_QUEUES.delete(key);
+}
+
+export function ensureFollowupRunId(run: FollowupRun): FollowupRun {
+  if (typeof run.id === "string" && run.id.trim()) {
+    return run;
+  }
+  return {
+    ...run,
+    id: generateSecureUuid(),
+  };
+}
+
+export function removeFollowupQueueItem(
+  key: string,
+  itemId: string,
+): { removed: FollowupRun | null; remaining: number } {
+  const cleanedKey = key.trim();
+  const cleanedId = itemId.trim();
+  const queue = getExistingFollowupQueue(cleanedKey);
+  if (!queue || !cleanedId) {
+    return { removed: null, remaining: queue?.items.length ?? 0 };
+  }
+  const index = queue.items.findIndex((item) => item.id?.trim() === cleanedId);
+  if (index < 0) {
+    return { removed: null, remaining: queue.items.length };
+  }
+  const [removed] = queue.items.splice(index, 1);
+  maybeDeleteIdleQueue(cleanedKey, queue);
+  return { removed: removed ?? null, remaining: queue.items.length };
+}
+
+export function popFollowupQueueItem(
+  key: string,
+  itemId: string,
+): { removed: FollowupRun | null; remaining: number } {
+  return removeFollowupQueueItem(key, itemId);
+}
+
+export function markFollowupQueueItemSteering(
+  key: string,
+  itemId: string,
+  steering: boolean,
+): { item: FollowupRun | null; remaining: number } {
+  const cleanedKey = key.trim();
+  const cleanedId = itemId.trim();
+  const queue = getExistingFollowupQueue(cleanedKey);
+  if (!queue || !cleanedId) {
+    return { item: null, remaining: queue?.items.length ?? 0 };
+  }
+  const item = queue.items.find((entry) => entry.id?.trim() === cleanedId);
+  if (!item) {
+    return { item: null, remaining: queue.items.length };
+  }
+  item.steering = steering;
+  return { item, remaining: queue.items.length };
+}
+
+export function popSteeredFollowupQueueItems(key: string): FollowupRun[] {
+  const cleanedKey = key.trim();
+  const queue = getExistingFollowupQueue(cleanedKey);
+  if (!queue?.items.length) {
+    return [];
+  }
+  const removed: FollowupRun[] = [];
+  const kept: FollowupRun[] = [];
+  for (const item of queue.items) {
+    if (item.steering) {
+      removed.push({ ...item, steering: false });
+    } else {
+      kept.push(item);
+    }
+  }
+  queue.items = kept;
+  maybeDeleteIdleQueue(cleanedKey, queue);
+  return removed;
 }
 
 export function clearFollowupQueue(key: string): number {

@@ -42,6 +42,29 @@ type ToolStreamHost = {
   toolStreamSyncTimer: number | null;
 };
 
+function commitVisibleStreamBeforeTool(host: ToolStreamHost, timestamp: number) {
+  const currentStream = typeof host.chatStream === "string" ? host.chatStream : "";
+  if (!currentStream.trim()) {
+    return;
+  }
+  const startedAt =
+    typeof host.chatStreamStartedAt === "number" ? host.chatStreamStartedAt : timestamp;
+  const existingMessages = Array.isArray(host.chatMessages) ? host.chatMessages : [];
+  host.chatMessages = [
+    ...existingMessages,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: currentStream }],
+      timestamp: startedAt,
+      ...(host.chatRunId ? { runId: host.chatRunId } : {}),
+    },
+  ];
+  const committed = Math.max(0, host.chatStreamCommittedPrefixLength ?? 0);
+  host.chatStreamCommittedPrefixLength = committed + currentStream.length;
+  host.chatStream = "";
+  host.chatStreamStartedAt = timestamp;
+}
+
 function toTrimmedString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -352,17 +375,14 @@ function resolveAcceptedSession(
   payload: AgentEventPayload,
   options?: {
     allowSessionScopedWhenIdle?: boolean;
-    requireRecentTerminalForIdleSession?: boolean;
   },
 ): { accepted: boolean; sessionKey?: string } {
   const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey : undefined;
   if (sessionKey && sessionKey !== host.sessionKey) {
     return { accepted: false };
   }
-  // During an active run, trust same-session agent events even when run ids
-  // differ (for example teammate/sub-run tool execution).
-  if (sessionKey && host.chatRunId) {
-    return { accepted: true, sessionKey };
+  if (host.chatRunId) {
+    return payload.runId === host.chatRunId ? { accepted: true, sessionKey } : { accepted: false };
   }
   const now = Date.now();
   const recentTerminalRunId = host.chatLastTerminalRunId ?? null;
@@ -373,13 +393,7 @@ function resolveAcceptedSession(
     typeof recentTerminalAt === "number" &&
     now - recentTerminalAt <= TOOL_STREAM_TERMINAL_GRACE_MS;
   if (!host.chatRunId && options?.allowSessionScopedWhenIdle && sessionKey) {
-    if (!options.requireRecentTerminalForIdleSession) {
-      return { accepted: true, sessionKey };
-    }
-    if (
-      typeof recentTerminalAt === "number" &&
-      now - recentTerminalAt <= TOOL_STREAM_TERMINAL_GRACE_MS
-    ) {
+    if (!recentTerminalRunId || payload.runId === recentTerminalRunId) {
       return { accepted: true, sessionKey };
     }
   }
@@ -463,34 +477,6 @@ function handleLifecycleFallbackEvent(host: CompactionHost, payload: AgentEventP
   }, FALLBACK_TOAST_DURATION_MS);
 }
 
-function handleLifecycleTypingEvent(host: ToolStreamHost, payload: AgentEventPayload) {
-  if (payload.stream !== "lifecycle") {
-    return;
-  }
-  const phase = toTrimmedString(payload.data?.phase);
-  if (phase !== "start") {
-    return;
-  }
-  const provenance = payload.data?.inputProvenance;
-  const isChatVisibleInterSession =
-    !!provenance &&
-    typeof provenance === "object" &&
-    (provenance as { kind?: unknown }).kind === "inter_session";
-  const accepted = resolveAcceptedSession(host, payload, {
-    allowSessionScopedWhenIdle: isChatVisibleInterSession,
-  });
-  if (!accepted.accepted) {
-    return;
-  }
-  if (host.chatRunId) {
-    return;
-  }
-  host.chatRunId = payload.runId;
-  host.chatStream = "";
-  host.chatStreamStartedAt = typeof payload.ts === "number" ? payload.ts : Date.now();
-  host.chatStreamCommittedPrefixLength = 0;
-}
-
 function hasCommonKey(left: string[], right: string[]): boolean {
   if (left.length === 0 || right.length === 0) {
     return false;
@@ -511,7 +497,6 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   }
 
   if (payload.stream === "lifecycle" || payload.stream === "fallback") {
-    handleLifecycleTypingEvent(host, payload);
     handleLifecycleFallbackEvent(host as CompactionHost, payload);
     return;
   }
@@ -521,7 +506,6 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   }
   const accepted = resolveAcceptedSession(host, payload, {
     allowSessionScopedWhenIdle: true,
-    requireRecentTerminalForIdleSession: true,
   });
   if (!accepted.accepted) {
     return;
@@ -550,6 +534,9 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
 
   const now = Date.now();
   const eventTimestamp = typeof payload.ts === "number" ? payload.ts : now;
+  if (host.chatRunId && phase && payload.runId === host.chatRunId) {
+    commitVisibleStreamBeforeTool(host, eventTimestamp);
+  }
   const incomingKeys = buildToolDedupeKeys({
     toolCallId,
     runId: payload.runId,
@@ -610,29 +597,6 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     }
 
     if (!entry) {
-      if (phase === "start" && payload.runId === host.chatRunId) {
-        const streamText = typeof host.chatStream === "string" ? host.chatStream : "";
-        if (streamText.trim()) {
-          if (Array.isArray(host.chatMessages)) {
-            host.chatMessages = [
-              ...host.chatMessages,
-              {
-                role: "assistant",
-                content: [{ type: "text", text: streamText }],
-                timestamp:
-                  typeof host.chatStreamStartedAt === "number"
-                    ? host.chatStreamStartedAt
-                    : Date.now(),
-              },
-            ];
-          }
-          host.chatStreamCommittedPrefixLength =
-            Math.max(0, host.chatStreamCommittedPrefixLength ?? 0) + streamText.length;
-          host.chatStream = "";
-          host.chatStreamStartedAt = typeof payload.ts === "number" ? payload.ts : Date.now();
-        }
-      }
-
       // Preserve on-screen chronology: if we first observe a tool call only after
       // the run has already reached a terminal state, do not backdate it.
       const isLateTerminalToolEvent = !host.chatRunId;

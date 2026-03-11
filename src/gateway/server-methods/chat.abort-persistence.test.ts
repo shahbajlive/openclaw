@@ -12,6 +12,9 @@ const sessionEntryState = vi.hoisted(() => ({
   transcriptPath: "",
   sessionId: "",
 }));
+const piEmbeddedMocks = vi.hoisted(() => ({
+  abortEmbeddedPiRun: vi.fn(() => true),
+}));
 
 vi.mock("../session-utils.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../session-utils.js")>();
@@ -26,6 +29,14 @@ vi.mock("../session-utils.js", async (importOriginal) => {
       },
       canonicalKey: "main",
     }),
+  };
+});
+
+vi.mock("../../agents/pi-embedded.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../agents/pi-embedded.js")>();
+  return {
+    ...original,
+    abortEmbeddedPiRun: (...args: unknown[]) => piEmbeddedMocks.abortEmbeddedPiRun(...args),
   };
 });
 
@@ -51,6 +62,22 @@ async function writeTranscriptHeader(transcriptPath: string, sessionId: string) 
     cwd: "/tmp",
   };
   await fs.writeFile(transcriptPath, `${JSON.stringify(header)}\n`, "utf-8");
+}
+
+async function appendTranscriptMessage(
+  transcriptPath: string,
+  id: string,
+  parentId: string | null,
+  message: Record<string, unknown>,
+) {
+  const line = {
+    type: "message",
+    id,
+    parentId,
+    timestamp: new Date(0).toISOString(),
+    message,
+  };
+  await fs.appendFile(transcriptPath, `${JSON.stringify(line)}\n`, "utf-8");
 }
 
 async function readTranscriptLines(transcriptPath: string): Promise<TranscriptLine[]> {
@@ -96,6 +123,10 @@ function createChatAbortContext(overrides: Record<string, unknown> = {}): {
   return {
     chatAbortControllers: new Map(),
     chatRunBuffers: new Map(),
+    chatRunPhases: new Map<
+      string,
+      "processing" | "thinking" | "typing" | "tool_running" | "finalizing"
+    >(),
     chatDeltaSentAt: new Map(),
     chatAbortedRuns: new Map<string, number>(),
     removeChatRun: vi
@@ -126,6 +157,7 @@ async function invokeChatAbort(
 
 afterEach(() => {
   vi.restoreAllMocks();
+  piEmbeddedMocks.abortEmbeddedPiRun.mockClear().mockReturnValue(true);
 });
 
 describe("chat abort transcript persistence", () => {
@@ -171,6 +203,7 @@ describe("chat abort transcript persistence", () => {
 
     expect(persisted).toHaveLength(1);
     expect(persisted[0]).toMatchObject({
+      runId,
       stopReason: "stop",
       idempotencyKey: `${runId}:assistant`,
       openclawAbort: {
@@ -217,6 +250,7 @@ describe("chat abort transcript persistence", () => {
       .find((message) => message?.idempotencyKey === "run-b:assistant");
 
     expect(runAPersisted).toMatchObject({
+      runId: "run-a",
       idempotencyKey: "run-a:assistant",
       openclawAbort: {
         aborted: true,
@@ -264,6 +298,7 @@ describe("chat abort transcript persistence", () => {
       .find((message) => message?.idempotencyKey === "run-stop-1:assistant");
 
     expect(persisted).toMatchObject({
+      runId: "run-stop-1",
       idempotencyKey: "run-stop-1:assistant",
       openclawAbort: {
         aborted: true,
@@ -290,6 +325,63 @@ describe("chat abort transcript persistence", () => {
     const [ok, payload] = respond.mock.calls.at(-1) ?? [];
     expect(ok).toBe(true);
     expect(payload).toMatchObject({ aborted: true, runIds: [runId] });
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const persisted = lines
+      .map((line) => line.message)
+      .find((message) => message?.idempotencyKey === `${runId}:assistant`);
+    expect(persisted).toBeUndefined();
+  });
+
+  it("aborts the embedded Pi run for active chat runs", async () => {
+    const { sessionId } = await createTranscriptFixture("openclaw-chat-abort-embedded-");
+    const runId = "idem-abort-embedded";
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", sessionId)]]),
+      chatRunBuffers: new Map([[runId, "Partial from run abort"]]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbort(context, { sessionKey: "main", runId }, respond);
+
+    expect(piEmbeddedMocks.abortEmbeddedPiRun).toHaveBeenCalledWith(sessionId);
+    const [ok, payload] = respond.mock.calls.at(-1) ?? [];
+    expect(ok).toBe(true);
+    expect(payload).toMatchObject({ aborted: true, runIds: [runId] });
+  });
+
+  it("does not persist an abort partial that only duplicates already-persisted assistant text", async () => {
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-dedupe-",
+    );
+    const runId = "idem-abort-run-dedupe";
+    await appendTranscriptMessage(transcriptPath, "assistant-prefix", null, {
+      role: "assistant",
+      runId,
+      timestamp: 1,
+      content: [
+        {
+          type: "text",
+          text: "I'm ready to help! Let me check what files are available in the workspace and then respond.\n\n",
+        },
+        { type: "toolCall", id: "call_1", name: "read", arguments: { path: "SOUL.md" } },
+      ],
+    });
+
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", sessionId)]]),
+      chatRunBuffers: new Map([
+        [
+          runId,
+          "I'm ready to help! Let me check what files are available in the workspace and then respond.",
+        ],
+      ]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbort(context, { sessionKey: "main", runId }, respond);
 
     const lines = await readTranscriptLines(transcriptPath);
     const persisted = lines

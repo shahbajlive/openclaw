@@ -166,6 +166,7 @@ function getCachedAgentRun(runId: string) {
 }
 
 export function listActiveAgentRunsForSession(sessionKey: string): ActiveAgentRunSnapshot[] {
+  ensureAgentRunListener();
   const normalizedSessionKey = sessionKey.trim();
   if (!normalizedSessionKey) {
     return [];

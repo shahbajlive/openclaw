@@ -3,7 +3,15 @@ import { scheduleChatScroll } from "./app-scroll.ts";
 import { setLastActiveSessionKey } from "./app-settings.ts";
 import { resetToolStream } from "./app-tool-stream.ts";
 import type { OpenClawApp } from "./app.ts";
-import { abortChatRun, loadChatHistory, sendChatMessage } from "./controllers/chat.ts";
+import {
+  abortChatRun,
+  enqueueChatMessage as enqueueChatMessageToBackend,
+  loadChatHistory,
+  popQueuedChatMessageForEdit,
+  removeQueuedChatMessage,
+  sendChatMessage,
+  sendQueuedChatMessageNow as sendQueuedChatMessageNowBackend,
+} from "./controllers/chat.ts";
 import { loadSessions } from "./controllers/sessions.ts";
 import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import { normalizeBasePath } from "./navigation.ts";
@@ -14,12 +22,15 @@ export type ChatHost = {
   client: GatewayBrowserClient | null;
   connected: boolean;
   chatMessage: string;
+  chatDraftSelectionStart: number | null;
+  chatDraftSelectionEnd: number | null;
   chatMentionQuery: string | null;
   chatMentionStart: number | null;
   chatMentionEnd: number | null;
   chatMentionSelectedIndex: number;
   chatAttachments: ChatAttachment[];
   chatQueue: ChatQueueItem[];
+  chatQueueRequestInFlight?: boolean;
   chatRunId: string | null;
   chatResetInFlight: boolean;
   chatLastTerminalRunId?: string | null;
@@ -29,6 +40,7 @@ export type ChatHost = {
   basePath: string;
   hello: GatewayHelloOk | null;
   chatAvatarUrl: string | null;
+  lastError: string | null;
   refreshSessionsAfterChat: Set<string>;
 };
 
@@ -44,6 +56,40 @@ function clearChatMentionState(
   host.chatMentionStart = null;
   host.chatMentionEnd = null;
   host.chatMentionSelectedIndex = 0;
+}
+
+function insertTextIntoDraftAtSelection(host: ChatHost, text: string) {
+  const insert = text.trim();
+  if (!insert) {
+    return;
+  }
+  const current = host.chatMessage ?? "";
+  const start = Math.max(
+    0,
+    Math.min(host.chatDraftSelectionStart ?? current.length, current.length),
+  );
+  const end = Math.max(start, Math.min(host.chatDraftSelectionEnd ?? start, current.length));
+  host.chatMessage = `${current.slice(0, start)}${insert}${current.slice(end)}`;
+  const nextCaret = start + insert.length;
+  host.chatDraftSelectionStart = nextCaret;
+  host.chatDraftSelectionEnd = nextCaret;
+}
+
+function setQueuedItemPendingAction(
+  host: ChatHost,
+  id: string,
+  pendingAction?: ChatQueueItem["pendingAction"],
+) {
+  host.chatQueue = host.chatQueue.map((entry) =>
+    entry.id === id
+      ? {
+          ...entry,
+          pendingAction,
+          sendable: pendingAction ? false : entry.sendable,
+          editable: pendingAction ? false : entry.editable,
+        }
+      : entry,
+  );
 }
 
 export function isChatBusy(host: ChatHost) {
@@ -107,29 +153,6 @@ export async function resetChatSession(host: ChatHost) {
   }
 }
 
-function enqueueChatMessage(
-  host: ChatHost,
-  text: string,
-  attachments?: ChatAttachment[],
-  refreshSessions?: boolean,
-) {
-  const trimmed = text.trim();
-  const hasAttachments = Boolean(attachments && attachments.length > 0);
-  if (!trimmed && !hasAttachments) {
-    return;
-  }
-  host.chatQueue = [
-    ...host.chatQueue,
-    {
-      id: generateUUID(),
-      text: trimmed,
-      createdAt: Date.now(),
-      attachments: hasAttachments ? attachments?.map((att) => ({ ...att })) : undefined,
-      refreshSessions,
-    },
-  ];
-}
-
 async function sendChatMessageNow(
   host: ChatHost,
   message: string,
@@ -166,46 +189,70 @@ async function sendChatMessageNow(
     host.chatAttachments = opts.previousAttachments;
   }
   scheduleChatScroll(host as unknown as Parameters<typeof scheduleChatScroll>[0]);
-  if (ok && !host.chatRunId) {
-    void flushChatQueue(host);
-  }
   if (ok && opts?.refreshSessions && runId) {
     host.refreshSessionsAfterChat.add(runId);
   }
   return ok;
 }
 
-async function flushChatQueue(host: ChatHost) {
-  if (!host.connected || isChatBusy(host)) {
-    return;
-  }
-  const [next, ...rest] = host.chatQueue;
-  if (!next) {
-    return;
-  }
-  host.chatQueue = rest;
-  const ok = await sendChatMessageNow(host, next.text, {
-    attachments: next.attachments,
-    refreshSessions: next.refreshSessions,
-  });
-  if (!ok) {
-    host.chatQueue = [next, ...host.chatQueue];
-  }
-}
-
-export function removeQueuedMessage(host: ChatHost, id: string) {
-  host.chatQueue = host.chatQueue.filter((item) => item.id !== id);
-}
-
-export function editQueuedMessage(host: ChatHost, id: string) {
+export async function removeQueuedMessage(host: ChatHost, id: string) {
   const item = host.chatQueue.find((entry) => entry.id === id);
   if (!item) {
     return;
   }
-  host.chatMessage = item.text;
+  if (item.source !== "backend") {
+    return;
+  }
+  setQueuedItemPendingAction(host, id, "removing");
+  const removed = await removeQueuedChatMessage(
+    host as unknown as Parameters<typeof removeQueuedChatMessage>[0],
+    id,
+  );
+  if (removed) {
+    return;
+  }
+  setQueuedItemPendingAction(host, id, undefined);
+}
+
+export async function editQueuedMessage(host: ChatHost, id: string) {
+  const item = host.chatQueue.find((entry) => entry.id === id);
+  if (!item || item.editable === false) {
+    return;
+  }
+  if (item.source !== "backend") {
+    return;
+  }
+  setQueuedItemPendingAction(host, id, "editing");
+  const editableItem = await popQueuedChatMessageForEdit(
+    host as unknown as Parameters<typeof popQueuedChatMessageForEdit>[0],
+    id,
+  );
+  if (!editableItem) {
+    setQueuedItemPendingAction(host, id, undefined);
+    return;
+  }
+  insertTextIntoDraftAtSelection(host, editableItem.text);
   clearChatMentionState(host);
-  host.chatAttachments = item.attachments?.map((att) => ({ ...att })) ?? [];
-  host.chatQueue = host.chatQueue.filter((entry) => entry.id !== id);
+  host.chatAttachments = editableItem.attachments?.map((att) => ({ ...att })) ?? [];
+}
+
+export async function sendQueuedMessageNow(host: ChatHost, id: string) {
+  const item = host.chatQueue.find((entry) => entry.id === id);
+  if (!item) {
+    return;
+  }
+  if (item.source !== "backend") {
+    return;
+  }
+  setQueuedItemPendingAction(host, id, "steering");
+  const steered = await sendQueuedChatMessageNowBackend(
+    host as unknown as Parameters<typeof sendQueuedChatMessageNowBackend>[0],
+    id,
+  );
+  if (!steered) {
+    setQueuedItemPendingAction(host, id, undefined);
+    return;
+  }
 }
 
 export async function handleSendChat(
@@ -247,7 +294,57 @@ export async function handleSendChat(
     if (refreshSessions) {
       return;
     }
-    enqueueChatMessage(host, message, attachmentsToSend, refreshSessions);
+    if (!attachmentsToSend.length && !refreshSessions) {
+      if (host.chatQueueRequestInFlight) {
+        return;
+      }
+      const pendingId = generateUUID();
+      host.chatQueue = [
+        ...host.chatQueue,
+        {
+          id: pendingId,
+          text: message,
+          createdAt: Date.now(),
+          source: "local",
+          editable: false,
+          sendable: false,
+          pendingAction: "enqueueing",
+        },
+      ];
+      let ok = false;
+      try {
+        ok = await enqueueChatMessageToBackend(
+          host as unknown as Parameters<typeof enqueueChatMessageToBackend>[0],
+          message,
+          { idempotencyKey: pendingId },
+        );
+      } finally {
+        host.chatQueue = host.chatQueue.filter(
+          (entry) => !(entry.id === pendingId && entry.source === "local"),
+        );
+      }
+      if (!ok) {
+        host.lastError ??= "Queue request was not accepted by the backend.";
+        if (messageOverride == null) {
+          host.chatMessage = previousDraft;
+          host.chatAttachments = attachments;
+        }
+      }
+      if (messageOverride == null) {
+        if (ok) {
+          host.chatMessage = "";
+          clearChatMentionState(host);
+          host.chatAttachments = [];
+        }
+      }
+      scheduleChatScroll(host as unknown as Parameters<typeof scheduleChatScroll>[0]);
+      return;
+    }
+    host.lastError = "Busy queueing currently supports text-only backend queue items.";
+    if (messageOverride == null) {
+      host.chatMessage = previousDraft;
+      host.chatAttachments = attachments;
+    }
     return;
   }
 
@@ -280,7 +377,9 @@ export async function refreshChat(host: ChatHost, opts?: { scheduleScroll?: bool
   }
 }
 
-export const flushChatQueueForEvent = flushChatQueue;
+export async function flushChatQueueForEvent(host: ChatHost) {
+  void host;
+}
 
 type SessionDefaultsSnapshot = {
   defaultAgentId?: string;

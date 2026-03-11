@@ -14,11 +14,13 @@ export type AgentEventPayload = {
 
 export type AgentRunContext = {
   sessionKey?: string;
+  sessionId?: string;
   verboseLevel?: VerboseLevel;
   inputProvenance?: InputProvenance;
   isHeartbeat?: boolean;
   /** Whether control UI clients should receive chat/agent updates for this run. */
   isControlUiVisible?: boolean;
+  queuedChatItemId?: string;
 };
 
 // Keep per-run counters so streams stay strictly monotonic per runId.
@@ -38,6 +40,9 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
   if (context.sessionKey && existing.sessionKey !== context.sessionKey) {
     existing.sessionKey = context.sessionKey;
   }
+  if (context.sessionId && existing.sessionId !== context.sessionId) {
+    existing.sessionId = context.sessionId;
+  }
   if (context.verboseLevel && existing.verboseLevel !== context.verboseLevel) {
     existing.verboseLevel = context.verboseLevel;
   }
@@ -49,6 +54,9 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
   }
   if (context.isHeartbeat !== undefined && existing.isHeartbeat !== context.isHeartbeat) {
     existing.isHeartbeat = context.isHeartbeat;
+  }
+  if (context.queuedChatItemId && existing.queuedChatItemId !== context.queuedChatItemId) {
+    existing.queuedChatItemId = context.queuedChatItemId;
   }
 }
 

@@ -66,6 +66,8 @@ export type GetReplyOptions = {
   hasRepliedRef?: { value: boolean };
   /** Override agent timeout in seconds (0 = no timeout). Threads through to resolveAgentTimeoutMs. */
   timeoutOverrideSeconds?: number;
+  /** Force queue behavior for this specific inbound turn without persisting session defaults. */
+  forceQueueMode?: "steer" | "followup" | "collect" | "steer-backlog" | "interrupt" | "queue";
 };
 
 export type ReplyPayload = {

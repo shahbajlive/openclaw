@@ -3,10 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { GetReplyOptions } from "../auto-reply/types.js";
-import { emitAgentEvent } from "../infra/agent-events.js";
+import { GATEWAY_CLIENT_CAPS } from "../gateway/protocol/client-info.js";
+import { emitAgentEvent, registerAgentRunContext } from "../infra/agent-events.js";
 import { __setMaxChatHistoryMessagesBytesForTest } from "./server-constants.js";
 import {
   connectOk,
+  embeddedRunMock,
   getReplyFromConfig,
   installGatewayTestHooks,
   onceMessage,
@@ -42,12 +44,12 @@ async function withGatewayChatHarness(
   }) => Promise<void>,
 ) {
   const tempDirs: string[] = [];
+  const baseSessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
+  tempDirs.push(baseSessionDir);
+  testState.sessionStorePath = path.join(baseSessionDir, "sessions.json");
   const { server, ws } = await startServerWithClient();
   const createSessionDir = async () => {
-    const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
-    tempDirs.push(sessionDir);
-    testState.sessionStorePath = path.join(sessionDir, "sessions.json");
-    return sessionDir;
+    return baseSessionDir;
   };
 
   try {
@@ -345,7 +347,8 @@ describe("gateway server chat", () => {
         JSON.stringify({
           message: {
             role: "assistant",
-            timestamp: ts,
+            timestamp: ts + 10_000,
+            runId: "run-internal-tool",
             content: [
               { type: "toolCall", id: "call-1", name: "discover_teammates", arguments: {} },
             ],
@@ -354,7 +357,8 @@ describe("gateway server chat", () => {
         JSON.stringify({
           message: {
             role: "toolResult",
-            timestamp: ts + 1,
+            timestamp: ts + 10_001,
+            runId: "run-internal-tool",
             toolCallId: "call-1",
             toolName: "discover_teammates",
             content: [{ type: "text", text: "Found 3 teammates." }],
@@ -380,7 +384,7 @@ describe("gateway server chat", () => {
 
       const historyRes = await rpcReq<{
         toolInvocations?: Array<Record<string, unknown>>;
-        activeRun?: { runId?: string; streamText?: string };
+        activeRun?: { runId?: string; streamText?: string; phase?: string };
       }>(ws, "chat.history", {
         sessionKey: "main",
         limit: 200,
@@ -391,12 +395,17 @@ describe("gateway server chat", () => {
       expect(toolInvocations).toHaveLength(1);
       expect(toolInvocations[0]?.toolCallId).toBe("call-1");
       expect(toolInvocations[0]?.phase).toBe("result");
+      expect(toolInvocations[0]?.runId).toBe("idem-active-run");
       expect(
         (toolInvocations[0]?.message as { __openclaw?: { canonicalToolInvocation?: boolean } })
           ?.__openclaw?.canonicalToolInvocation,
       ).toBe(true);
+      expect((toolInvocations[0]?.message as { runId?: string } | undefined)?.runId).toBe(
+        "idem-active-run",
+      );
       expect(historyRes.payload?.activeRun?.runId).toBe("idem-active-run");
       expect(typeof historyRes.payload?.activeRun?.streamText).toBe("string");
+      expect(historyRes.payload?.activeRun?.phase).toBe("processing");
 
       releaseRun();
     });
@@ -513,6 +522,425 @@ describe("gateway server chat", () => {
         stream: "lifecycle",
         data: { phase: "end", startedAt: 123, endedAt: 124 },
       });
+    });
+  });
+
+  test("chat.history re-subscribes refreshed webchat clients to live tool events for the active run", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws, { caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS] });
+      await createSessionDir();
+      await writeSessionStore({
+        entries: {
+          "agent:frontend_engineer:clawport": {
+            sessionId: "sess-frontend",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      emitAgentEvent({
+        runId: "run-history-live-tools",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: {
+          phase: "start",
+          startedAt: 123,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: "agent:developer_lead:clawport",
+            sourceTool: "mention_route",
+          },
+        },
+      });
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string };
+      }>(ws, "chat.history", {
+        sessionKey: "agent:frontend_engineer:clawport",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun?.runId).toBe("run-history-live-tools");
+
+      emitAgentEvent({
+        runId: "run-history-live-tools",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "tool",
+        data: {
+          phase: "start",
+          name: "read",
+          toolCallId: "tool-history-1",
+        },
+      });
+
+      const agentEvt = await onceMessage<{
+        event?: string;
+        payload?: { stream?: string; data?: { toolCallId?: string } };
+      }>(
+        ws,
+        (msg) =>
+          !!msg &&
+          typeof msg === "object" &&
+          (msg as { event?: string }).event === "agent" &&
+          (msg as { payload?: { stream?: string } }).payload?.stream === "tool",
+      );
+      expect(agentEvt.event).toBe("agent");
+      expect(agentEvt.payload?.stream).toBe("tool");
+      expect(agentEvt.payload?.data?.toolCallId).toBe("tool-history-1");
+    });
+  });
+
+  test("chat.history ignores blank recovered activeRun once assistant history already exists", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeSessionStore({
+        entries: {
+          "agent:frontend_engineer:clawport": {
+            sessionId: "sess-frontend",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      const sessionDir = await createSessionDir();
+      await fs.writeFile(
+        path.join(sessionDir, "sess-frontend.jsonl"),
+        `${JSON.stringify({
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+            timestamp: 130,
+          },
+        })}\n`,
+        "utf-8",
+      );
+
+      emitAgentEvent({
+        runId: "run-a2a-stale",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: {
+          phase: "start",
+          startedAt: 123,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: "agent:developer_lead:clawport",
+            sourceTool: "mention_route",
+          },
+        },
+      });
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string; streamText?: string } | null;
+      }>(ws, "chat.history", {
+        sessionKey: "agent:frontend_engineer:clawport",
+        limit: 200,
+      });
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun).toBeNull();
+
+      emitAgentEvent({
+        runId: "run-a2a-stale",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 131 },
+      });
+    });
+  });
+
+  test("inter-session visible agent runs emit chat started typing events", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeSessionStore({
+        entries: {
+          "agent:frontend_engineer:clawport": {
+            sessionId: "sess-frontend",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      const startedEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat" &&
+          message.payload?.state === "started" &&
+          message.payload?.runId === "run-a2a-typing" &&
+          message.payload?.sessionKey === "agent:frontend_engineer:clawport" &&
+          message.payload?.source === "agent",
+        8_000,
+      );
+
+      emitAgentEvent({
+        runId: "run-a2a-typing",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: {
+          phase: "start",
+          startedAt: 123,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: "agent:developer_lead:clawport",
+            sourceTool: "mention_route",
+          },
+        },
+      });
+
+      const event = await startedEvent;
+      expect(event.payload).toMatchObject({
+        runId: "run-a2a-typing",
+        sessionKey: "agent:frontend_engineer:clawport",
+        state: "started",
+        source: "agent",
+      });
+
+      emitAgentEvent({
+        runId: "run-a2a-typing",
+        sessionKey: "agent:frontend_engineer:clawport",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 124 },
+      });
+    });
+  });
+
+  test("queue enqueue emits queued chat events and remove clears them", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      const queuedChatEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat" &&
+          message.payload?.state === "queued" &&
+          message.payload?.queueItemId === "queued-1",
+        8_000,
+      );
+
+      const queueChangedEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat.queue.changed" &&
+          Array.isArray(message.payload?.queue) &&
+          message.payload.queue.some((item: { id?: string }) => item.id === "queued-1"),
+        8_000,
+      );
+
+      const enqueueRes = await rpcReq(ws, "chat.queue.enqueue", {
+        sessionKey: "main",
+        message: "follow up later",
+        idempotencyKey: "queued-1",
+      });
+      expect(enqueueRes.ok).toBe(true);
+      await queuedChatEvent;
+      await queueChangedEvent;
+
+      const queueRemovedEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat" &&
+          message.payload?.state === "queue_removed" &&
+          message.payload?.queueItemId === "queued-1",
+        8_000,
+      );
+      const queueClearedEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat.queue.changed" &&
+          Array.isArray(message.payload?.queue) &&
+          message.payload.queue.length === 0,
+        8_000,
+      );
+
+      const removeRes = await rpcReq(ws, "chat.queue.remove", {
+        sessionKey: "main",
+        itemId: "queued-1",
+      });
+      expect(removeRes.ok).toBe(true);
+      await queueRemovedEvent;
+      await queueClearedEvent;
+    });
+  });
+
+  test("chat.history excludes a queued item once that item is already active", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      const enqueueRes = await rpcReq(ws, "chat.queue.enqueue", {
+        sessionKey: "main",
+        message: "retry",
+        idempotencyKey: "queued-1",
+      });
+      expect(enqueueRes.ok).toBe(true);
+
+      registerAgentRunContext("run-active-queued", {
+        sessionKey: "main",
+        queuedChatItemId: "queued-1",
+      });
+      emitAgentEvent({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 123 },
+      });
+
+      const historyRes = await rpcReq<{ queuedMessages?: Array<{ id?: string }> }>(
+        ws,
+        "chat.history",
+        {
+          sessionKey: "main",
+        },
+      );
+
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.queuedMessages ?? []).toEqual([]);
+
+      emitAgentEvent({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 124 },
+      });
+    });
+  });
+
+  test("chat.history restores activeRun for an accepted queued item", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+      await writeMainSessionStore();
+
+      const enqueueRes = await rpcReq(ws, "chat.queue.enqueue", {
+        sessionKey: "main",
+        message: "retry",
+        idempotencyKey: "queued-1",
+      });
+      expect(enqueueRes.ok).toBe(true);
+
+      registerAgentRunContext("run-active-queued", {
+        sessionKey: "main",
+        queuedChatItemId: "queued-1",
+      });
+      emitAgentEvent({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 123 },
+      });
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string; streamText?: string };
+        queuedMessages?: Array<{ id?: string }>;
+      }>(ws, "chat.history", {
+        sessionKey: "main",
+      });
+
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun?.runId).toBe("run-active-queued");
+      expect(historyRes.payload?.activeRun?.streamText).toBe("");
+      expect(historyRes.payload?.queuedMessages ?? []).toEqual([]);
+
+      emitAgentEvent({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "end", startedAt: 123, endedAt: 124 },
+      });
+    });
+  });
+
+  test("chat.abort stops an accepted queued run after handoff", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+
+      embeddedRunMock.activeIds.add("sess-main");
+      registerAgentRunContext("run-active-queued", {
+        sessionKey: "main",
+        sessionId: "sess-main",
+        queuedChatItemId: "queued-1",
+      });
+      emitAgentEvent({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 123 },
+      });
+
+      const abortedEvent = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "chat" &&
+          message.payload?.runId === "run-active-queued" &&
+          message.payload?.state === "aborted",
+        4_000,
+      );
+
+      const abortRes = await rpcReq<{ aborted?: boolean; runIds?: string[] }>(ws, "chat.abort", {
+        sessionKey: "main",
+        runId: "run-active-queued",
+      });
+
+      expect(abortRes.ok).toBe(true);
+      expect(abortRes.payload?.aborted).toBe(true);
+      expect(abortRes.payload?.runIds).toEqual(["run-active-queued"]);
+      expect(embeddedRunMock.abortCalls).toEqual(["sess-main"]);
+      const event = await abortedEvent;
+      expect(event.payload).toMatchObject({
+        runId: "run-active-queued",
+        sessionKey: "main",
+        state: "aborted",
+        stopReason: "rpc",
+      });
+    });
+  });
+
+  test("chat.history stays cleared after refresh when an accepted queued run was aborted", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      await createSessionDir();
+
+      embeddedRunMock.activeIds.add("sess-main");
+      registerAgentRunContext("run-active-queued-refresh", {
+        sessionKey: "main",
+        sessionId: "sess-main",
+        queuedChatItemId: "queued-1",
+      });
+      emitAgentEvent({
+        runId: "run-active-queued-refresh",
+        sessionKey: "main",
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 123 },
+      });
+
+      const abortRes = await rpcReq<{ aborted?: boolean; runIds?: string[] }>(ws, "chat.abort", {
+        sessionKey: "main",
+        runId: "run-active-queued-refresh",
+      });
+
+      expect(abortRes.ok).toBe(true);
+      expect(abortRes.payload?.aborted).toBe(true);
+
+      const historyRes = await rpcReq<{
+        activeRun?: { runId?: string; streamText?: string } | null;
+      }>(ws, "chat.history", {
+        sessionKey: "main",
+        limit: 200,
+      });
+
+      expect(historyRes.ok).toBe(true);
+      expect(historyRes.payload?.activeRun).toBeNull();
     });
   });
 

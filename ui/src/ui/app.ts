@@ -19,6 +19,7 @@ import {
   handleAbortChat as handleAbortChatInternal,
   handleSendChat as handleSendChatInternal,
   removeQueuedMessage as removeQueuedMessageInternal,
+  sendQueuedMessageNow as sendQueuedMessageNowInternal,
 } from "./app-chat.ts";
 import { DEFAULT_CRON_FORM, DEFAULT_LOG_LEVEL_FILTERS } from "./app-defaults.ts";
 import type { EventLogEntry } from "./app-events.ts";
@@ -107,6 +108,7 @@ import type {
   WorkspaceTicketStatus,
   WorkspaceTicketWorkState,
 } from "./workspace-kanban.ts";
+import { traceUiWs } from "./ws-trace.ts";
 
 declare global {
   interface Window {
@@ -168,10 +170,19 @@ export class OpenClawApp extends LitElement {
   @state() chatMentionQuery: string | null = null;
   @state() chatMentionStart: number | null = null;
   @state() chatMentionEnd: number | null = null;
+  @state() chatDraftSelectionStart: number | null = null;
+  @state() chatDraftSelectionEnd: number | null = null;
   @state() chatMentionSelectedIndex = 0;
   @state() chatMessages: unknown[] = [];
   @state() chatToolMessages: unknown[] = [];
   @state() chatStream: string | null = this.initialChatRuntime?.stream ?? null;
+  @state() chatRunPhase:
+    | "processing"
+    | "thinking"
+    | "typing"
+    | "tool_running"
+    | "finalizing"
+    | null = this.initialChatRuntime?.phase ?? null;
   @state() chatStreamStartedAt: number | null = this.initialChatRuntime?.streamStartedAt ?? null;
   chatStreamCommittedPrefixLength = this.initialChatRuntime?.streamCommittedPrefixLength ?? 0;
   @state() chatRunId: string | null = this.initialChatRuntime?.runId ?? null;
@@ -186,6 +197,7 @@ export class OpenClawApp extends LitElement {
   @state() chatShouldEmitToolResult = this.settings.chatShouldEmitToolResult ?? true;
   @state() chatShouldEmitToolOutput = this.settings.chatShouldEmitToolOutput ?? true;
   @state() chatQueue: ChatQueueItem[] = [];
+  @state() chatQueueRequestInFlight = false;
   @state() chatAttachments: ChatAttachment[] = [];
   @state() chatManualRefreshInFlight = false;
   // Sidebar state for tool output viewing
@@ -478,6 +490,14 @@ export class OpenClawApp extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    traceUiWs({
+      ts: Date.now(),
+      event: "app.connectedCallback",
+      instanceId: this.clientInstanceId,
+      tab: this.tab,
+      sessionKey: this.sessionKey,
+      runId: this.chatRunId,
+    });
     handleConnected(this as unknown as Parameters<typeof handleConnected>[0]);
   }
 
@@ -486,6 +506,14 @@ export class OpenClawApp extends LitElement {
   }
 
   disconnectedCallback() {
+    traceUiWs({
+      ts: Date.now(),
+      event: "app.disconnectedCallback",
+      instanceId: this.clientInstanceId,
+      tab: this.tab,
+      sessionKey: this.sessionKey,
+      runId: this.chatRunId,
+    });
     handleDisconnected(this as unknown as Parameters<typeof handleDisconnected>[0]);
     super.disconnectedCallback();
   }
@@ -601,15 +629,22 @@ export class OpenClawApp extends LitElement {
   }
 
   removeQueuedMessage(id: string) {
-    removeQueuedMessageInternal(
+    void removeQueuedMessageInternal(
       this as unknown as Parameters<typeof removeQueuedMessageInternal>[0],
       id,
     );
   }
 
   editQueuedMessage(id: string) {
-    editQueuedMessageInternal(
+    void editQueuedMessageInternal(
       this as unknown as Parameters<typeof editQueuedMessageInternal>[0],
+      id,
+    );
+  }
+
+  sendQueuedMessageNow(id: string) {
+    return sendQueuedMessageNowInternal(
+      this as unknown as Parameters<typeof sendQueuedMessageNowInternal>[0],
       id,
     );
   }

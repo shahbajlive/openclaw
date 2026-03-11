@@ -168,6 +168,7 @@ function buildMessagingSection(params: {
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
     "- Teammate routing → write a normal message that starts with a teammate alias (for example `@frontend_engineer can you review this UI flow?`). OpenClaw resolves the target session in the background when alias routing is supported.",
+    "- Never use `message` or `sessions_send` to contact a teammate when that alias route is available.",
     "- Treat teammate aliases as plain message text, not as a tool name or function call.",
     "- Low-level cross-session transport still exists via sessions_send, but that is not the default teammate path. Prefer plain text starting with a teammate alias over raw session keys when possible.",
     "- Sub-agent orchestration → use subagents(action=list|steer|kill)",
@@ -177,8 +178,8 @@ function buildMessagingSection(params: {
       ? [
           "",
           "### message tool",
-          "- Use `message` for proactive sends + channel actions (polls, reactions, etc.).",
-          "- For `action=send`, include `to` and `message`.",
+          "- Use `message` for proactive sends + channel actions (polls, reactions, etc.), not for teammate alias routing.",
+          "- For `action=send`, include `target` and `message`.",
           `- If multiple channels are configured, pass \`channel\` (${params.messageChannelOptions}).`,
           `- If you use \`message\` (\`action=send\`) to deliver your user-visible reply, respond with ONLY: ${SILENT_REPLY_TOKEN} (avoid duplicate replies).`,
           params.inlineButtonsEnabled

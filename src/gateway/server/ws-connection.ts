@@ -235,7 +235,10 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       }
       if (client && isWebchatClient(client.connect.client)) {
         logWsControl.info(
-          `webchat disconnected code=${code} reason=${logReason || "n/a"} conn=${connId}`,
+          `webchat disconnected code=${code} reason=${logReason || "n/a"} conn=${connId} instance=${client.connect.client.instanceId ?? "n/a"}`,
+        );
+        logGateway.info(
+          `[ws-trace/gateway] disconnect conn=${connId} instance=${client.connect.client.instanceId ?? "n/a"} code=${code} reason=${logReason || "n/a"} handshake=${handshakeState} cause=${closeCause || "n/a"} transport=${code === 1001 ? "client-normal-close" : "other"}`,
         );
       }
       if (client?.presenceKey) {

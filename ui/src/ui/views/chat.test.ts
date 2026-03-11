@@ -16,11 +16,13 @@ function createSessions(): SessionsListResult {
 function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
   return {
     sessionKey: "main",
+    chatRunId: null,
     onSessionKeyChange: () => undefined,
     thinkingLevel: null,
     showThinking: false,
     loading: false,
     sending: false,
+    activeRun: false,
     canAbort: false,
     compactionStatus: null,
     fallbackStatus: null,
@@ -28,6 +30,8 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
     toolMessages: [],
     stream: null,
     streamStartedAt: null,
+    runPhase: null,
+    typingActive: false,
     assistantAvatarUrl: null,
     draft: "",
     queue: [],
@@ -51,12 +55,36 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
     onSend: () => undefined,
     onQueueRemove: () => undefined,
     onQueueEdit: () => undefined,
+    onQueueSendNow: () => undefined,
     onNewSession: () => undefined,
     ...overrides,
   };
 }
 
 describe("chat view", () => {
+  it("renders system messages on the right with a system avatar", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "system",
+              content: [{ type: "text", text: "Bootstrap prompt" }],
+              timestamp: 1000,
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const group = container.querySelector(".chat-group.user");
+    expect(group).not.toBeNull();
+    expect(group?.querySelector(".chat-sender-name")?.textContent).toContain("System");
+    expect(group?.querySelector(".chat-avatar.user")?.textContent).toContain("S");
+  });
+
   it("renders compacting indicator as a badge", () => {
     const container = document.createElement("div");
     render(
@@ -307,6 +335,95 @@ describe("chat view", () => {
     expect(container.querySelector('button[aria-label="New session"]')).toBeNull();
   });
 
+  it("shows only processing dots while a run is active before stream text arrives", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          activeRun: true,
+          stream: null,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelector(".chat-reading-indicator")).not.toBeNull();
+    expect(container.querySelector(".chat-group-status")).toBeNull();
+    expect(container.querySelector('button[aria-label="Stop"]')).not.toBeNull();
+  });
+
+  it("shows typing status only while typing is active", () => {
+    const active = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          stream: "hello",
+          streamStartedAt: 1000,
+          runPhase: "typing",
+          typingActive: true,
+        }),
+      ),
+      active,
+    );
+    expect(active.querySelector(".chat-group-status")?.textContent).toContain("Typing...");
+
+    const idle = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          stream: "hello",
+          streamStartedAt: 1000,
+          typingActive: false,
+        }),
+      ),
+      idle,
+    );
+    expect(idle.querySelector(".chat-group-status")).toBeNull();
+  });
+
+  it("shows thinking status for an active assistant run before text arrives", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          activeRun: true,
+          runPhase: "thinking",
+          stream: null,
+          streamStartedAt: 1000,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelector(".chat-reading-indicator")).not.toBeNull();
+    expect(container.querySelector(".chat-group-status")?.textContent).toContain("Thinking...");
+  });
+
+  it("does not repeat the assistant avatar when active assistant work continues after an assistant group", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "First reply." }],
+              timestamp: 1000,
+            },
+          ],
+          activeRun: true,
+          runPhase: "thinking",
+          stream: null,
+          streamStartedAt: 2000,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+    expect(container.querySelector(".chat-group--continuation")).not.toBeNull();
+  });
+
   it("renders mention suggestions and inserts the selected mention", () => {
     const container = document.createElement("div");
     const onDraftChange = vi.fn();
@@ -404,6 +521,180 @@ describe("chat view", () => {
     expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
   });
 
+  it("keeps a live tool card when history only has the pending tool call", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [
+            {
+              role: "assistant",
+              timestamp: ts,
+              toolCallId: "discover-pending-1",
+              runId: "run-1",
+              content: [{ type: "toolcall", name: "discover_teammates", arguments: {} }],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              timestamp: ts + 1000,
+              toolCallId: "discover-pending-1",
+              runId: "run-1",
+              content: [
+                { type: "toolcall", name: "discover_teammates", arguments: {} },
+                { type: "toolresult", name: "discover_teammates", text: "Found 3 teammates." },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    const toolCards = container.querySelectorAll(".chat-tool-card");
+    expect(toolCards).toHaveLength(1);
+    expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("groups assistant text and assistant-owned tool rows from the same run under one avatar", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "assistant",
+              runId: "run-group-1",
+              timestamp: ts,
+              content: [{ type: "text", text: "I am checking the files." }],
+            },
+            {
+              role: "toolResult",
+              runId: "run-group-1",
+              timestamp: ts + 1000,
+              toolCallId: "tool-group-1",
+              toolName: "read",
+              content: [{ type: "text", text: "content" }],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+    expect(container.querySelectorAll(".chat-group-footer")).toHaveLength(1);
+  });
+
+  it("keeps active processing attached to the same assistant run", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          chatRunId: "run-group-live-1",
+          messages: [
+            {
+              role: "assistant",
+              runId: "run-group-live-1",
+              timestamp: ts,
+              content: [{ type: "text", text: "I am checking the files." }],
+            },
+            {
+              role: "toolResult",
+              runId: "run-group-live-1",
+              timestamp: ts + 1000,
+              toolCallId: "tool-group-live-1",
+              toolName: "read",
+              content: [{ type: "text", text: "content" }],
+            },
+          ],
+          activeRun: true,
+          runPhase: "thinking",
+          stream: null,
+          streamStartedAt: ts + 2000,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+    expect(container.querySelector(".chat-group--continuation")).not.toBeNull();
+  });
+
+  it("keeps abort partial assistant text inside the same tool thread for a run", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "assistant",
+              runId: "run-abort-1",
+              idempotencyKey: "run-abort-1:assistant",
+              openclawAbort: { aborted: true, runId: "run-abort-1" },
+              timestamp: ts + 1000,
+              content: [{ type: "text", text: "Partial answer" }],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              runId: "run-abort-1",
+              timestamp: ts,
+              toolCallId: "tool-abort-1",
+              content: [
+                { type: "toolcall", name: "read", arguments: { path: "USER.md" } },
+                { type: "toolresult", name: "read", text: "content" },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+    expect(container.querySelectorAll(".chat-group-footer")).toHaveLength(1);
+    expect(container.textContent ?? "").toContain("Partial answer");
+    expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
+  });
+
+  it("recovers run id from assistant transcript metadata when top-level runId is missing", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          chatRunId: "run-recovered-1",
+          messages: [
+            {
+              role: "assistant",
+              idempotencyKey: "run-recovered-1:assistant",
+              timestamp: ts,
+              content: [{ type: "text", text: "Recovered from transcript metadata." }],
+            },
+          ],
+          activeRun: true,
+          runPhase: "thinking",
+          stream: null,
+          streamStartedAt: ts + 1000,
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+    expect(container.querySelector(".chat-group--continuation")).not.toBeNull();
+  });
+
   it("renders a single tool card when one message contains toolcall + toolresult", () => {
     const container = document.createElement("div");
     render(
@@ -432,6 +723,34 @@ describe("chat view", () => {
     const toolCards = container.querySelectorAll(".chat-tool-card");
     expect(toolCards).toHaveLength(1);
     expect(toolCards[0]?.textContent ?? "").toContain("Found 3 teammates.");
+  });
+
+  it("renders live tool cards even when reasoning UI is disabled", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          showThinking: false,
+          shouldEmitToolResult: true,
+          shouldEmitToolOutput: true,
+          messages: [],
+          toolMessages: [
+            {
+              role: "assistant",
+              timestamp: Date.now(),
+              toolCallId: "live-tool-visible",
+              content: [
+                { type: "toolcall", name: "read", arguments: { file: "USER.md" } },
+                { type: "toolresult", name: "read", text: "content" },
+              ],
+            },
+          ],
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelectorAll(".chat-tool-card")).toHaveLength(1);
   });
 
   it("drops pending-only history tool row when same tool key later has output", () => {

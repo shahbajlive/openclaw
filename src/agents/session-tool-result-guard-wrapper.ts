@@ -22,6 +22,7 @@ export function guardSessionManager(
   opts?: {
     agentId?: string;
     sessionKey?: string;
+    runId?: string;
     inputProvenance?: InputProvenance;
     allowSyntheticToolResults?: boolean;
     allowedToolNames?: Iterable<string>;
@@ -62,9 +63,26 @@ export function guardSessionManager(
       }
     : undefined;
 
+  const persistRunId = (message: import("@mariozechner/pi-agent-core").AgentMessage) => {
+    const runId = opts?.runId?.trim();
+    if (!runId) {
+      return message;
+    }
+    if (message.role !== "assistant" && message.role !== "toolResult") {
+      return message;
+    }
+    if ((message as { runId?: unknown }).runId === runId) {
+      return message;
+    }
+    return {
+      ...message,
+      runId,
+    };
+  };
+
   const guard = installSessionToolResultGuard(sessionManager, {
     transformMessageForPersistence: (message) =>
-      applyInputProvenanceToUserMessage(message, opts?.inputProvenance),
+      persistRunId(applyInputProvenanceToUserMessage(message, opts?.inputProvenance)),
     transformToolResultForPersistence: transform,
     allowSyntheticToolResults: opts?.allowSyntheticToolResults,
     allowedToolNames: opts?.allowedToolNames,

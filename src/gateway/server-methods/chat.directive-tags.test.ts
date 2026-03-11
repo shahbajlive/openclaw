@@ -154,11 +154,14 @@ function createChatContext(): Pick<
   | "agentRunSeq"
   | "chatAbortControllers"
   | "chatRunBuffers"
+  | "chatRunPhases"
   | "chatDeltaSentAt"
   | "chatAbortedRuns"
+  | "addChatRun"
   | "removeChatRun"
   | "dedupe"
   | "registerToolEventRecipient"
+  | "registerSessionToolEventRecipient"
   | "loadGatewayModelCatalog"
   | "logGateway"
 > {
@@ -168,11 +171,14 @@ function createChatContext(): Pick<
     agentRunSeq: new Map<string, number>(),
     chatAbortControllers: new Map(),
     chatRunBuffers: new Map(),
+    chatRunPhases: new Map(),
     chatDeltaSentAt: new Map(),
     chatAbortedRuns: new Map(),
+    addChatRun: vi.fn(),
     removeChatRun: vi.fn(),
     dedupe: new Map(),
     registerToolEventRecipient: vi.fn(),
+    registerSessionToolEventRecipient: vi.fn(),
     loadGatewayModelCatalog: vi.fn(async () => ({ providers: [] })),
     logGateway: {
       warn: vi.fn(),
@@ -288,6 +294,57 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     expect(register).toHaveBeenCalledWith("run-current", "conn-1");
     expect(register).toHaveBeenCalledWith("run-same-session", "conn-1");
     expect(register).not.toHaveBeenCalledWith("run-other-session", "conn-1");
+  });
+
+  it("chat.history re-registers tool-event recipients for an active run after refresh", async () => {
+    createTranscriptFixture("openclaw-chat-history-tool-events-reregister-");
+    const respond = vi.fn();
+    const context = createChatContext();
+    context.chatAbortControllers.set("run-history-active", {
+      controller: new AbortController(),
+      sessionId: "sess-main",
+      sessionKey: "agent:frontend_engineer:clawport",
+      startedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 10_000,
+    });
+    context.chatAbortControllers.set("run-same-session", {
+      controller: new AbortController(),
+      sessionId: "sess-main-prev",
+      sessionKey: "agent:frontend_engineer:clawport",
+      startedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 10_000,
+    });
+    context.chatAbortControllers.set("run-other-session", {
+      controller: new AbortController(),
+      sessionId: "sess-other",
+      sessionKey: "other",
+      startedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 10_000,
+    });
+
+    await chatHandlers["chat.history"]({
+      params: { sessionKey: "agent:frontend_engineer:clawport", limit: 200 },
+      respond: respond as never,
+      req: {} as never,
+      client: {
+        connId: "conn-history",
+        connect: { caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS] },
+      } as never,
+      isWebchatConnect: () => false,
+      context: context as GatewayRequestContext,
+    });
+
+    const registerRun = context.registerToolEventRecipient as unknown as ReturnType<typeof vi.fn>;
+    const registerSession = context.registerSessionToolEventRecipient as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    expect(registerRun).toHaveBeenCalledWith("run-history-active", "conn-history");
+    expect(registerRun).toHaveBeenCalledWith("run-same-session", "conn-history");
+    expect(registerRun).not.toHaveBeenCalledWith("run-other-session", "conn-history");
+    expect(registerSession).toHaveBeenCalledWith(
+      "agent:frontend_engineer:clawport",
+      "conn-history",
+    );
   });
 
   it("routes assistant leading mentions through teammate delivery in the non-streaming path", async () => {
@@ -1017,6 +1074,65 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       expect.objectContaining({
         role: "assistant",
         content: [{ type: "text", text: "real reply" }],
+      }),
+    ]);
+  });
+
+  it("chat.history hides routed streamed teammate-mention assistant messages after notice injection", async () => {
+    createTranscriptFixture("openclaw-chat-history-hide-routed-mention-");
+    fs.appendFileSync(
+      mockState.transcriptPath,
+      `${JSON.stringify({
+        type: "message",
+        timestamp: new Date(1).toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "@frontend_engineer please take this" }],
+          timestamp: 1,
+        },
+      })}\n`,
+      "utf-8",
+    );
+    fs.appendFileSync(
+      mockState.transcriptPath,
+      `${JSON.stringify({
+        type: "message",
+        timestamp: new Date(2).toISOString(),
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "[Queued for teammate]\n\nDelivered to @frontend_engineer." },
+          ],
+          timestamp: 2,
+          idempotencyKey: "run-1:assistant-mention-route-notice",
+          provider: "openclaw",
+          model: "gateway-injected",
+        },
+      })}\n`,
+      "utf-8",
+    );
+
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await chatHandlers["chat.history"]({
+      params: { sessionKey: "main", limit: 200 },
+      respond: respond as unknown as Parameters<
+        (typeof chatHandlers)["chat.history"]
+      >[0]["respond"],
+      req: {} as never,
+      client: null as never,
+      isWebchatConnect: () => false,
+      context: context as GatewayRequestContext,
+    });
+
+    const [ok, payload, err] = respond.mock.calls.at(-1) ?? [];
+    expect(ok).toBe(true);
+    expect(err).toBeUndefined();
+    expect((payload as { messages?: unknown[] }).messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        idempotencyKey: "run-1:assistant-mention-route-notice",
       }),
     ]);
   });

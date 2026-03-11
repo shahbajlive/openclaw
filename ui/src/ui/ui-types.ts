@@ -10,6 +10,11 @@ export type ChatQueueItem = {
   createdAt: number;
   attachments?: ChatAttachment[];
   refreshSessions?: boolean;
+  source?: "local" | "backend";
+  editable?: boolean;
+  sendable?: boolean;
+  steering?: boolean;
+  pendingAction?: "enqueueing" | "editing" | "removing" | "steering";
 };
 
 export const CRON_CHANNEL_LAST = "last";

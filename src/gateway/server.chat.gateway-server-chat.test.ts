@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
+import { GATEWAY_CLIENT_CAPS } from "../gateway/protocol/client-info.js";
 import { emitAgentEvent, registerAgentRunContext } from "../infra/agent-events.js";
 import { extractFirstTextBlock } from "../shared/chat-message-content.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
@@ -495,6 +496,198 @@ describe("gateway server chat", () => {
       expect(waitRes.ok).toBe(true);
       expect(waitRes.payload?.status).toBe("ok");
     } finally {
+      testState.sessionStorePath = undefined;
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("chat.send remaps internal agent lifecycle and tool events back to the client run id", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
+    const replySpy = getReplyFromConfig;
+    let webchatWs: WebSocket | undefined;
+
+    try {
+      testState.sessionStorePath = path.join(dir, "sessions.json");
+      await writeSessionStore({
+        entries: {
+          main: {
+            sessionId: "sess-main",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      webchatWs = new WebSocket(`ws://127.0.0.1:${port}`, {
+        headers: { origin: `http://127.0.0.1:${port}` },
+      });
+      trackConnectChallengeNonce(webchatWs);
+      await new Promise<void>((resolve) => webchatWs?.once("open", resolve));
+      await connectOk(webchatWs, {
+        client: {
+          id: GATEWAY_CLIENT_NAMES.WEBCHAT,
+          version: "1.0.0",
+          platform: "test",
+          mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+        },
+        caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS],
+      });
+
+      const clientRunId = "idem-reset-linked";
+      const internalRunId = "run-reset-internal";
+      const toolEventPromise = onceMessage(
+        webchatWs,
+        (o) =>
+          o.type === "event" &&
+          o.event === "agent" &&
+          o.payload?.runId === clientRunId &&
+          o.payload?.stream === "tool",
+        CHAT_RESPONSE_TIMEOUT_MS,
+      );
+      const finalEventPromise = onceMessage(
+        webchatWs,
+        (o) =>
+          o.type === "event" &&
+          o.event === "chat" &&
+          o.payload?.runId === clientRunId &&
+          o.payload?.state === "final",
+        CHAT_RESPONSE_TIMEOUT_MS,
+      );
+
+      replySpy.mockImplementationOnce(async (_ctx, opts) => {
+        opts?.onAgentRunStart?.(internalRunId);
+        registerAgentRunContext(internalRunId, {
+          sessionKey: "main",
+          verboseLevel: "on",
+        });
+        emitAgentEvent({
+          runId: internalRunId,
+          stream: "lifecycle",
+          data: { phase: "start", startedAt: 1 },
+        });
+        emitAgentEvent({
+          runId: internalRunId,
+          stream: "tool",
+          data: { phase: "start", name: "read", toolCallId: "tool-reset-1", args: {} },
+        });
+        emitAgentEvent({
+          runId: internalRunId,
+          stream: "assistant",
+          data: { text: "I'm ready to help!" },
+        });
+        emitAgentEvent({
+          runId: internalRunId,
+          stream: "tool",
+          data: {
+            phase: "result",
+            name: "read",
+            toolCallId: "tool-reset-1",
+            result: { content: [{ type: "text", text: "done" }] },
+          },
+        });
+        emitAgentEvent({
+          runId: internalRunId,
+          stream: "lifecycle",
+          data: { phase: "end", startedAt: 1, endedAt: 2 },
+        });
+        return [{ text: "I'm ready to help!" }];
+      });
+
+      const sendRes = await rpcReq(webchatWs, "chat.send", {
+        sessionKey: "main",
+        message: "/reset",
+        idempotencyKey: clientRunId,
+      });
+      expect(sendRes.ok).toBe(true);
+      expect(sendRes.payload?.runId).toBe(clientRunId);
+
+      const toolEvt = await toolEventPromise;
+      expect(toolEvt.payload?.runId).toBe(clientRunId);
+      expect(toolEvt.payload?.data?.toolCallId).toBe("tool-reset-1");
+
+      const finalEvt = await finalEventPromise;
+      expect(finalEvt.payload?.runId).toBe(clientRunId);
+      expect(extractFirstTextBlock(finalEvt.payload?.message)).toContain("I'm ready to help!");
+    } finally {
+      webchatWs?.close();
+      testState.sessionStorePath = undefined;
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("chat.send receives same-session sub-run tool events through session recipients", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
+    const replySpy = getReplyFromConfig;
+    let webchatWs: WebSocket | undefined;
+
+    try {
+      testState.sessionStorePath = path.join(dir, "sessions.json");
+      await writeSessionStore({
+        entries: {
+          main: {
+            sessionId: "sess-main",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      webchatWs = new WebSocket(`ws://127.0.0.1:${port}`, {
+        headers: { origin: `http://127.0.0.1:${port}` },
+      });
+      trackConnectChallengeNonce(webchatWs);
+      await new Promise<void>((resolve) => webchatWs?.once("open", resolve));
+      await connectOk(webchatWs, {
+        client: {
+          id: GATEWAY_CLIENT_NAMES.WEBCHAT,
+          version: "1.0.0",
+          platform: "test",
+          mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+        },
+        caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS],
+      });
+
+      const clientRunId = "idem-reset-subrun-tools";
+      const internalRunId = "run-reset-internal-subrun";
+      const subRunId = "run-reset-subrun";
+      const toolEventPromise = onceMessage(
+        webchatWs,
+        (o) =>
+          o.type === "event" &&
+          o.event === "agent" &&
+          o.payload?.runId === clientRunId &&
+          o.payload?.stream === "tool",
+        CHAT_RESPONSE_TIMEOUT_MS,
+      );
+
+      replySpy.mockImplementationOnce(async (_ctx, opts) => {
+        opts?.onAgentRunStart?.(internalRunId);
+        registerAgentRunContext(internalRunId, {
+          sessionKey: "main",
+          verboseLevel: "on",
+        });
+        registerAgentRunContext(subRunId, {
+          sessionKey: "main",
+          verboseLevel: "on",
+        });
+        emitAgentEvent({
+          runId: subRunId,
+          stream: "tool",
+          data: { phase: "start", name: "read", toolCallId: "tool-subrun-live" },
+        });
+        return [{ text: "done" }];
+      });
+
+      const sendRes = await rpcReq(webchatWs, "chat.send", {
+        sessionKey: "main",
+        message: "/reset",
+        idempotencyKey: clientRunId,
+      });
+      expect(sendRes.ok).toBe(true);
+
+      const toolEvt = await toolEventPromise;
+      expect(toolEvt.payload?.runId).toBe(clientRunId);
+      expect(toolEvt.payload?.data?.toolCallId).toBe("tool-subrun-live");
+    } finally {
+      webchatWs?.close();
       testState.sessionStorePath = undefined;
       await fs.rm(dir, { recursive: true, force: true });
     }

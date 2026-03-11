@@ -7,7 +7,12 @@ import {
   startDebugPolling,
   stopDebugPolling,
 } from "./app-polling.ts";
-import { observeTopbar, scheduleChatScroll, scheduleLogsScroll } from "./app-scroll.ts";
+import {
+  observeTopbar,
+  resetChatScroll,
+  scheduleChatScroll,
+  scheduleLogsScroll,
+} from "./app-scroll.ts";
 import {
   applySettingsFromUrl,
   attachThemeListener,
@@ -19,6 +24,7 @@ import {
 import { persistChatRuntimeState } from "./chat-runtime-state.ts";
 import { loadControlUiBootstrapConfig } from "./controllers/control-ui-bootstrap.ts";
 import type { Tab } from "./navigation.ts";
+import { traceUiWs } from "./ws-trace.ts";
 
 type LifecycleHost = {
   basePath: string;
@@ -35,8 +41,10 @@ type LifecycleHost = {
   chatLoading: boolean;
   chatMessages: unknown[];
   chatToolMessages: unknown[];
+  sessionKey: string;
   chatStream: string | null;
   chatRunId: string | null;
+  chatRunPhase: "processing" | "typing" | null;
   chatStreamStartedAt: number | null;
   chatStreamCommittedPrefixLength?: number;
   workspaceSelectedAgentId: string | null;
@@ -53,6 +61,15 @@ type LifecycleHost = {
 
 export function handleConnected(host: LifecycleHost) {
   const connectGeneration = ++host.connectGeneration;
+  traceUiWs({
+    ts: Date.now(),
+    event: "app.handleConnected",
+    instanceId: null,
+    tab: host.tab,
+    sessionKey: host.sessionKey,
+    runId: host.chatRunId,
+    details: { connectGeneration },
+  });
   host.basePath = inferBasePath();
   const bootstrapReady = loadControlUiBootstrapConfig(host);
   applySettingsFromUrl(host as unknown as Parameters<typeof applySettingsFromUrl>[0]);
@@ -80,6 +97,15 @@ export function handleFirstUpdated(host: LifecycleHost) {
 }
 
 export function handleDisconnected(host: LifecycleHost) {
+  traceUiWs({
+    ts: Date.now(),
+    event: "app.handleDisconnected",
+    instanceId: null,
+    tab: host.tab,
+    sessionKey: host.sessionKey,
+    runId: host.chatRunId,
+    details: { connectGeneration: host.connectGeneration, connected: host.connected ?? null },
+  });
   host.connectGeneration += 1;
   window.removeEventListener("popstate", host.popStateHandler);
   stopNodesPolling(host as unknown as Parameters<typeof stopNodesPolling>[0]);
@@ -115,13 +141,24 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
   }
   if (
     host.tab === "workspace-messages" &&
-    (changed.has("chatMessages") || changed.has("chatStream"))
+    (changed.has("chatMessages") ||
+      changed.has("chatToolMessages") ||
+      changed.has("chatStream") ||
+      changed.has("tab"))
   ) {
     const agentId = host.workspaceSelectedAgentId;
     if (agentId && host.syncWorkspaceSelectedConversationSummary) {
       const agent = host.workspaceAgentsList?.agents?.find((entry) => entry.id === agentId);
       const fallback = agent?.description?.trim() || agent?.title?.trim() || "Start a conversation";
       host.syncWorkspaceSelectedConversationSummary(agentId, fallback);
+    }
+    if (!host.chatManualRefreshInFlight) {
+      resetChatScroll(host as unknown as Parameters<typeof resetChatScroll>[0]);
+      scheduleChatScroll(
+        host as unknown as Parameters<typeof scheduleChatScroll>[0],
+        true,
+        !changed.has("tab"),
+      );
     }
   }
   if (
@@ -138,6 +175,7 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
 
   if (
     changed.has("chatRunId") ||
+    changed.has("chatRunPhase") ||
     changed.has("chatStream") ||
     changed.has("chatStreamStartedAt") ||
     changed.has("sessionKey")
@@ -146,6 +184,7 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
       sessionKey: host.sessionKey,
       runId: host.chatRunId,
       stream: host.chatStream,
+      phase: host.chatRunPhase,
       streamStartedAt: host.chatStreamStartedAt,
       streamCommittedPrefixLength: host.chatStreamCommittedPrefixLength ?? 0,
     });

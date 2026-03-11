@@ -129,6 +129,19 @@ describe("message-normalizer", () => {
         speakerInitial: "F",
       });
     });
+
+    it("assigns speaker metadata for system messages", () => {
+      const result = normalizeMessage({
+        role: "system",
+        content: "Bootstrapping session",
+      });
+
+      expect(result).toMatchObject({
+        role: "system",
+        speakerLabel: "System",
+        speakerInitial: "S",
+      });
+    });
   });
 
   describe("normalizeRoleForGrouping", () => {

@@ -553,6 +553,7 @@ export async function compactEmbeddedPiSessionDirect(
       const sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
+        runId: params.runId,
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
         allowedToolNames,
       });

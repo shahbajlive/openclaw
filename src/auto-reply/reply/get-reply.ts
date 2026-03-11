@@ -276,6 +276,9 @@ export async function getReplyFromConfig(
     perMessageQueueMode,
     perMessageQueueOptions,
   } = directiveResult.result;
+  if (resolvedOpts?.forceQueueMode) {
+    perMessageQueueMode = resolvedOpts.forceQueueMode;
+  }
   provider = resolvedProvider;
   model = resolvedModel;
 

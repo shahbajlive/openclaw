@@ -314,6 +314,72 @@ describe("runReplyAgent authProfileId fallback scoping", () => {
     expect(call.authProfileId).toBeUndefined();
     expect(call.authProfileIdSource).toBeUndefined();
   });
+
+  it("passes persistedDisplayRole for bare session reset prompts", async () => {
+    runEmbeddedPiAgentMock.mockResolvedValue({ payloads: [{ text: "ok" }], meta: {} });
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "webchat",
+      OriginatingTo: "session:1",
+      AccountId: "primary",
+      MessageSid: "msg",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "interrupt" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "A new session was started via /new or /reset.",
+      summaryLine: "/reset",
+      enqueuedAt: Date.now(),
+      run: {
+        agentId: "main",
+        agentDir: "/tmp/agent",
+        sessionId: "session",
+        sessionKey: "main",
+        messageProvider: "webchat",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "anthropic",
+        model: "claude",
+        thinkLevel: "low",
+        verboseLevel: "off",
+        elevatedLevel: "off",
+        bashElevated: {
+          enabled: false,
+          allowed: false,
+          defaultLevel: "off",
+        },
+        timeoutMs: 1_000,
+        blockReplyBreak: "message_end",
+        persistedDisplayRole: "system",
+      },
+    } as unknown as FollowupRun;
+
+    await runReplyAgent({
+      commandBody: "A new session was started via /new or /reset.",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      defaultModel: "anthropic/claude-opus-4-5",
+      resolvedVerboseLevel: "off",
+      isNewSession: true,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    expect(runEmbeddedPiAgentMock.mock.calls[0]?.[0]).toMatchObject({
+      persistedDisplayRole: "system",
+    });
+  });
 });
 
 describe("runReplyAgent auto-compaction token update", () => {

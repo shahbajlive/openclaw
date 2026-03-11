@@ -1,7 +1,13 @@
 import { render } from "lit";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppViewState } from "../ui/app-view-state.ts";
-import { renderWorkspaceMessagesThread } from "./messages-page.ts";
+import { renderWorkspaceMessagesThread, selectWorkspaceMessagesAgent } from "./messages-page.ts";
+
+const traceUiWsMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../ui/ws-trace.ts", () => ({
+  traceUiWs: traceUiWsMock,
+}));
 
 function createState(): AppViewState {
   const sendCalls: Array<{ messageOverride?: string; opts?: { restoreDraft?: boolean } }> = [];
@@ -22,6 +28,7 @@ function createState(): AppViewState {
     chatMessage: "",
     chatQueue: [],
     connected: true,
+    clientInstanceId: "instance-test",
     lastError: null,
     sessionsResult: null,
     assistantName: "OpenClaw",
@@ -71,6 +78,8 @@ function createState(): AppViewState {
     applySettings: (next: AppViewState["settings"]) => {
       state.settings = next;
     },
+    connect: vi.fn(),
+    client: { stop: vi.fn() },
   };
   return Object.assign(state, { __sendCalls: sendCalls }) as unknown as AppViewState;
 }
@@ -169,5 +178,21 @@ describe("workspace messages thread", () => {
     collapseButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     expect(state.settings.workspaceMessagesSidebarCollapsed).toBe(true);
+  });
+
+  it("switches workspace agents without reconnecting the gateway client", () => {
+    const state = createState() as AppViewState & {
+      client: { stop: ReturnType<typeof vi.fn> };
+      connect: ReturnType<typeof vi.fn>;
+    };
+
+    selectWorkspaceMessagesAgent(state, { id: "backend_engineer", name: "Backend Engineer" });
+
+    expect(state.sessionKey).toBe("agent:backend_engineer:clawport");
+    expect(state.client.stop).not.toHaveBeenCalled();
+    expect(state.connect).not.toHaveBeenCalled();
+    expect(traceUiWsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "workspace-messages.selectAgent" }),
+    );
   });
 });

@@ -122,6 +122,7 @@ export async function runAgentTurnWithFallback(params: {
   if (params.sessionKey) {
     registerAgentRunContext(runId, {
       sessionKey: params.sessionKey,
+      sessionId: params.followupRun.run.sessionId,
       verboseLevel: params.resolvedVerboseLevel,
       isHeartbeat: params.isHeartbeat,
       isControlUiVisible: shouldSurfaceToControlUi,
@@ -324,6 +325,7 @@ export async function runAgentTurnWithFallback(params: {
               ...senderContext,
               ...runBaseParams,
               prompt: params.commandBody,
+              persistedDisplayRole: params.followupRun.run.persistedDisplayRole,
               extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
               toolResultFormat: (() => {
                 const channel = resolveMessageChannel(

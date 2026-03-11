@@ -587,6 +587,7 @@ export async function startGatewayServer(
     removeChatRun,
     chatAbortControllers,
     toolEventRecipients,
+    sessionToolEventRecipients,
   } = await createGatewayRuntimeState({
     cfg: cfgAtStart,
     bindHost,
@@ -631,6 +632,40 @@ export async function startGatewayServer(
   const nodeUnsubscribeAll = nodeSubscriptions.unsubscribeAll;
   const broadcastVoiceWakeChanged = (triggers: string[]) => {
     broadcast("voicewake.changed", { triggers }, { dropIfSlow: true });
+  };
+  const resolveVisibleRunIdForSession = (params: {
+    runId: string;
+    sessionKey?: string;
+  }): string | undefined => {
+    const sessionKey = params.sessionKey?.trim();
+    if (!sessionKey) {
+      return undefined;
+    }
+    const now = Date.now();
+    let selected:
+      | {
+          runId: string;
+          startedAtMs: number;
+        }
+      | undefined;
+    for (const [runId, active] of chatAbortControllers) {
+      if (active.controller.signal.aborted) {
+        continue;
+      }
+      if (active.expiresAtMs <= now) {
+        continue;
+      }
+      if (active.sessionKey !== sessionKey) {
+        continue;
+      }
+      if (runId === params.runId) {
+        return runId;
+      }
+      if (!selected || active.startedAtMs > selected.startedAtMs) {
+        selected = { runId, startedAtMs: active.startedAtMs };
+      }
+    }
+    return selected?.runId;
   };
   const hasMobileNodeConnected = () => hasConnectedMobileNode(nodeRegistry);
   applyGatewayLaneConcurrency(cfgAtStart);
@@ -713,21 +748,6 @@ export async function startGatewayServer(
         : {}),
     }));
   }
-
-  const agentUnsub = minimalTestGateway
-    ? null
-    : onAgentEvent(
-        createAgentEventHandler({
-          broadcast,
-          broadcastToConnIds,
-          nodeSendToSession,
-          agentRunSeq,
-          chatRunState,
-          resolveSessionKeyForRun,
-          clearAgentRunContext,
-          toolEventRecipients,
-        }),
-      );
 
   const heartbeatUnsub = minimalTestGateway
     ? null
@@ -837,10 +857,12 @@ export async function startGatewayServer(
     chatAbortControllers,
     chatAbortedRuns: chatRunState.abortedRuns,
     chatRunBuffers: chatRunState.buffers,
+    chatRunPhases: chatRunState.phases,
     chatDeltaSentAt: chatRunState.deltaSentAt,
     addChatRun,
     removeChatRun,
     registerToolEventRecipient: toolEventRecipients.add,
+    registerSessionToolEventRecipient: sessionToolEventRecipients.add,
     dedupe,
     wizardSessions,
     findRunningWizard,
@@ -857,6 +879,24 @@ export async function startGatewayServer(
   // in non-WS paths (Telegram polling, WhatsApp, etc.) where no per-request
   // scope is set via AsyncLocalStorage.
   setFallbackGatewayContext(gatewayRequestContext);
+
+  const agentUnsub = minimalTestGateway
+    ? null
+    : onAgentEvent(
+        createAgentEventHandler({
+          broadcast,
+          broadcastToConnIds,
+          nodeSendToSession,
+          agentRunSeq,
+          chatRunState,
+          resolveSessionKeyForRun,
+          resolveVisibleRunIdForSession,
+          clearAgentRunContext,
+          toolEventRecipients,
+          sessionToolEventRecipients,
+          gatewayContext: gatewayRequestContext,
+        }),
+      );
 
   attachGatewayWsHandlers({
     wss,

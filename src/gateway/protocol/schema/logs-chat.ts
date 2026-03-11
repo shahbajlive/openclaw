@@ -35,6 +35,7 @@ export const ChatSendParamsSchema = Type.Object(
   {
     sessionKey: ChatSendSessionKeyString,
     message: Type.String(),
+    queueMode: Type.Optional(Type.String()),
     thinking: Type.Optional(Type.String()),
     deliver: Type.Optional(Type.Boolean()),
     attachments: Type.Optional(Type.Array(Type.Unknown())),
@@ -48,6 +49,14 @@ export const ChatAbortParamsSchema = Type.Object(
   {
     sessionKey: NonEmptyString,
     runId: Type.Optional(NonEmptyString),
+  },
+  { additionalProperties: false },
+);
+
+export const ChatQueueItemActionParamsSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    itemId: NonEmptyString,
   },
   { additionalProperties: false },
 );
@@ -67,13 +76,28 @@ export const ChatEventSchema = Type.Object(
     sessionKey: NonEmptyString,
     seq: Type.Integer({ minimum: 0 }),
     state: Type.Union([
+      Type.Literal("queued"),
+      Type.Literal("queue_removed"),
+      Type.Literal("started"),
+      Type.Literal("phase"),
       Type.Literal("delta"),
       Type.Literal("final"),
       Type.Literal("aborted"),
       Type.Literal("error"),
     ]),
+    phase: Type.Optional(
+      Type.Union([
+        Type.Literal("processing"),
+        Type.Literal("thinking"),
+        Type.Literal("typing"),
+        Type.Literal("tool_running"),
+        Type.Literal("finalizing"),
+      ]),
+    ),
     message: Type.Optional(Type.Unknown()),
     errorMessage: Type.Optional(Type.String()),
+    source: Type.Optional(Type.String()),
+    queueItemId: Type.Optional(Type.String()),
     usage: Type.Optional(Type.Unknown()),
     stopReason: Type.Optional(Type.String()),
   },

@@ -61,43 +61,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("shows typing state for idle same-session inter-session lifecycle start", () => {
-    vi.useFakeTimers();
-    const now = Date.now();
-    const host = createHost({
-      chatRunId: null,
-      chatStream: null,
-      chatStreamStartedAt: null,
-      chatStreamCommittedPrefixLength: 99,
-    }) as MutableHost & {
-      chatStream: string | null;
-      chatStreamStartedAt: number | null;
-      chatStreamCommittedPrefixLength: number;
-    };
-
-    handleAgentEvent(host, {
-      runId: "run-inbound-a2a",
-      seq: 1,
-      stream: "lifecycle",
-      ts: now,
-      sessionKey: "main",
-      data: {
-        phase: "start",
-        inputProvenance: {
-          kind: "inter_session",
-          sourceSessionKey: "agent:developer_lead:main",
-        },
-      },
-    });
-
-    expect(host.chatRunId).toBe("run-inbound-a2a");
-    expect(host.chatStream).toBe("");
-    expect(host.chatStreamStartedAt).toBe(now);
-    expect(host.chatStreamCommittedPrefixLength).toBe(0);
-    vi.useRealTimers();
-  });
-
-  it("ignores idle same-session lifecycle start without chat-visible provenance", () => {
+  it("ignores lifecycle start events for chat runtime ownership", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -119,6 +83,10 @@ describe("app-tool-stream fallback lifecycle handling", () => {
       sessionKey: "main",
       data: {
         phase: "start",
+        inputProvenance: {
+          kind: "inter_session",
+          sourceSessionKey: "agent:developer_lead:main",
+        },
       },
     });
 
@@ -128,7 +96,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("does not hijack current typing state for another active run", () => {
+  it("does not hijack current chat runtime state for another active run", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -154,6 +122,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     });
 
     expect(host.chatRunId).toBe("run-user");
+    expect(host.chatStream).toBe("");
     expect(host.chatStreamStartedAt).toBe(now - 1000);
     vi.useRealTimers();
   });
@@ -306,7 +275,51 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("accepts same-session tool events from sub-runs while a run is active", () => {
+  it("commits visible assistant stream before a live tool event", () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const host = createHost({
+      chatRunId: "run-live",
+      chatStream: "Before tool call",
+      chatStreamStartedAt: now - 100,
+      chatStreamCommittedPrefixLength: 0,
+      chatMessages: [],
+    }) as MutableHost & {
+      chatStream: string | null;
+      chatStreamStartedAt: number | null;
+      chatStreamCommittedPrefixLength: number;
+      chatMessages: unknown[];
+    };
+
+    handleAgentEvent(host, {
+      runId: "run-live",
+      seq: 1,
+      stream: "tool",
+      ts: now,
+      sessionKey: "main",
+      data: {
+        phase: "start",
+        toolCallId: "tool-live-1",
+        name: "read",
+        args: { file: "SOUL.md" },
+      },
+    });
+
+    expect(host.chatMessages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Before tool call" }],
+        timestamp: now - 100,
+        runId: "run-split",
+      },
+    ]);
+    expect(host.chatStream).toBe("");
+    expect(host.chatStreamCommittedPrefixLength).toBe("Before tool call".length);
+    expect(host.chatStreamStartedAt).toBe(now);
+    vi.useRealTimers();
+  });
+
+  it("rejects same-session tool events from sub-runs while a run is active", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -327,13 +340,11 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     });
     vi.runOnlyPendingTimers();
 
-    expect(host.chatToolMessages).toHaveLength(1);
-    const first = host.chatToolMessages[0] as { runId?: string };
-    expect(first.runId).toBe("run-sub");
+    expect(host.chatToolMessages).toHaveLength(0);
     vi.useRealTimers();
   });
 
-  it("accepts late same-session sub-run tool events shortly after final", () => {
+  it("rejects late same-session sub-run tool events shortly after final", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -357,9 +368,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     });
     vi.runOnlyPendingTimers();
 
-    expect(host.chatToolMessages).toHaveLength(1);
-    const first = host.chatToolMessages[0] as { runId?: string };
-    expect(first.runId).toBe("run-sub");
+    expect(host.chatToolMessages).toHaveLength(0);
     vi.useRealTimers();
   });
 
@@ -420,7 +429,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("splits live assistant stream into a finalized chunk when a tool starts", () => {
+  it("does not mutate live assistant stream when a tool starts", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -449,14 +458,10 @@ describe("app-tool-stream fallback lifecycle handling", () => {
       },
     });
 
-    expect(host.chatMessages).toHaveLength(1);
-    expect(host.chatMessages[0]).toMatchObject({
-      role: "assistant",
-      content: [{ type: "text", text: "First chunk" }],
-    });
-    expect(host.chatStream).toBe("");
-    expect(host.chatStreamCommittedPrefixLength).toBe("First chunk".length);
-    expect(host.chatStreamStartedAt).toBe(now);
+    expect(host.chatMessages).toEqual([]);
+    expect(host.chatStream).toBe("First chunk");
+    expect(host.chatStreamCommittedPrefixLength).toBe(0);
+    expect(host.chatStreamStartedAt).toBe(now - 100);
     vi.useRealTimers();
   });
 

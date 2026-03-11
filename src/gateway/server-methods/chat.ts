@@ -92,7 +92,7 @@ import {
 } from "./chat-transcript-inject.js";
 import type { GatewayClient, GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 
-type TranscriptAppendResult = {
+export type TranscriptAppendResult = {
   ok: boolean;
   messageId?: string;
   message?: Record<string, unknown>;
@@ -107,6 +107,10 @@ type AbortedPartialSnapshot = {
   text: string;
   abortOrigin: AbortOrigin;
 };
+
+function debugGateway(context: Pick<GatewayRequestContext, "logGateway">, message: string): void {
+  context.logGateway.debug?.(message);
+}
 
 const CHAT_HISTORY_TEXT_MAX_CHARS = 12_000;
 const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
@@ -620,10 +624,47 @@ function shouldSuppressRecoveredBlankActiveRun(params: {
   );
 }
 
+function isGatewayInjectedTeammateRouteNotice(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "assistant") {
+    return false;
+  }
+  const idempotencyKey = typeof entry.idempotencyKey === "string" ? entry.idempotencyKey : "";
+  if (
+    idempotencyKey.endsWith(":assistant-mention-route-notice") ||
+    idempotencyKey.endsWith(":assistant-mention-route-error")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isLeadingTeammateMentionAssistantMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "assistant") {
+    return false;
+  }
+  if (isGatewayInjectedTeammateRouteNotice(message)) {
+    return false;
+  }
+  const text = extractAssistantTextForSilentCheck(message);
+  if (typeof text !== "string") {
+    return false;
+  }
+  return /^@[a-z0-9_]+\b[\s\S]*\S/i.test(text.trim());
+}
+
 function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   if (messages.length === 0) {
     return messages;
   }
+  const hideRoutedLeadingMentions = messages.some(isGatewayInjectedTeammateRouteNotice);
   let changed = false;
   const next: unknown[] = [];
   for (const message of messages) {
@@ -636,6 +677,10 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
       continue;
     }
     if (shouldDropEmptyAssistantHistoryMessage(res.message)) {
+      changed = true;
+      continue;
+    }
+    if (hideRoutedLeadingMentions && isLeadingTeammateMentionAssistantMessage(res.message)) {
       changed = true;
       continue;
     }
@@ -664,6 +709,7 @@ type ActiveChatRunSnapshot = {
   startedAtMs: number;
   expiresAtMs: number;
   streamText: string;
+  phase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing";
   effectiveUserMessage?: string;
   inputProvenance?: InputProvenance;
 };
@@ -784,6 +830,11 @@ function buildCanonicalToolInvocationMessage(entry: {
 function buildCanonicalToolInvocations(params: {
   messages: unknown[];
   defaultSessionKey: string;
+  visibleRunIdBySession?: (
+    sessionKey: string,
+    startedAt: number,
+    currentRunId?: string,
+  ) => string | undefined;
 }): CanonicalToolInvocation[] {
   const invocations = new Map<string, MutableToolInvocation>();
   const pendingByScopeAndName = new Map<string, string[]>();
@@ -1010,32 +1061,37 @@ function buildCanonicalToolInvocations(params: {
   const sorted = [...invocations.values()].toSorted(
     (a, b) => a.startedAt - b.startedAt || a.order - b.order,
   );
-  return sorted.map((entry) => ({
-    toolCallId: entry.toolCallId,
-    tool_call_id: entry.toolCallId,
-    ...(entry.runId ? { runId: entry.runId } : {}),
-    sessionKey: entry.sessionKey,
-    name: entry.name,
-    ...(entry.args !== undefined ? { args: entry.args } : {}),
-    ...(entry.output !== undefined ? { output: entry.output } : {}),
-    startedAt: entry.startedAt,
-    updatedAt: entry.updatedAt,
-    phase: entry.phase,
-    message: buildCanonicalToolInvocationMessage({
+  return sorted.map((entry) => {
+    const visibleRunId =
+      params.visibleRunIdBySession?.(entry.sessionKey, entry.startedAt, entry.runId) ?? entry.runId;
+    return {
       toolCallId: entry.toolCallId,
-      runId: entry.runId,
+      tool_call_id: entry.toolCallId,
+      ...(visibleRunId ? { runId: visibleRunId } : {}),
       sessionKey: entry.sessionKey,
       name: entry.name,
-      args: entry.args,
-      output: entry.output,
-      timestamp: entry.startedAt,
-    }),
-  }));
+      ...(entry.args !== undefined ? { args: entry.args } : {}),
+      ...(entry.output !== undefined ? { output: entry.output } : {}),
+      startedAt: entry.startedAt,
+      updatedAt: entry.updatedAt,
+      phase: entry.phase,
+      message: buildCanonicalToolInvocationMessage({
+        toolCallId: entry.toolCallId,
+        runId: visibleRunId,
+        sessionKey: entry.sessionKey,
+        name: entry.name,
+        args: entry.args,
+        output: entry.output,
+        timestamp: entry.startedAt,
+      }),
+    };
+  });
 }
 
 function resolveActiveChatRunSnapshot(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
   dedupe: Map<string, { payload?: unknown }>;
   historyMessages: unknown[];
   activeAgentRuns?: Array<{
@@ -1111,6 +1167,7 @@ function resolveActiveChatRunSnapshot(params: {
       startedAtMs: selectedChatRun.entry.startedAtMs,
       expiresAtMs: selectedChatRun.entry.expiresAtMs,
       streamText: truncated.text,
+      phase: params.chatRunPhases.get(selectedChatRun.runId) ?? "processing",
       ...(selectedChatRun.entry.effectiveUserMessage
         ? { effectiveUserMessage: selectedChatRun.entry.effectiveUserMessage }
         : {}),
@@ -1139,6 +1196,7 @@ function resolveActiveChatRunSnapshot(params: {
     startedAtMs: selectedAgentRun.startedAt,
     expiresAtMs: now + 60_000,
     streamText: truncated.text,
+    phase: params.chatRunPhases.get(selectedAgentRun.runId) ?? "processing",
     ...(selectedAgentRun.inputProvenance
       ? { inputProvenance: selectedAgentRun.inputProvenance }
       : {}),
@@ -1273,9 +1331,10 @@ function transcriptHasIdempotencyKey(transcriptPath: string, idempotencyKey: str
   }
 }
 
-function appendAssistantTranscriptMessage(params: {
+export function appendAssistantTranscriptMessage(params: {
   message: string;
   label?: string;
+  runId?: string;
   sessionId: string;
   storePath: string | undefined;
   sessionFile?: string;
@@ -1319,6 +1378,7 @@ function appendAssistantTranscriptMessage(params: {
     transcriptPath,
     message: params.message,
     label: params.label,
+    runId: params.runId,
     idempotencyKey: params.idempotencyKey,
     abortMeta: params.abortMeta,
   });
@@ -1369,7 +1429,7 @@ function appendUserTranscriptMessage(params: {
   });
 }
 
-async function forwardMentionRouteToAgent(params: {
+export async function forwardMentionRouteToAgent(params: {
   message: string;
   targetSessionKey: string;
   requesterSessionKey: string;
@@ -1607,8 +1667,19 @@ function persistAbortedPartials(params: {
   const { storePath, entry } = loadSessionEntry(params.sessionKey);
   for (const snapshot of params.snapshots) {
     const sessionId = entry?.sessionId ?? snapshot.sessionId ?? snapshot.runId;
+    const trimmedAbortText = trimAbortPartialAgainstTranscript({
+      sessionId,
+      storePath,
+      sessionFile: entry?.sessionFile,
+      runId: snapshot.runId,
+      text: snapshot.text,
+    });
+    if (!trimmedAbortText) {
+      continue;
+    }
     const appended = appendAssistantTranscriptMessage({
-      message: snapshot.text,
+      message: trimmedAbortText,
+      runId: snapshot.runId,
       sessionId,
       storePath,
       sessionFile: entry?.sessionFile,
@@ -1628,10 +1699,88 @@ function persistAbortedPartials(params: {
   }
 }
 
+function trimAbortPartialAgainstTranscript(params: {
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile?: string;
+  runId: string;
+  text: string;
+}): string {
+  const nextText = stripInlineDirectiveTagsForDisplay(params.text).text.trim();
+  if (!nextText) {
+    return "";
+  }
+  try {
+    const history = readSessionMessages(params.sessionId, params.storePath, params.sessionFile);
+    for (let i = history.length - 1; i >= 0; i--) {
+      const candidate = history[i] as Record<string, unknown>;
+      if (!candidate || typeof candidate !== "object") {
+        continue;
+      }
+      const role = typeof candidate.role === "string" ? candidate.role.toLowerCase() : "";
+      if (role !== "assistant") {
+        continue;
+      }
+      const runId =
+        typeof candidate.runId === "string"
+          ? candidate.runId.trim()
+          : typeof candidate.run_id === "string"
+            ? candidate.run_id.trim()
+            : "";
+      if (runId !== params.runId) {
+        continue;
+      }
+      const historyText = extractTranscriptAssistantText(candidate);
+      if (!historyText) {
+        continue;
+      }
+      if (nextText === historyText) {
+        return "";
+      }
+      if (nextText.startsWith(historyText)) {
+        return nextText.slice(historyText.length).trimStart();
+      }
+      break;
+    }
+  } catch {
+    return nextText;
+  }
+  return nextText;
+}
+
+function extractTranscriptAssistantText(message: Record<string, unknown>): string {
+  const raw = message.content;
+  if (typeof raw === "string") {
+    return stripInlineDirectiveTagsForDisplay(raw).text.trim();
+  }
+  if (!Array.isArray(raw)) {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const part = entry as Record<string, unknown>;
+    const type = typeof part.type === "string" ? part.type.trim().toLowerCase() : "";
+    if (
+      (type === "text" || type === "output_text" || type === "input_text") &&
+      typeof part.text === "string"
+    ) {
+      const text = stripInlineDirectiveTagsForDisplay(part.text).text.trim();
+      if (text) {
+        parts.push(text);
+      }
+    }
+  }
+  return parts.join("\n").trim();
+}
+
 function createChatAbortOps(context: GatewayRequestContext): ChatAbortOps {
   return {
     chatAbortControllers: context.chatAbortControllers,
     chatRunBuffers: context.chatRunBuffers,
+    chatRunPhases: context.chatRunPhases,
     chatDeltaSentAt: context.chatDeltaSentAt,
     chatAbortedRuns: context.chatAbortedRuns,
     removeChatRun: context.removeChatRun,
@@ -1807,7 +1956,7 @@ function broadcastQueuedChatRemovedEvent(params: {
 }
 
 export const chatHandlers: GatewayRequestHandlers = {
-  "chat.history": async ({ params, respond, context }) => {
+  "chat.history": async ({ params, respond, context, client }) => {
     if (!validateChatHistoryParams(params)) {
       respond(
         false,
@@ -1862,9 +2011,34 @@ export const chatHandlers: GatewayRequestHandlers = {
       });
     }
     const verboseLevel = entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
+    const visibleRunIdBySession = (
+      targetSessionKey: string,
+      _startedAt: number,
+      currentRunId?: string,
+    ): string | undefined => {
+      const normalizedTarget = targetSessionKey.trim();
+      if (!normalizedTarget) {
+        return currentRunId;
+      }
+      const now = Date.now();
+      for (const [runId, active] of context.chatAbortControllers) {
+        if (active.controller.signal.aborted) {
+          continue;
+        }
+        if (active.expiresAtMs <= now) {
+          continue;
+        }
+        if (active.sessionKey !== normalizedTarget) {
+          continue;
+        }
+        return runId;
+      }
+      return currentRunId;
+    };
     const toolInvocations = buildCanonicalToolInvocations({
       messages: bounded.messages,
       defaultSessionKey: canonicalKey || sessionKey,
+      visibleRunIdBySession,
     });
     const activeAgentRuns = new Map<
       string,
@@ -1891,12 +2065,51 @@ export const chatHandlers: GatewayRequestHandlers = {
     const activeRun = resolveActiveChatRunSnapshot({
       chatAbortControllers: context.chatAbortControllers,
       chatRunBuffers: context.chatRunBuffers,
+      chatRunPhases: context.chatRunPhases,
       dedupe: context.dedupe,
       historyMessages: bounded.messages,
       activeAgentRuns: [...activeAgentRuns.values()],
       requestedSessionKey: sessionKey,
       canonicalSessionKey: canonicalKey || sessionKey,
     });
+    const normalizedToolInvocations = activeRun
+      ? toolInvocations.map((invocation) => {
+          const message =
+            invocation.message && typeof invocation.message === "object"
+              ? {
+                  ...invocation.message,
+                  runId: activeRun.runId,
+                }
+              : invocation.message;
+          return {
+            ...invocation,
+            runId: activeRun.runId,
+            message,
+          };
+        })
+      : toolInvocations;
+    const connId = typeof client?.connId === "string" ? client.connId : undefined;
+    const wantsToolEvents = hasGatewayClientCap(
+      client?.connect?.caps,
+      GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
+    );
+    if (activeRun && connId && wantsToolEvents) {
+      context.registerToolEventRecipient(activeRun.runId, connId);
+      context.registerSessionToolEventRecipient(sessionKey, connId);
+      if (canonicalKey && canonicalKey !== sessionKey) {
+        context.registerSessionToolEventRecipient(canonicalKey, connId);
+      }
+      // Reconnects restore chat via chat.history without re-running chat.send, so
+      // live tool delivery must be re-subscribed here for the active session.
+      for (const [activeRunId, active] of context.chatAbortControllers) {
+        if (
+          activeRunId !== activeRun.runId &&
+          (active.sessionKey === sessionKey || active.sessionKey === canonicalKey)
+        ) {
+          context.registerToolEventRecipient(activeRunId, connId);
+        }
+      }
+    }
     const activeQueuedChatItemIds = new Set(
       [...activeAgentRuns.values()]
         .map((candidate) => candidate.queuedChatItemId || "")
@@ -1911,7 +2124,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey,
       sessionId,
       messages: bounded.messages,
-      toolInvocations,
+      toolInvocations: normalizedToolInvocations,
       activeRun,
       queuedMessages,
       thinkingLevel,
@@ -2194,6 +2407,13 @@ export const chatHandlers: GatewayRequestHandlers = {
       runId?: string;
     };
 
+    debugGateway(
+      context,
+      `[chat.abort] received sessionKey=${rawSessionKey} runId=${runId ?? "<session-scope>"} hasController=${
+        runId ? context.chatAbortControllers.has(runId) : "session-scope"
+      }`,
+    );
+
     const ops = createChatAbortOps(context);
 
     if (!runId) {
@@ -2210,6 +2430,10 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const active = context.chatAbortControllers.get(runId);
     if (!active) {
+      debugGateway(
+        context,
+        `[chat.abort] no controller for runId=${runId} sessionKey=${rawSessionKey}`,
+      );
       const runContext = getAgentRunContext(runId);
       if (runContext?.queuedChatItemId) {
         const runSessionKey = runContext.sessionKey?.trim() || rawSessionKey;
@@ -2256,6 +2480,10 @@ export const chatHandlers: GatewayRequestHandlers = {
       return;
     }
     if (active.sessionKey !== rawSessionKey) {
+      debugGateway(
+        context,
+        `[chat.abort] session mismatch runId=${runId} activeSessionKey=${active.sessionKey} requestedSessionKey=${rawSessionKey}`,
+      );
       respond(
         false,
         undefined,
@@ -2265,11 +2493,20 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     const partialText = context.chatRunBuffers.get(runId);
+    debugGateway(
+      context,
+      `[chat.abort] aborting runId=${runId} sessionKey=${rawSessionKey} bufferedChars=${partialText?.length ?? 0}`,
+    );
+    const embeddedAborted = active.sessionId ? abortEmbeddedPiRun(active.sessionId) : false;
     const res = abortChatRunById(ops, {
       runId,
       sessionKey: rawSessionKey,
       stopReason: "rpc",
     });
+    debugGateway(
+      context,
+      `[chat.abort] result runId=${runId} sessionKey=${rawSessionKey} aborted=${res.aborted} embeddedAborted=${embeddedAborted}`,
+    );
     if (res.aborted && partialText && partialText.trim()) {
       persistAbortedPartials({
         context,
@@ -2515,11 +2752,21 @@ export const chatHandlers: GatewayRequestHandlers = {
         expiresAtMs: resolveChatRunExpiresAtMs({ now, timeoutMs }),
         effectiveUserMessage,
       });
+      debugGateway(
+        context,
+        `[chat.send] registered controller runId=${clientRunId} sessionKey=${rawSessionKey} messageSid=${clientRunId} effectiveUserMessage=${JSON.stringify(
+          effectiveUserMessage ?? null,
+        )}`,
+      );
       const ackPayload = {
         runId: clientRunId,
         status: "started" as const,
         ...(effectiveUserMessage ? { effectiveUserMessage } : {}),
       };
+      debugGateway(
+        context,
+        `[chat.send] ack runId=${clientRunId} sessionKey=${rawSessionKey} status=started`,
+      );
       respond(true, ackPayload, undefined, { runId: clientRunId });
 
       const trimmedMessage = parsedMessage.trim();
@@ -2604,6 +2851,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       });
 
       let agentRunStarted = false;
+      let linkedAgentRunId: string | null = null;
+      debugGateway(
+        context,
+        `[chat.send] dispatch start runId=${clientRunId} sessionKey=${rawSessionKey}`,
+      );
       void dispatchInboundMessage({
         ctx,
         cfg,
@@ -2615,6 +2867,15 @@ export const chatHandlers: GatewayRequestHandlers = {
           forceQueueMode: p.queueMode === "followup" ? "followup" : undefined,
           onAgentRunStart: (runId) => {
             agentRunStarted = true;
+            linkedAgentRunId = runId;
+            debugGateway(
+              context,
+              `[chat.send] agent run started clientRunId=${clientRunId} linkedRunId=${runId} sessionKey=${sessionKey}`,
+            );
+            context.addChatRun(runId, {
+              sessionKey,
+              clientRunId,
+            });
             const connId = typeof client?.connId === "string" ? client.connId : undefined;
             const wantsToolEvents = hasGatewayClientCap(
               client?.connect?.caps,
@@ -2622,11 +2883,18 @@ export const chatHandlers: GatewayRequestHandlers = {
             );
             if (connId && wantsToolEvents) {
               context.registerToolEventRecipient(runId, connId);
+              context.registerSessionToolEventRecipient(sessionKey, connId);
+              if (p.sessionKey !== sessionKey) {
+                context.registerSessionToolEventRecipient(p.sessionKey, connId);
+              }
               // Register for any other active runs *in the same session* so
               // late-joining clients (e.g. page refresh mid-response) receive
               // in-progress tool events without leaking cross-session data.
               for (const [activeRunId, active] of context.chatAbortControllers) {
-                if (activeRunId !== runId && active.sessionKey === p.sessionKey) {
+                if (
+                  activeRunId !== runId &&
+                  (active.sessionKey === sessionKey || active.sessionKey === p.sessionKey)
+                ) {
                   context.registerToolEventRecipient(activeRunId, connId);
                 }
               }
@@ -2672,6 +2940,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                 const appended = appendAssistantTranscriptMessage({
                   message: routedNotice,
                   label: routedLabel,
+                  runId: clientRunId,
                   sessionId,
                   storePath: latestStorePath,
                   sessionFile: latestEntry?.sessionFile,
@@ -2700,6 +2969,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
               const appended = appendAssistantTranscriptMessage({
                 message: combinedReply,
+                runId: clientRunId,
                 sessionId,
                 storePath: latestStorePath,
                 sessionFile: latestEntry?.sessionFile,
@@ -2742,6 +3012,10 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         })
         .catch((err) => {
+          debugGateway(
+            context,
+            `[chat.send] dispatch error runId=${clientRunId} sessionKey=${rawSessionKey} error=${formatForLog(err)}`,
+          );
           const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
           setGatewayDedupeEntry({
             dedupe: context.dedupe,
@@ -2765,6 +3039,13 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         })
         .finally(() => {
+          debugGateway(
+            context,
+            `[chat.send] cleanup runId=${clientRunId} linkedRunId=${linkedAgentRunId ?? "<none>"} sessionKey=${rawSessionKey} agentRunStarted=${agentRunStarted}`,
+          );
+          if (linkedAgentRunId) {
+            context.removeChatRun(linkedAgentRunId, clientRunId, sessionKey);
+          }
           context.chatAbortControllers.delete(clientRunId);
         });
     } catch (err) {
@@ -2820,6 +3101,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const appended = appendAssistantTranscriptMessage({
       message: p.message,
       label: p.label,
+      runId: typeof p.runId === "string" ? p.runId.trim() || undefined : undefined,
       sessionId,
       storePath,
       sessionFile: entry?.sessionFile,

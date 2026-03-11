@@ -76,6 +76,7 @@ export async function createGatewayRuntimeState(params: {
   dedupe: Map<string, DedupeEntry>;
   chatRunState: ReturnType<typeof createChatRunState>;
   chatRunBuffers: Map<string, string>;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
   chatDeltaSentAt: Map<string, number>;
   addChatRun: (sessionId: string, entry: ChatRunEntry) => void;
   removeChatRun: (
@@ -85,6 +86,7 @@ export async function createGatewayRuntimeState(params: {
   ) => ChatRunEntry | undefined;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   toolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+  sessionToolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
 }> {
   let canvasHost: CanvasHostHandler | null = null;
   if (params.canvasHostEnabled) {
@@ -203,11 +205,13 @@ export async function createGatewayRuntimeState(params: {
   const chatRunState = createChatRunState();
   const chatRunRegistry = chatRunState.registry;
   const chatRunBuffers = chatRunState.buffers;
+  const chatRunPhases = chatRunState.phases;
   const chatDeltaSentAt = chatRunState.deltaSentAt;
   const addChatRun = chatRunRegistry.add;
   const removeChatRun = chatRunRegistry.remove;
   const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
   const toolEventRecipients = createToolEventRecipientRegistry();
+  const sessionToolEventRecipients = createToolEventRecipientRegistry();
 
   return {
     canvasHost,
@@ -222,10 +226,12 @@ export async function createGatewayRuntimeState(params: {
     dedupe,
     chatRunState,
     chatRunBuffers,
+    chatRunPhases,
     chatDeltaSentAt,
     addChatRun,
     removeChatRun,
     chatAbortControllers,
     toolEventRecipients,
+    sessionToolEventRecipients,
   };
 }

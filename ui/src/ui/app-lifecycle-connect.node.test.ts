@@ -4,6 +4,17 @@ const { connectGatewayMock, loadBootstrapMock } = vi.hoisted(() => ({
   connectGatewayMock: vi.fn(),
   loadBootstrapMock: vi.fn(),
 }));
+const traceUiWsMock = vi.hoisted(() => vi.fn());
+
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "window", {
+    value: {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    },
+    configurable: true,
+  });
+});
 
 vi.mock("./app-gateway.ts", () => ({
   connectGateway: connectGatewayMock,
@@ -11,6 +22,10 @@ vi.mock("./app-gateway.ts", () => ({
 
 vi.mock("./controllers/control-ui-bootstrap.ts", () => ({
   loadControlUiBootstrapConfig: loadBootstrapMock,
+}));
+
+vi.mock("./ws-trace.ts", () => ({
+  traceUiWs: traceUiWsMock,
 }));
 
 vi.mock("./app-settings.ts", () => ({
@@ -101,5 +116,18 @@ describe("handleConnected", () => {
     await Promise.resolve();
 
     expect(connectGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("traces handleConnected once per invocation", () => {
+    loadBootstrapMock.mockResolvedValueOnce(undefined);
+    connectGatewayMock.mockReset();
+    traceUiWsMock.mockReset();
+    const host = createHost();
+
+    handleConnected(host as never);
+
+    expect(traceUiWsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "app.handleConnected" }),
+    );
   });
 });

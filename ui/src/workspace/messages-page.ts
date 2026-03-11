@@ -7,6 +7,7 @@ import { loadChatHistory } from "../ui/controllers/chat.ts";
 import { icons } from "../ui/icons.ts";
 import type { WorkspaceAgentRow } from "../ui/types.ts";
 import { renderChat, type ChatProps } from "../ui/views/chat.ts";
+import { traceUiWs } from "../ui/ws-trace.ts";
 
 function getWorkspaceSearch(state: AppViewState & { workspaceMessagesSearch?: string }): string {
   return state.workspaceMessagesSearch ?? "";
@@ -79,8 +80,32 @@ function agentMention(agent: WorkspaceAgentRow | null | undefined): string | nul
 }
 
 export function selectWorkspaceMessagesAgent(state: AppViewState, agent: WorkspaceAgentRow) {
+  traceUiWs({
+    ts: Date.now(),
+    event: "workspace-messages.selectAgent",
+    instanceId: state.clientInstanceId,
+    tab: state.tab,
+    sessionKey: state.sessionKey,
+    runId: state.chatRunId,
+    details: {
+      previousAgentId: state.workspaceSelectedAgentId,
+      nextAgentId: agent.id,
+    },
+  });
   state.workspaceSelectedAgentId = agent.id;
   const sessionKey = `agent:${agent.id}:clawport`;
+  traceUiWs({
+    ts: Date.now(),
+    event: "workspace-messages.sessionKeyChange",
+    instanceId: state.clientInstanceId,
+    tab: state.tab,
+    sessionKey,
+    runId: state.chatRunId,
+    details: {
+      previousSessionKey: state.sessionKey,
+      nextSessionKey: sessionKey,
+    },
+  });
   state.sessionKey = sessionKey;
   state.chatMessage = "";
   state.chatMentionQuery = null;
@@ -268,11 +293,13 @@ export function renderWorkspaceMessagesThread(
 
   const chatProps: ChatProps = {
     sessionKey: state.sessionKey,
+    chatRunId: state.chatRunId,
     onSessionKeyChange: () => {},
     thinkingLevel: state.chatThinkingLevel,
     showThinking: state.settings.chatShowThinking,
     loading: state.chatLoading,
     sending: state.chatSending,
+    activeRun: Boolean(state.chatRunId || state.chatSending || state.chatResetInFlight),
     canAbort: Boolean(state.chatRunId),
     hideNewSessionButton: true,
     compactionStatus: state.compactionStatus,
@@ -281,6 +308,8 @@ export function renderWorkspaceMessagesThread(
     toolMessages: state.chatToolMessages,
     stream: state.chatStream,
     streamStartedAt: state.chatStreamStartedAt,
+    runPhase: state.chatRunPhase,
+    typingActive: state.chatRunPhase === "typing",
     assistantAvatarUrl: state.chatAvatarUrl,
     draft: state.chatMessage,
     queue: state.chatQueue,
@@ -329,6 +358,7 @@ export function renderWorkspaceMessagesThread(
     onAbort: () => void state.handleAbortChat(),
     onQueueRemove: (id) => state.removeQueuedMessage(id),
     onQueueEdit: (id) => state.editQueuedMessage(id),
+    onQueueSendNow: (id) => state.sendQueuedMessageNow(id),
     onNewSession: () => state.handleSendChat("/new", { restoreDraft: true }),
     onOpenSidebar: (content: string) => state.handleOpenSidebar(content),
     onCloseSidebar: () => state.handleCloseSidebar(),

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import {
+  applyPersistedDisplayRole,
   buildAfterTurnLegacyCompactionParams,
   composeSystemPromptWithHookContext,
   isOllamaCompatProvider,
@@ -102,6 +103,48 @@ describe("resolvePromptBuildHookResult", () => {
     expect(result.prependContext).toBe("prompt context\n\nlegacy context");
     expect(result.prependSystemContext).toBe("prompt prepend\n\nlegacy prepend");
     expect(result.appendSystemContext).toBe("prompt append\n\nlegacy append");
+  });
+});
+
+describe("applyPersistedDisplayRole", () => {
+  it("rewrites the persisted bootstrap prompt to system role", () => {
+    const rewriteFile = vi.fn();
+    const sessionManager = {
+      fileEntries: [
+        { type: "session" },
+        { type: "message", message: { role: "user", content: "/reset" } },
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: "A new session was started via /new or /reset.",
+          },
+        },
+      ],
+      _rewriteFile: rewriteFile,
+    } as unknown as import("@mariozechner/pi-coding-agent").SessionManager;
+    const agentMessages = [
+      { role: "user", content: "/reset" },
+      { role: "user", content: "A new session was started via /new or /reset." },
+    ] as unknown as import("@mariozechner/pi-agent-core").AgentMessage[];
+
+    const changed = applyPersistedDisplayRole({
+      sessionManager,
+      agentMessages,
+      prompt: "A new session was started via /new or /reset.",
+      role: "system",
+    });
+
+    expect(changed).toBe(true);
+    expect(
+      (
+        sessionManager as unknown as {
+          fileEntries: Array<{ type?: string; message?: { role?: string } }>;
+        }
+      ).fileEntries[2]?.message?.role,
+    ).toBe("system");
+    expect((agentMessages[1] as { role?: string }).role).toBe("system");
+    expect(rewriteFile).toHaveBeenCalledOnce();
   });
 });
 

@@ -34,6 +34,7 @@ function createOps(params: {
   return {
     chatAbortControllers: new Map([[runId, entry]]),
     chatRunBuffers: new Map(buffer !== undefined ? [[runId, buffer]] : []),
+    chatRunPhases: new Map([[runId, "processing"]]),
     chatDeltaSentAt: new Map([[runId, Date.now()]]),
     chatAbortedRuns: new Map(),
     removeChatRun,

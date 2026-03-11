@@ -38,7 +38,13 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
 
   const hasToolName = typeof m.toolName === "string" || typeof m.tool_name === "string";
 
-  if (hasToolId || hasToolContent || hasToolName) {
+  const originalRole = role.toLowerCase();
+  const shouldPromoteToToolRole =
+    originalRole !== "assistant" &&
+    originalRole !== "peer" &&
+    (hasToolId || hasToolContent || hasToolName);
+
+  if (shouldPromoteToToolRole) {
     role = "toolResult";
   }
 
@@ -81,6 +87,11 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
       }
       return item;
     });
+  }
+
+  if (role === "system") {
+    speakerLabel = "System";
+    speakerInitial = "S";
   }
 
   return { role, content, timestamp, id, speakerKey, speakerLabel, speakerInitial };

@@ -333,6 +333,9 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain("write a normal message that starts with a teammate alias");
+    expect(prompt).toContain(
+      "Never use `message` or `sessions_send` to contact a teammate when that alias route is available.",
+    );
     expect(prompt).toContain("Treat teammate aliases as plain message text, not as a tool name");
   });
 
@@ -650,6 +653,9 @@ describe("buildAgentSystemPrompt", () => {
 
     expect(prompt).toContain("message: Send messages and channel actions");
     expect(prompt).toContain("### message tool");
+    expect(prompt).toContain("Use `message` for proactive sends + channel actions");
+    expect(prompt).toContain("include `target` and `message`");
+    expect(prompt).not.toContain("include `to` and `message`");
     expect(prompt).toContain(`respond with ONLY: ${SILENT_REPLY_TOKEN}`);
   });
 

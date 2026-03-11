@@ -1,6 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleDisconnected } from "./app-lifecycle.ts";
 
+const traceUiWsMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./ws-trace.ts", () => ({
+  traceUiWs: traceUiWsMock,
+}));
+
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "window", {
+    value: {
+      removeEventListener: vi.fn(),
+    },
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    },
+    configurable: true,
+  });
+});
+
 function createHost() {
   return {
     basePath: "",
@@ -41,6 +64,9 @@ describe("handleDisconnected", () => {
     expect(host.connected).toBe(false);
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(host.topbarObserver).toBeNull();
+    expect(traceUiWsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "app.handleDisconnected" }),
+    );
     removeSpy.mockRestore();
   });
 });

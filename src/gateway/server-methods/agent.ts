@@ -590,8 +590,9 @@ export const agentHandlers: GatewayRequestHandlers = {
       client?.connect?.caps,
       GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
     );
-    if (connId && wantsToolEvents) {
+    if (connId && wantsToolEvents && requestedSessionKey) {
       context.registerToolEventRecipient(runId, connId);
+      context.registerSessionToolEventRecipient(requestedSessionKey, connId);
       // Register for any other active runs *in the same session* so
       // late-joining clients (e.g. page refresh mid-response) receive
       // in-progress tool events without leaking cross-session data.

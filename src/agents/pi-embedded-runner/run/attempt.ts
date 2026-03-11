@@ -143,6 +143,51 @@ type PromptBuildHookRunner = {
   ) => Promise<PluginHookBeforeAgentStartResult | undefined>;
 };
 
+type SessionMessageEntryLike = {
+  type: "message";
+  message: {
+    role?: string;
+    content?: unknown;
+  };
+};
+
+type SessionManagerRewriteLike = SessionManager & {
+  fileEntries: Array<{ type?: string; message?: { role?: string; content?: unknown } }>;
+  _rewriteFile?: () => void;
+};
+
+export function applyPersistedDisplayRole(params: {
+  sessionManager: SessionManager;
+  agentMessages: AgentMessage[];
+  prompt: string;
+  role?: "system";
+}): boolean {
+  if (params.role !== "system") {
+    return false;
+  }
+
+  const sessionManager = params.sessionManager as SessionManagerRewriteLike;
+  for (let i = sessionManager.fileEntries.length - 1; i >= 0; i -= 1) {
+    const entry = sessionManager.fileEntries[i] as SessionMessageEntryLike | undefined;
+    if (entry?.type !== "message" || entry.message?.role !== "user") {
+      continue;
+    }
+    if (entry.message.content !== params.prompt) {
+      continue;
+    }
+    entry.message.role = "system";
+    const message = params.agentMessages.findLast(
+      (item) => item.role === "user" && item.content === params.prompt,
+    );
+    if (message) {
+      message.role = "system";
+    }
+    sessionManager._rewriteFile?.();
+    return true;
+  }
+  return false;
+}
+
 export function isOllamaCompatProvider(model: {
   provider?: string;
   baseUrl?: string;
@@ -1082,6 +1127,7 @@ export async function runEmbeddedAttempt(
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
+        runId: params.runId,
         inputProvenance: params.inputProvenance,
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
         allowedToolNames,
@@ -1777,6 +1823,12 @@ export async function runEmbeddedAttempt(
           } else {
             await abortable(activeSession.prompt(effectivePrompt));
           }
+          applyPersistedDisplayRole({
+            sessionManager,
+            agentMessages: activeSession.messages,
+            prompt: effectivePrompt,
+            role: params.persistedDisplayRole,
+          });
         } catch (err) {
           promptError = err;
           promptErrorSource = "prompt";

@@ -141,8 +141,11 @@ export function createFollowupRunner(params: {
       if (queued.run.sessionKey) {
         registerAgentRunContext(runId, {
           sessionKey: queued.run.sessionKey,
+          sessionId: queued.run.sessionId,
           verboseLevel: queued.run.verboseLevel,
+          inputProvenance: queued.run.inputProvenance,
           isControlUiVisible: shouldSurfaceToControlUi,
+          queuedChatItemId: queued.id?.trim() || queued.messageId?.trim(),
         });
       }
       let autoCompactionCompleted = false;
@@ -188,6 +191,7 @@ export function createFollowupRunner(params: {
               senderUsername: queued.run.senderUsername,
               senderE164: queued.run.senderE164,
               senderIsOwner: queued.run.senderIsOwner,
+              inputProvenance: queued.run.inputProvenance,
               sessionFile: queued.run.sessionFile,
               agentDir: queued.run.agentDir,
               workspaceDir: queued.run.workspaceDir,

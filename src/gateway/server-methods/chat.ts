@@ -1,17 +1,38 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
+import {
+  resolveAgentDir,
+  resolveAgentWorkspaceDir,
+  resolveSessionAgentId,
+} from "../../agents/agent-scope.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
+import { abortEmbeddedPiRun, isEmbeddedPiRunActive } from "../../agents/pi-embedded.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { createAgentToAgentPolicy } from "../../agents/tools/sessions-access.js";
 import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
+import { enqueueFollowupRun, resolveQueueSettings } from "../../auto-reply/reply/queue.js";
+import {
+  ensureFollowupRunId,
+  getExistingFollowupQueue,
+  markFollowupQueueItemSteering,
+  popSteeredFollowupQueueItems,
+  popFollowupQueueItem,
+  removeFollowupQueueItem,
+} from "../../auto-reply/reply/queue/state.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
 import { buildBareSessionResetPrompt } from "../../auto-reply/reply/session-reset-prompt.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
-import { resolveSessionFilePath } from "../../config/sessions.js";
+import { loadConfig } from "../../config/config.js";
+import { resolveSessionFilePath, resolveSessionFilePathOptions } from "../../config/sessions.js";
+import {
+  clearAgentRunContext,
+  emitAgentEvent,
+  getAgentRunContext,
+} from "../../infra/agent-events.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
@@ -47,6 +68,7 @@ import {
   validateChatAbortParams,
   validateChatHistoryParams,
   validateChatInjectParams,
+  validateChatQueueItemActionParams,
   validateChatSendParams,
 } from "../protocol/index.js";
 import { CHAT_SEND_SESSION_KEY_MAX_LENGTH } from "../protocol/schema/primitives.js";
@@ -126,6 +148,150 @@ type ChatSendOriginatingRoute = {
   messageThreadId?: string | number;
   explicitDeliverRoute: boolean;
 };
+
+type ChatQueuedMessageSnapshot = {
+  id: string;
+  text: string;
+  createdAt: number;
+  steering?: boolean;
+};
+
+type ChatQueueChangedPayload = {
+  sessionKey: string;
+  queue: ChatQueuedMessageSnapshot[];
+};
+
+type QueuedChatMessage = {
+  role: "user";
+  content: Array<{ type: "text"; text: string }>;
+  timestamp: number;
+  idempotencyKey: string;
+  queued: true;
+};
+
+type ChatQueueCandidate = {
+  key: string;
+};
+
+function resolveQueuedChatMessages(params: {
+  sessionKey: string;
+  canonicalKey: string;
+  sessionId?: string;
+}): ChatQueuedMessageSnapshot[] {
+  const seen = new Set<string>();
+  const snapshots: ChatQueuedMessageSnapshot[] = [];
+  const candidates = [params.canonicalKey, params.sessionKey, params.sessionId]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+
+  for (const key of candidates) {
+    const queue = getExistingFollowupQueue(key);
+    if (!queue?.items.length) {
+      continue;
+    }
+    for (const item of queue.items) {
+      const id =
+        item.id?.trim() ||
+        item.messageId?.trim() ||
+        `${item.enqueuedAt}:${item.summaryLine?.trim() || item.prompt.trim().slice(0, 64)}`;
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      snapshots.push({
+        id,
+        text: item.summaryLine?.trim() || item.prompt.trim(),
+        createdAt: item.enqueuedAt,
+        steering: item.steering === true,
+      });
+    }
+  }
+
+  return snapshots.toSorted((a, b) => a.createdAt - b.createdAt);
+}
+
+function resolveQueueCandidates(params: {
+  sessionKey: string;
+  canonicalKey: string;
+  sessionId?: string;
+}): ChatQueueCandidate[] {
+  const seen = new Set<string>();
+  const values = [params.canonicalKey, params.sessionKey, params.sessionId]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+  const candidates: ChatQueueCandidate[] = [];
+  for (const key of values) {
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    candidates.push({ key });
+  }
+  return candidates;
+}
+
+function resolveQueueItemSnapshot(item: {
+  id?: string;
+  messageId?: string;
+  enqueuedAt: number;
+  summaryLine?: string;
+  prompt: string;
+  steering?: boolean;
+}) {
+  const id =
+    item.id?.trim() ||
+    item.messageId?.trim() ||
+    `${item.enqueuedAt}:${item.summaryLine?.trim() || item.prompt.trim().slice(0, 64)}`;
+  return {
+    id,
+    text: item.summaryLine?.trim() || item.prompt.trim(),
+    createdAt: item.enqueuedAt,
+    editable: true,
+    sendable: item.steering !== true,
+    steering: item.steering === true,
+  };
+}
+
+function buildQueuedChatMessage(params: {
+  itemId: string;
+  text: string;
+  createdAt: number;
+}): QueuedChatMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text: params.text }],
+    timestamp: params.createdAt,
+    idempotencyKey: params.itemId,
+    queued: true,
+  };
+}
+
+function findQueuedChatMessage(params: {
+  sessionKey: string;
+  canonicalKey: string;
+  sessionId?: string;
+  itemId: string;
+}) {
+  const lookupId = params.itemId.trim();
+  if (!lookupId) {
+    return null;
+  }
+  for (const candidate of resolveQueueCandidates(params)) {
+    const queue = getExistingFollowupQueue(candidate.key);
+    if (!queue?.items.length) {
+      continue;
+    }
+    const item = queue.items.find((entry) => {
+      const snapshot = resolveQueueItemSnapshot(entry);
+      const messageId = entry.messageId?.trim();
+      return snapshot.id === lookupId || messageId === lookupId;
+    });
+    if (item) {
+      return { key: candidate.key, item };
+    }
+  }
+  return null;
+}
 
 function resolveChatSendOriginatingRoute(params: {
   client?: { mode?: string | null; id?: string | null } | null;
@@ -227,6 +393,15 @@ function stripDisallowedChatControlChars(message: string): string {
     }
   }
   return output;
+}
+
+function buildSteerMessagesPrefix(messages: Array<{ text: string }>): string {
+  const cleaned = messages.map((message) => message.text.trim()).filter(Boolean);
+  if (cleaned.length === 0) {
+    return "";
+  }
+  const lines = cleaned.map((message) => `- ${message.replace(/\n/g, "\n  ")}`);
+  return `Queued context to include in this turn:\n${lines.join("\n")}\n\n`;
 }
 
 export function sanitizeChatSendMessageInput(
@@ -372,6 +547,79 @@ function extractAssistantTextForSilentCheck(message: unknown): string | undefine
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
+function assistantMessageHasRenderableNonTextContent(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "assistant" || !Array.isArray(entry.content)) {
+    return false;
+  }
+  return entry.content.some((block) => {
+    if (!block || typeof block !== "object") {
+      return false;
+    }
+    const typed = block as { type?: unknown };
+    const normalizedType = normalizeToolBlockType(typed.type);
+    return normalizedType.length > 0 && normalizedType !== "text";
+  });
+}
+
+function shouldDropEmptyAssistantHistoryMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "assistant") {
+    return false;
+  }
+  const text = extractAssistantTextForSilentCheck(message);
+  if (typeof text === "string" && text.trim().length > 0) {
+    return false;
+  }
+  return !assistantMessageHasRenderableNonTextContent(message);
+}
+
+function isTerminalAssistantHistoryMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "assistant") {
+    return false;
+  }
+  if (shouldDropEmptyAssistantHistoryMessage(message)) {
+    return true;
+  }
+  const text = extractAssistantTextForSilentCheck(message);
+  return typeof text === "string" && text.trim().length > 0;
+}
+
+function hasTerminalAssistantHistorySince(messages: unknown[], startedAtMs: number): boolean {
+  return messages.some((message) => {
+    if (!message || typeof message !== "object") {
+      return false;
+    }
+    const entry = message as Record<string, unknown>;
+    return (
+      isTerminalAssistantHistoryMessage(message) &&
+      typeof entry.timestamp === "number" &&
+      entry.timestamp >= startedAtMs
+    );
+  });
+}
+
+function shouldSuppressRecoveredBlankActiveRun(params: {
+  startedAtMs: number;
+  streamText: string;
+  historyMessages: unknown[];
+}): boolean {
+  return (
+    params.streamText.trim().length === 0 &&
+    hasTerminalAssistantHistorySince(params.historyMessages, params.startedAtMs)
+  );
+}
+
 function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   if (messages.length === 0) {
     return messages;
@@ -384,6 +632,10 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
     // Drop assistant messages whose entire visible text is the silent reply token.
     const text = extractAssistantTextForSilentCheck(res.message);
     if (text !== undefined && isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
+      changed = true;
+      continue;
+    }
+    if (shouldDropEmptyAssistantHistoryMessage(res.message)) {
       changed = true;
       continue;
     }
@@ -785,11 +1037,13 @@ function resolveActiveChatRunSnapshot(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
   dedupe: Map<string, { payload?: unknown }>;
+  historyMessages: unknown[];
   activeAgentRuns?: Array<{
     runId: string;
     sessionKey: string;
     startedAt: number;
     inputProvenance?: InputProvenance;
+    queuedChatItemId?: string;
   }>;
   requestedSessionKey: string;
   canonicalSessionKey: string;
@@ -832,7 +1086,7 @@ function resolveActiveChatRunSnapshot(params: {
       (entry) =>
         (entry.sessionKey === params.requestedSessionKey ||
           entry.sessionKey === params.canonicalSessionKey) &&
-        entry.inputProvenance?.kind === "inter_session",
+        (entry.inputProvenance?.kind === "inter_session" || Boolean(entry.queuedChatItemId)),
     ) ?? null;
 
   if (
@@ -842,6 +1096,15 @@ function resolveActiveChatRunSnapshot(params: {
     const rawStream = params.chatRunBuffers.get(selectedChatRun.runId) ?? "";
     const stripped = stripInlineDirectiveTagsForDisplay(rawStream);
     const truncated = truncateChatHistoryText(stripped.text);
+    if (
+      shouldSuppressRecoveredBlankActiveRun({
+        startedAtMs: selectedChatRun.entry.startedAtMs,
+        streamText: truncated.text,
+        historyMessages: params.historyMessages,
+      })
+    ) {
+      return null;
+    }
     return {
       runId: selectedChatRun.runId,
       sessionKey: selectedChatRun.entry.sessionKey,
@@ -861,6 +1124,15 @@ function resolveActiveChatRunSnapshot(params: {
   const rawStream = params.chatRunBuffers.get(selectedAgentRun.runId) ?? "";
   const stripped = stripInlineDirectiveTagsForDisplay(rawStream);
   const truncated = truncateChatHistoryText(stripped.text);
+  if (
+    shouldSuppressRecoveredBlankActiveRun({
+      startedAtMs: selectedAgentRun.startedAt,
+      streamText: truncated.text,
+      historyMessages: params.historyMessages,
+    })
+  ) {
+    return null;
+  }
   return {
     runId: selectedAgentRun.runId,
     sessionKey: selectedAgentRun.sessionKey,
@@ -1111,14 +1383,137 @@ async function forwardMentionRouteToAgent(params: {
   context: GatewayRequestContext;
   client: GatewayClient | null;
 }): Promise<
-  | { ok: true; payload?: unknown }
+  | { ok: true; payload?: unknown; delivery: "started" | "queued" }
   | { ok: false; payload?: unknown; error: ReturnType<typeof errorShape> }
 > {
+  const target = loadSessionEntry(params.targetSessionKey);
+  const targetSessionKey = target.canonicalKey || params.targetSessionKey.trim();
+  const targetEntry = target.entry;
+  const targetSessionId = targetEntry?.sessionId?.trim();
+  if (!targetSessionId) {
+    return {
+      ok: false,
+      error: errorShape(ErrorCodes.INVALID_REQUEST, "target teammate session not found"),
+    };
+  }
+
+  const inputProvenance: InputProvenance = {
+    kind: "inter_session",
+    sourceSessionKey: params.requesterSessionKey,
+    sourceChannel: "webchat",
+    sourceTool: "mention_route",
+  };
+  const hasAttachments = Array.isArray(params.attachments) && params.attachments.length > 0;
+  const targetBusy =
+    isEmbeddedPiRunActive(targetSessionId) ||
+    listActiveAgentRunsForSession(params.targetSessionKey).length > 0 ||
+    (targetSessionKey !== params.targetSessionKey.trim()
+      ? listActiveAgentRunsForSession(targetSessionKey).length > 0
+      : false);
+
+  if (targetBusy && !hasAttachments) {
+    const targetAgentId = resolveSessionAgentId({
+      sessionKey: targetSessionKey,
+      config: target.cfg,
+    });
+    const { provider, model } = resolveSessionModelRef(target.cfg, targetEntry, targetAgentId);
+    const sessionFile =
+      targetEntry?.sessionFile ||
+      resolveSessionFilePath(
+        targetSessionId,
+        targetEntry,
+        resolveSessionFilePathOptions({
+          agentId: targetAgentId,
+          storePath: target.storePath,
+        }),
+      );
+    const queueSettings = resolveQueueSettings({
+      cfg: target.cfg,
+      channel: INTERNAL_MESSAGE_CHANNEL,
+      sessionEntry: targetEntry,
+      inlineMode: "followup",
+    });
+    const queueSettingsForControlUi = {
+      ...queueSettings,
+      dropPolicy: queueSettings.dropPolicy === "new" ? "summarize" : queueSettings.dropPolicy,
+    } as const;
+    const stampedMessage = injectTimestamp(
+      params.message,
+      timestampOptsFromConfig(target.cfg),
+    ).trim();
+    const queuedRun = ensureFollowupRunId({
+      id: params.idempotencyKey,
+      prompt: stampedMessage,
+      messageId: params.idempotencyKey,
+      summaryLine: params.message.trim(),
+      enqueuedAt: Date.now(),
+      originatingChatType: "direct",
+      run: {
+        agentId: targetAgentId,
+        agentDir: resolveAgentDir(target.cfg, targetAgentId),
+        sessionId: targetSessionId,
+        sessionKey: targetSessionKey,
+        messageProvider: INTERNAL_MESSAGE_CHANNEL,
+        agentAccountId: targetEntry?.accountId,
+        groupId: targetEntry?.groupId,
+        groupChannel: targetEntry?.groupChannel,
+        groupSpace: targetEntry?.groupSpace,
+        inputProvenance,
+        sessionFile,
+        workspaceDir: resolveAgentWorkspaceDir(target.cfg, targetAgentId),
+        config: target.cfg,
+        provider,
+        model,
+        timeoutMs: resolveAgentTimeoutMs({ cfg: target.cfg }),
+        blockReplyBreak: "text_end",
+      },
+    });
+    const enqueued = enqueueFollowupRun(
+      targetSessionKey,
+      queuedRun,
+      queueSettingsForControlUi,
+      "message-id",
+    );
+    if (!enqueued) {
+      return {
+        ok: false,
+        payload: {
+          ok: false,
+          item: null,
+          queue: resolveQueuedMessagesForSessionKey(targetSessionKey),
+        },
+        error: errorShape(ErrorCodes.UNAVAILABLE, "agent route queue failed"),
+      };
+    }
+    const itemId = queuedRun.id ?? params.idempotencyKey;
+    broadcastQueuedChatEvent({
+      context: params.context,
+      sessionKey: targetSessionKey,
+      itemId,
+      text: params.message.trim(),
+      createdAt: queuedRun.enqueuedAt,
+    });
+    const queue = broadcastChatQueueChanged({
+      context: params.context,
+      sessionKey: targetSessionKey,
+      queueLookupSessionKey: targetSessionKey,
+    });
+    return {
+      ok: true,
+      delivery: "queued",
+      payload: {
+        ok: true,
+        item: resolveQueueItemSnapshot(queuedRun),
+        queue,
+      },
+    };
+  }
+
   return await new Promise((resolve) => {
     let settled = false;
     const settle = (
       result:
-        | { ok: true; payload?: unknown }
+        | { ok: true; payload?: unknown; delivery: "started" | "queued" }
         | { ok: false; payload?: unknown; error: ReturnType<typeof errorShape> },
     ) => {
       if (settled) {
@@ -1134,7 +1529,7 @@ async function forwardMentionRouteToAgent(params: {
       error,
     ) => {
       if (ok) {
-        settle({ ok: true, payload });
+        settle({ ok: true, payload, delivery: "started" });
         return;
       }
       settle({
@@ -1159,12 +1554,7 @@ async function forwardMentionRouteToAgent(params: {
         attachments: params.attachments,
         deliver: false,
         idempotencyKey: params.idempotencyKey,
-        inputProvenance: {
-          kind: "inter_session",
-          sourceSessionKey: params.requesterSessionKey,
-          sourceChannel: "webchat",
-          sourceTool: "mention_route",
-        },
+        inputProvenance,
       },
       context: params.context,
       client: params.client,
@@ -1325,6 +1715,97 @@ function broadcastChatError(params: {
   params.context.agentRunSeq.delete(params.runId);
 }
 
+function broadcastChatAborted(params: {
+  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
+  runId: string;
+  sessionKey: string;
+  stopReason?: string;
+  message?: Record<string, unknown>;
+}) {
+  const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.runId);
+  const strippedEnvelopeMessage = stripEnvelopeFromMessage(params.message) as
+    | Record<string, unknown>
+    | undefined;
+  const payload = {
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    seq,
+    state: "aborted" as const,
+    stopReason: params.stopReason,
+    message: stripInlineDirectiveTagsFromMessageForDisplay(strippedEnvelopeMessage),
+  };
+  params.context.broadcast("chat", payload);
+  params.context.nodeSendToSession(params.sessionKey, "chat", payload);
+  params.context.agentRunSeq.delete(params.runId);
+}
+
+function resolveQueuedMessagesForSessionKey(sessionKey: string) {
+  const { canonicalKey, entry } = loadSessionEntry(sessionKey);
+  return resolveQueuedChatMessages({
+    sessionKey,
+    canonicalKey: canonicalKey || sessionKey,
+    sessionId: entry?.sessionId,
+  });
+}
+
+function broadcastChatQueueChanged(params: {
+  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession">;
+  sessionKey: string;
+  queueLookupSessionKey?: string;
+}) {
+  const payload: ChatQueueChangedPayload = {
+    sessionKey: params.sessionKey,
+    queue: resolveQueuedMessagesForSessionKey(params.queueLookupSessionKey ?? params.sessionKey),
+  };
+  params.context.broadcast("chat.queue.changed", payload);
+  params.context.nodeSendToSession(params.sessionKey, "chat.queue.changed", payload);
+  return payload.queue;
+}
+
+function broadcastQueuedChatEvent(params: {
+  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
+  sessionKey: string;
+  itemId: string;
+  text: string;
+  createdAt: number;
+}) {
+  const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.itemId);
+  const payload = {
+    runId: params.itemId,
+    sessionKey: params.sessionKey,
+    seq,
+    state: "queued" as const,
+    queueItemId: params.itemId,
+    source: "queue",
+    message: buildQueuedChatMessage({
+      itemId: params.itemId,
+      text: params.text,
+      createdAt: params.createdAt,
+    }),
+  };
+  params.context.broadcast("chat", payload);
+  params.context.nodeSendToSession(params.sessionKey, "chat", payload);
+}
+
+function broadcastQueuedChatRemovedEvent(params: {
+  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
+  sessionKey: string;
+  itemId: string;
+}) {
+  const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.itemId);
+  const payload = {
+    runId: params.itemId,
+    sessionKey: params.sessionKey,
+    seq,
+    state: "queue_removed" as const,
+    queueItemId: params.itemId,
+    source: "queue",
+  };
+  params.context.broadcast("chat", payload);
+  params.context.nodeSendToSession(params.sessionKey, "chat", payload);
+  params.context.agentRunSeq.delete(params.itemId);
+}
+
 export const chatHandlers: GatewayRequestHandlers = {
   "chat.history": async ({ params, respond, context }) => {
     if (!validateChatHistoryParams(params)) {
@@ -1392,6 +1873,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionKey: string;
         startedAt: number;
         inputProvenance?: InputProvenance;
+        queuedChatItemId?: string;
       }
     >();
     for (const candidate of [
@@ -1400,24 +1882,299 @@ export const chatHandlers: GatewayRequestHandlers = {
         ? listActiveAgentRunsForSession(canonicalKey)
         : []),
     ]) {
-      activeAgentRuns.set(candidate.runId, candidate);
+      const runContext = getAgentRunContext(candidate.runId);
+      activeAgentRuns.set(candidate.runId, {
+        ...candidate,
+        queuedChatItemId: runContext?.queuedChatItemId?.trim() || undefined,
+      });
     }
     const activeRun = resolveActiveChatRunSnapshot({
       chatAbortControllers: context.chatAbortControllers,
       chatRunBuffers: context.chatRunBuffers,
       dedupe: context.dedupe,
+      historyMessages: bounded.messages,
       activeAgentRuns: [...activeAgentRuns.values()],
       requestedSessionKey: sessionKey,
       canonicalSessionKey: canonicalKey || sessionKey,
     });
+    const activeQueuedChatItemIds = new Set(
+      [...activeAgentRuns.values()]
+        .map((candidate) => candidate.queuedChatItemId || "")
+        .filter((value) => value.length > 0),
+    );
+    const queuedMessages = resolveQueuedChatMessages({
+      sessionKey,
+      canonicalKey: canonicalKey || sessionKey,
+      sessionId,
+    }).filter((item) => !activeQueuedChatItemIds.has(item.id));
     respond(true, {
       sessionKey,
       sessionId,
       messages: bounded.messages,
       toolInvocations,
       activeRun,
+      queuedMessages,
       thinkingLevel,
       verboseLevel,
+    });
+  },
+  "chat.queue.enqueue": async ({ params, respond, context, client }) => {
+    if (!validateChatSendParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.queue.enqueue params: ${formatValidationErrors(validateChatSendParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const p = params as {
+      sessionKey: string;
+      message: string;
+      idempotencyKey: string;
+      timeoutMs?: number;
+      thinking?: string;
+    };
+    const sanitizedMessageResult = sanitizeChatSendMessageInput(p.message);
+    if (!sanitizedMessageResult.ok) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, sanitizedMessageResult.error),
+      );
+      return;
+    }
+    const parsedMessage = sanitizedMessageResult.message;
+    if (!parsedMessage.trim()) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "message is required"));
+      return;
+    }
+
+    const cfg = loadConfig();
+    const rawSessionKey = p.sessionKey.trim();
+    const { canonicalKey, storePath, entry } = loadSessionEntry(rawSessionKey);
+    const sessionKey = canonicalKey || rawSessionKey;
+    const requesterAgentId = resolveSessionAgentId({ sessionKey, config: cfg });
+    const clientRunId = p.idempotencyKey.trim() || crypto.randomUUID();
+    const trimmedMessage = parsedMessage.trim();
+    const clientInfo = client?.connect?.client;
+    const { originatingChannel, originatingTo, accountId, messageThreadId } =
+      resolveChatSendOriginatingRoute({
+        client: clientInfo,
+        deliver: false,
+        entry,
+        hasConnectedClient: client?.connect !== undefined,
+        mainKey: cfg.session?.mainKey,
+        sessionKey,
+      });
+    const stampedMessage = injectTimestamp(parsedMessage, timestampOptsFromConfig(cfg)).trim();
+    const sessionId = entry?.sessionId?.trim() || clientRunId;
+    const agentDir = resolveAgentDir(cfg, requesterAgentId);
+    const workspaceDir = resolveAgentWorkspaceDir(cfg, requesterAgentId);
+    const { provider, model } = resolveSessionModelRef(cfg, entry, requesterAgentId);
+    const sessionFile =
+      entry?.sessionFile ||
+      resolveSessionFilePath(
+        sessionId,
+        entry,
+        resolveSessionFilePathOptions({
+          agentId: requesterAgentId,
+          storePath,
+        }),
+      );
+    const queueSettings = resolveQueueSettings({
+      cfg,
+      channel: INTERNAL_MESSAGE_CHANNEL,
+      sessionEntry: entry,
+      inlineMode: "followup",
+    });
+    const queueSettingsForControlUi = {
+      ...queueSettings,
+      // An explicit UI queue action should not be rejected because the generic
+      // queue policy is configured to drop new items when full.
+      dropPolicy: queueSettings.dropPolicy === "new" ? "summarize" : queueSettings.dropPolicy,
+    } as const;
+    const queuedRun = ensureFollowupRunId({
+      id: clientRunId,
+      prompt: stampedMessage,
+      messageId: clientRunId,
+      summaryLine: trimmedMessage,
+      enqueuedAt: Date.now(),
+      originatingChannel,
+      originatingTo,
+      originatingAccountId: accountId,
+      originatingThreadId: messageThreadId,
+      originatingChatType: "direct",
+      run: {
+        agentId: requesterAgentId,
+        agentDir,
+        sessionId,
+        sessionKey,
+        messageProvider: INTERNAL_MESSAGE_CHANNEL,
+        agentAccountId: entry?.accountId,
+        groupId: entry?.groupId,
+        groupChannel: entry?.groupChannel,
+        groupSpace: entry?.groupSpace,
+        senderId: clientInfo?.id,
+        senderName: clientInfo?.displayName,
+        senderUsername: clientInfo?.displayName,
+        sessionFile,
+        workspaceDir,
+        config: cfg,
+        provider,
+        model,
+        timeoutMs: p.timeoutMs ?? resolveAgentTimeoutMs({ cfg }),
+        blockReplyBreak: "text_end",
+      },
+    });
+    const enqueued = enqueueFollowupRun(sessionKey, queuedRun, queueSettingsForControlUi, "none");
+    if (!enqueued) {
+      respond(true, {
+        ok: false,
+        item: null,
+        queue: resolveQueuedMessagesForSessionKey(sessionKey),
+      });
+      return;
+    }
+    broadcastQueuedChatEvent({
+      context,
+      sessionKey: rawSessionKey,
+      itemId: clientRunId,
+      text: trimmedMessage,
+      createdAt: queuedRun.enqueuedAt,
+    });
+    const queue = broadcastChatQueueChanged({
+      context,
+      sessionKey: rawSessionKey,
+      queueLookupSessionKey: sessionKey,
+    });
+    respond(true, { ok: true, item: resolveQueueItemSnapshot(queuedRun), queue });
+  },
+  "chat.queue.remove": ({ params, respond, context }) => {
+    if (!validateChatQueueItemActionParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.queue.remove params: ${formatValidationErrors(validateChatQueueItemActionParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const { sessionKey, itemId } = params as { sessionKey: string; itemId: string };
+    const { canonicalKey, entry } = loadSessionEntry(sessionKey);
+    const resolvedSessionKey = canonicalKey || sessionKey;
+    const removed = findQueuedChatMessage({
+      sessionKey,
+      canonicalKey: resolvedSessionKey,
+      sessionId: entry?.sessionId,
+      itemId,
+    });
+    if (!removed) {
+      respond(true, {
+        ok: false,
+        removed: false,
+        queue: resolveQueuedMessagesForSessionKey(resolvedSessionKey),
+      });
+      return;
+    }
+    const result = removeFollowupQueueItem(removed.key, itemId);
+    if (result.removed) {
+      broadcastQueuedChatRemovedEvent({ context, sessionKey, itemId });
+    }
+    const queue = broadcastChatQueueChanged({
+      context,
+      sessionKey,
+      queueLookupSessionKey: resolvedSessionKey,
+    });
+    respond(true, { ok: result.removed !== null, removed: result.removed !== null, queue });
+  },
+  "chat.queue.edit": ({ params, respond, context }) => {
+    if (!validateChatQueueItemActionParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.queue.edit params: ${formatValidationErrors(validateChatQueueItemActionParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const { sessionKey, itemId } = params as { sessionKey: string; itemId: string };
+    const { canonicalKey, entry } = loadSessionEntry(sessionKey);
+    const resolvedSessionKey = canonicalKey || sessionKey;
+    const removed = findQueuedChatMessage({
+      sessionKey,
+      canonicalKey: resolvedSessionKey,
+      sessionId: entry?.sessionId,
+      itemId,
+    });
+    if (!removed) {
+      respond(true, {
+        ok: false,
+        item: null,
+        queue: resolveQueuedMessagesForSessionKey(resolvedSessionKey),
+      });
+      return;
+    }
+    const result = popFollowupQueueItem(removed.key, itemId);
+    if (result.removed) {
+      broadcastQueuedChatRemovedEvent({ context, sessionKey, itemId });
+    }
+    const queue = broadcastChatQueueChanged({
+      context,
+      sessionKey,
+      queueLookupSessionKey: resolvedSessionKey,
+    });
+    respond(true, {
+      ok: result.removed !== null,
+      item: result.removed ? resolveQueueItemSnapshot(result.removed) : null,
+      queue,
+    });
+  },
+  "chat.queue.steer": ({ params, respond, context }) => {
+    if (!validateChatQueueItemActionParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.queue.steer params: ${formatValidationErrors(validateChatQueueItemActionParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const { sessionKey, itemId } = params as { sessionKey: string; itemId: string };
+    const { canonicalKey, entry } = loadSessionEntry(sessionKey);
+    const resolvedSessionKey = canonicalKey || sessionKey;
+    const removed = findQueuedChatMessage({
+      sessionKey,
+      canonicalKey: resolvedSessionKey,
+      sessionId: entry?.sessionId,
+      itemId,
+    });
+    if (!removed) {
+      respond(true, {
+        ok: false,
+        item: null,
+        queue: resolveQueuedMessagesForSessionKey(resolvedSessionKey),
+      });
+      return;
+    }
+    const result = markFollowupQueueItemSteering(removed.key, itemId, true);
+    const queue = broadcastChatQueueChanged({
+      context,
+      sessionKey,
+      queueLookupSessionKey: resolvedSessionKey,
+    });
+    respond(true, {
+      ok: result.item !== null,
+      item: result.item ? resolveQueueItemSnapshot(result.item) : null,
+      queue,
     });
   },
   "chat.abort": ({ params, respond, context }) => {
@@ -1453,6 +2210,48 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const active = context.chatAbortControllers.get(runId);
     if (!active) {
+      const runContext = getAgentRunContext(runId);
+      if (runContext?.queuedChatItemId) {
+        const runSessionKey = runContext.sessionKey?.trim() || rawSessionKey;
+        if (runSessionKey !== rawSessionKey) {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.INVALID_REQUEST, "runId does not match sessionKey"),
+          );
+          return;
+        }
+
+        const sessionId =
+          runContext.sessionId?.trim() || loadSessionEntry(runSessionKey).entry?.sessionId?.trim();
+        if (!sessionId) {
+          respond(true, { ok: true, aborted: false, runIds: [] });
+          return;
+        }
+
+        const aborted = abortEmbeddedPiRun(sessionId);
+        if (aborted) {
+          emitAgentEvent({
+            runId,
+            sessionKey: runSessionKey,
+            stream: "lifecycle",
+            data: {
+              phase: "end",
+              endedAt: Date.now(),
+              aborted: true,
+            },
+          });
+          clearAgentRunContext(runId);
+          broadcastChatAborted({
+            context,
+            runId,
+            sessionKey: runSessionKey,
+            stopReason: "rpc",
+          });
+        }
+        respond(true, { ok: true, aborted, runIds: aborted ? [runId] : [] });
+        return;
+      }
       respond(true, { ok: true, aborted: false, runIds: [] });
       return;
     }
@@ -1506,6 +2305,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const p = params as {
       sessionKey: string;
       message: string;
+      queueMode?: string;
       thinking?: string;
       deliver?: boolean;
       attachments?: Array<{
@@ -1742,10 +2542,19 @@ export const chatHandlers: GatewayRequestHandlers = {
         mainKey: cfg.session?.mainKey,
         sessionKey,
       });
+      const steeredItems = popSteeredFollowupQueueItems(sessionKey);
+      const steerPrefix = buildSteerMessagesPrefix(
+        steeredItems.map((item) => ({
+          text: item.summaryLine?.trim() || item.prompt.trim(),
+        })),
+      );
       // Inject timestamp so agents know the current date/time.
       // Only BodyForAgent gets the timestamp — Body stays raw for UI display.
       // See: https://github.com/moltbot/moltbot/issues/3658
-      const stampedMessage = injectTimestamp(parsedMessage, timestampOptsFromConfig(cfg));
+      const stampedMessage = injectTimestamp(
+        `${steerPrefix}${parsedMessage}`,
+        timestampOptsFromConfig(cfg),
+      );
 
       const ctx: MsgContext = {
         Body: parsedMessage,
@@ -1803,6 +2612,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           runId: clientRunId,
           abortSignal: abortController.signal,
           images: parsedImages.length > 0 ? parsedImages : undefined,
+          forceQueueMode: p.queueMode === "followup" ? "followup" : undefined,
           onAgentRunStart: (runId) => {
             agentRunStarted = true;
             const connId = typeof client?.connId === "string" ? client.connId : undefined;
@@ -1826,41 +2636,65 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       })
         .then(async () => {
-          if (!agentRunStarted) {
-            const combinedReply = finalReplyParts
-              .map((part) => part.trim())
-              .filter(Boolean)
-              .join("\n\n")
-              .trim();
-            let message: Record<string, unknown> | undefined;
-            if (combinedReply) {
-              const assistantMentionRoute = await resolveMentionRouteInText({
-                text: combinedReply,
-                cfg,
+          const combinedReply = finalReplyParts
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .join("\n\n")
+            .trim();
+          let message: Record<string, unknown> | undefined;
+          if (combinedReply) {
+            const assistantMentionRoute = await resolveMentionRouteInText({
+              text: combinedReply,
+              cfg,
+              requesterSessionKey: sessionKey,
+              workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
+              action: "send",
+              policy: createAgentToAgentPolicy(cfg),
+            });
+            if (assistantMentionRoute?.ok && assistantMentionRoute.bodyWithoutMention.trim()) {
+              const routed = await forwardMentionRouteToAgent({
+                message: assistantMentionRoute.bodyWithoutMention.trim(),
+                targetSessionKey: assistantMentionRoute.sessionKey,
                 requesterSessionKey: sessionKey,
-                workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
-                action: "send",
-                policy: createAgentToAgentPolicy(cfg),
+                idempotencyKey: `${clientRunId}:assistant-mention-route`,
+                context,
+                client,
               });
-              if (assistantMentionRoute?.ok && assistantMentionRoute.bodyWithoutMention.trim()) {
-                const routed = await forwardMentionRouteToAgent({
-                  message: assistantMentionRoute.bodyWithoutMention.trim(),
-                  targetSessionKey: assistantMentionRoute.sessionKey,
-                  requesterSessionKey: sessionKey,
-                  idempotencyKey: `${clientRunId}:assistant-mention-route`,
-                  context,
-                  client,
+              if (!routed.ok) {
+                context.logGateway.warn(`assistant mention route failed: ${routed.error.message}`);
+              } else if (!agentRunStarted) {
+                const { storePath: latestStorePath, entry: latestEntry } =
+                  loadSessionEntry(sessionKey);
+                const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+                const routedLabel =
+                  routed.delivery === "queued" ? "Queued for teammate" : "Sent to teammate";
+                const routedNotice = `Delivered to ${assistantMentionRoute.mention}.`;
+                const appended = appendAssistantTranscriptMessage({
+                  message: routedNotice,
+                  label: routedLabel,
+                  sessionId,
+                  storePath: latestStorePath,
+                  sessionFile: latestEntry?.sessionFile,
+                  agentId,
+                  createIfMissing: true,
+                  idempotencyKey: `${clientRunId}:assistant-mention-route-notice`,
                 });
-                if (!routed.ok) {
-                  context.logGateway.warn(
-                    `assistant mention route failed: ${routed.error.message}`,
-                  );
-                }
-              } else if (assistantMentionRoute && !assistantMentionRoute.ok) {
-                context.logGateway.warn(
-                  `assistant mention route skipped: ${assistantMentionRoute.error}`,
-                );
+                message = appended.ok
+                  ? appended.message
+                  : {
+                      role: "assistant",
+                      content: [{ type: "text", text: `[${routedLabel}]\n\n${routedNotice}` }],
+                      timestamp: Date.now(),
+                      stopReason: "stop",
+                      usage: { input: 0, output: 0, totalTokens: 0 },
+                    };
               }
+            } else if (assistantMentionRoute && !assistantMentionRoute.ok) {
+              context.logGateway.warn(
+                `assistant mention route skipped: ${assistantMentionRoute.error}`,
+              );
+            }
+            if (!agentRunStarted && !message) {
               const { storePath: latestStorePath, entry: latestEntry } =
                 loadSessionEntry(sessionKey);
               const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
@@ -1883,13 +2717,13 @@ export const chatHandlers: GatewayRequestHandlers = {
                   role: "assistant",
                   content: [{ type: "text", text: combinedReply }],
                   timestamp: now,
-                  // Keep this compatible with Pi stopReason enums even though this message isn't
-                  // persisted to the transcript due to the append failure.
                   stopReason: "stop",
                   usage: { input: 0, output: 0, totalTokens: 0 },
                 };
               }
             }
+          }
+          if (!agentRunStarted) {
             broadcastChatFinal({
               context,
               runId: clientRunId,

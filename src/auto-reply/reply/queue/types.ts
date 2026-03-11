@@ -2,6 +2,7 @@ import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
 import type { SkillSnapshot } from "../../../agents/skills.js";
 import type { OpenClawConfig } from "../../../config/config.js";
 import type { SessionEntry } from "../../../config/sessions.js";
+import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { OriginatingChannelType } from "../../templating.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "../directives.js";
 
@@ -19,11 +20,13 @@ export type QueueSettings = {
 export type QueueDedupeMode = "message-id" | "prompt" | "none";
 
 export type FollowupRun = {
+  id?: string;
   prompt: string;
   /** Provider message ID, when available (for deduplication). */
   messageId?: string;
   summaryLine?: string;
   enqueuedAt: number;
+  steering?: boolean;
   /**
    * Originating channel for reply routing.
    * When set, replies should be routed back to this provider
@@ -56,6 +59,7 @@ export type FollowupRun = {
     senderUsername?: string;
     senderE164?: string;
     senderIsOwner?: boolean;
+    inputProvenance?: InputProvenance;
     sessionFile: string;
     workspaceDir: string;
     config: OpenClawConfig;

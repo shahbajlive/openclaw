@@ -619,7 +619,6 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       host.toolStreamOrder.push(toolCallId);
     }
   }
-
   entry.name = name;
   if (args !== undefined) {
     entry.args = args;

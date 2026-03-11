@@ -221,22 +221,41 @@ describe("handleChatEvent", () => {
     );
   });
 
-  it("trims committed stream prefix from cumulative deltas", () => {
+  it("appends streamed suffix deltas to the visible assistant text", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
-      chatStream: "",
+      chatStream: "Hello",
       chatStreamCommittedPrefixLength: 5,
     });
     const payload: ChatEventPayload = {
       runId: "run-1",
       sessionKey: "main",
       state: "delta",
-      message: { role: "assistant", content: [{ type: "text", text: "Hello world" }] },
+      message: { role: "assistant", content: [{ type: "text", text: " world" }] },
     };
 
     expect(handleChatEvent(state, payload)).toBe("delta");
-    expect(state.chatStream).toBe(" world");
+    expect(state.chatStream).toBe("Hello world");
+  });
+
+  it("ignores duplicate streamed suffix deltas", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatStream: "Hello world",
+    });
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-1",
+        sessionKey: "main",
+        state: "delta",
+        message: { role: "assistant", content: [{ type: "text", text: " world" }] },
+      }),
+    ).toBe("delta");
+
+    expect(state.chatStream).toBe("Hello world");
   });
 
   it("appends final payload from another run without clearing active stream", () => {
@@ -963,6 +982,8 @@ describe("sendChatMessage", () => {
   it("keeps optimistic /reset row visible even if backend returns effectiveUserMessage metadata", async () => {
     const effectiveUserMessage =
       "A new session was started via /new or /reset. Execute your Session Startup sequence now.";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-11T18:04:00.000Z"));
     const request = vi.fn().mockResolvedValue({
       runId: "run-1",
       status: "started",
@@ -992,6 +1013,10 @@ describe("sendChatMessage", () => {
     };
     expect(bootstrap.role).toBe("system");
     expect(bootstrap.content?.[0]?.text).toBe(effectiveUserMessage);
+    expect((bootstrap as { timestamp?: number }).timestamp).toBe(
+      (state.chatMessages[0] as { timestamp?: number }).timestamp,
+    );
+    vi.useRealTimers();
   });
 
   it("clears local in-flight state after a routed teammate send starts elsewhere", async () => {

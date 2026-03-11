@@ -250,6 +250,35 @@ describe("agent event handler", () => {
     nowSpy?.mockRestore();
   });
 
+  it("emits chat delta for assistant delta-only events", () => {
+    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+      now: 1_000,
+    });
+    chatRunState.registry.add("run-delta-only", {
+      sessionKey: "session-delta-only",
+      clientRunId: "client-delta-only",
+    });
+
+    handler({
+      runId: "run-delta-only",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { delta: "Hello world" },
+    });
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(1);
+    const payload = chatCalls[0]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(payload.state).toBe("delta");
+    expect(payload.message?.content?.[0]?.text).toBe("Hello world");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
+    nowSpy?.mockRestore();
+  });
+
   it("does not append restarted assistant prefix deltas twice", () => {
     const text =
       "I'm ready to help! Let me check what files are available in the workspace and then respond.";
@@ -280,13 +309,7 @@ describe("agent event handler", () => {
     });
 
     const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(2);
-    const payload = chatCalls[1]?.[1] as {
-      state?: string;
-      message?: { content?: Array<{ text?: string }> };
-    };
-    expect(payload.state).toBe("delta");
-    expect(payload.message?.content?.[0]?.text).toBe(text);
+    expect(chatCalls).toHaveLength(1);
     nowSpy?.mockRestore();
   });
 
@@ -532,7 +555,7 @@ describe("agent event handler", () => {
     const fourthPayload = chatCalls[3]?.[1] as { state?: string };
     expect(firstPayload.state).toBe("delta");
     expect(secondPayload.state).toBe("delta");
-    expect(secondPayload.message?.content?.[0]?.text).toBe("Hello world");
+    expect(secondPayload.message?.content?.[0]?.text).toBe(" world");
     expect(thirdPayload).toMatchObject({ state: "phase", phase: "finalizing" });
     expect(fourthPayload.state).toBe("final");
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(4);
@@ -579,7 +602,7 @@ describe("agent event handler", () => {
       message?: { content?: Array<{ text?: string }> };
     };
     expect(secondPayload.state).toBe("delta");
-    expect(secondPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(secondPayload.message?.content?.[0]?.text).toBe("\nAfter tool call");
     expect(phasePayload).toMatchObject({ state: "phase", phase: "finalizing" });
     expect(finalPayload.state).toBe("final");
     expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
@@ -627,7 +650,7 @@ describe("agent event handler", () => {
       message?: { content?: Array<{ text?: string }> };
     };
     expect(flushPayload.state).toBe("delta");
-    expect(flushPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(flushPayload.message?.content?.[0]?.text).toBe("\nAfter tool call");
     expect(phasePayload).toMatchObject({ state: "phase", phase: "finalizing" });
     expect(finalPayload.state).toBe("final");
     expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");

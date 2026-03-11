@@ -1470,28 +1470,7 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     const toolItems = Array.from(toolItemsByKey.values())
       .toSorted((a, b) => a.timestamp - b.timestamp || a.order - b.order)
       .map((entry) => entry.item);
-    const sortable = [...items, ...toolItems].map((item, order) => ({
-      item,
-      order,
-      ts:
-        item.kind === "divider"
-          ? item.timestamp
-          : item.kind === "message"
-            ? normalizeMessage(item.message).timestamp
-            : item.kind === "stream"
-              ? item.startedAt
-              : 0,
-    }));
-    sortable.sort((a, b) => {
-      if (a.ts !== b.ts) {
-        return a.ts - b.ts;
-      }
-      return a.order - b.order;
-    });
-    items.length = 0;
-    for (const entry of sortable) {
-      items.push(entry.item);
-    }
+    items.push(...toolItems);
   }
 
   const hasActiveAssistantRun = Boolean(props.activeRun ?? props.canAbort) || props.stream !== null;
@@ -1515,6 +1494,29 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
         phase: props.runPhase ?? null,
       });
     }
+  }
+
+  const sortable = items.map((item, order) => ({
+    item,
+    order,
+    ts:
+      item.kind === "divider"
+        ? item.timestamp
+        : item.kind === "message"
+          ? normalizeMessage(item.message).timestamp
+          : item.kind === "stream" || item.kind === "processing-indicator"
+            ? item.startedAt
+            : 0,
+  }));
+  sortable.sort((a, b) => {
+    if (a.ts !== b.ts) {
+      return a.ts - b.ts;
+    }
+    return a.order - b.order;
+  });
+  items.length = 0;
+  for (const entry of sortable) {
+    items.push(entry.item);
   }
 
   return groupMessages(items, props.agentDirectory);

@@ -137,6 +137,21 @@ function appendUniqueSuffix(base: string, suffix: string): string {
   return base + suffix;
 }
 
+function resolveUnbroadcastSuffix(params: { fullText: string; lastBroadcastLen: number }): string {
+  const { fullText } = params;
+  const lastBroadcastLen = Math.max(0, params.lastBroadcastLen);
+  if (!fullText) {
+    return "";
+  }
+  if (lastBroadcastLen <= 0) {
+    return fullText;
+  }
+  if (fullText.length <= lastBroadcastLen) {
+    return "";
+  }
+  return fullText.slice(lastBroadcastLen);
+}
+
 function resolveMergedAssistantText(params: {
   previousText: string;
   nextText: string;
@@ -478,14 +493,22 @@ export function createAgentEventHandler({
     if (now - last < throttleMs) {
       return;
     }
+    const lastBroadcastLen = chatRunState.deltaLastBroadcastLen.get(clientRunId) ?? 0;
+    const unbroadcastSuffix = resolveUnbroadcastSuffix({
+      fullText: mergedText,
+      lastBroadcastLen,
+    });
+    chatRunState.pendingDeltaCount.delete(clientRunId);
+    chatRunState.oldestPendingDeltaAt.delete(clientRunId);
+    if (!unbroadcastSuffix) {
+      return;
+    }
     chatRunState.deltaSentAt.set(clientRunId, now);
     chatRunState.phases.set(clientRunId, "typing");
     if (clientRunId !== sourceRunId) {
       chatRunState.phases.set(sourceRunId, "typing");
     }
     chatRunState.deltaLastBroadcastLen.set(clientRunId, mergedText.length);
-    chatRunState.pendingDeltaCount.delete(clientRunId);
-    chatRunState.oldestPendingDeltaAt.delete(clientRunId);
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -494,7 +517,7 @@ export function createAgentEventHandler({
       phase: "typing" as const,
       message: {
         role: "assistant",
-        content: [{ type: "text", text: mergedText }],
+        content: [{ type: "text", text: unbroadcastSuffix }],
         timestamp: now,
       },
     };
@@ -621,7 +644,11 @@ export function createAgentEventHandler({
         !shouldSuppressHeartbeatStreaming
       ) {
         const lastBroadcastLen = chatRunState.deltaLastBroadcastLen.get(clientRunId) ?? 0;
-        if (text.length > lastBroadcastLen) {
+        const unbroadcastSuffix = resolveUnbroadcastSuffix({
+          fullText: text,
+          lastBroadcastLen,
+        });
+        if (unbroadcastSuffix) {
           const flushPayload = {
             runId: clientRunId,
             sessionKey,
@@ -629,7 +656,7 @@ export function createAgentEventHandler({
             state: "delta" as const,
             message: {
               role: "assistant",
-              content: [{ type: "text", text }],
+              content: [{ type: "text", text: unbroadcastSuffix }],
               timestamp: Date.now(),
             },
           };
@@ -889,9 +916,20 @@ export function createAgentEventHandler({
       if (!isAborted && assistantPhase === "end") {
         setChatPhase("processing");
       }
-      if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
+      if (
+        !isAborted &&
+        evt.stream === "assistant" &&
+        (typeof evt.data?.text === "string" || typeof evt.data?.delta === "string")
+      ) {
         setChatPhase("typing", { allowNew: true, silent: true });
-        emitChatDelta(sessionKey, clientRunId, evt.runId, evt.seq, evt.data.text, evt.data.delta);
+        emitChatDelta(
+          sessionKey,
+          clientRunId,
+          evt.runId,
+          evt.seq,
+          typeof evt.data?.text === "string" ? evt.data.text : "",
+          evt.data.delta,
+        );
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (lifecyclePhase === "end") {
           setChatPhase("finalizing");

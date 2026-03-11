@@ -399,6 +399,46 @@ describe("chat view", () => {
     expect(container.querySelector(".chat-group-status")?.textContent).toContain("Thinking...");
   });
 
+  it("orders the active processing bubble by timestamp with transcript history", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "/reset" }],
+              timestamp: 10,
+            },
+            {
+              role: "system",
+              idempotencyKey: "run-1:effective-user-message",
+              content: [{ type: "text", text: "Bootstrap prompt" }],
+              timestamp: 20,
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "Later history row" }],
+              timestamp: 40,
+            },
+          ],
+          activeRun: true,
+          runPhase: "processing",
+          stream: null,
+          streamStartedAt: 30,
+        }),
+      ),
+      container,
+    );
+
+    const groups = Array.from(container.querySelectorAll(".chat-group"));
+    expect(groups).toHaveLength(4);
+    expect(groups[0]?.textContent ?? "").toContain("/reset");
+    expect(groups[1]?.textContent ?? "").toContain("Bootstrap prompt");
+    expect(groups[2]?.textContent ?? "").toContain("Thinking...");
+    expect(groups[3]?.textContent ?? "").toContain("Later history row");
+  });
+
   it("does not repeat the assistant avatar when active assistant work continues after an assistant group", () => {
     const container = document.createElement("div");
     render(

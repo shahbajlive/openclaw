@@ -1,4 +1,4 @@
-import { extractText } from "../chat/message-extract.ts";
+import { extractRawText, extractText } from "../chat/message-extract.ts";
 import {
   buildToolDedupeKeys,
   resolveToolCallId,
@@ -115,6 +115,25 @@ function normalizeQueueItem(item: ChatQueueItem): ChatQueueItem {
     steering: item?.steering ?? false,
     pendingAction: undefined,
   };
+}
+
+function appendUniqueSuffix(base: string, suffix: string): string {
+  if (!suffix) {
+    return base;
+  }
+  if (!base) {
+    return suffix;
+  }
+  if (base.endsWith(suffix)) {
+    return base;
+  }
+  const maxOverlap = Math.min(base.length, suffix.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (base.slice(-overlap) === suffix.slice(0, overlap)) {
+      return base + suffix.slice(overlap);
+    }
+  }
+  return base + suffix;
 }
 
 function normalizeQueueSnapshot(queue: ChatQueueItem[] | undefined): ChatQueueItem[] | null {
@@ -305,7 +324,7 @@ export async function loadChatHistory(state: ChatState) {
       : [];
     const messages = Array.isArray(res.messages) ? res.messages : [];
     state.chatMessages = filterQueuedTranscriptMessages(
-      messages.filter((message) => !isAssistantSilentReply(message)),
+      orderChatMessages(messages.filter((message) => !isAssistantSilentReply(message))),
       queueSnapshot,
     );
     const toolInvocations = Array.isArray(res.toolInvocations) ? res.toolInvocations : [];
@@ -635,6 +654,25 @@ function trimIdempotencyKey(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function messageTimestamp(value: unknown): number | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const timestamp = (value as { timestamp?: unknown }).timestamp;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function orderChatMessages(messages: unknown[]): unknown[] {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      timestamp: messageTimestamp(message) ?? Number.MAX_SAFE_INTEGER,
+    }))
+    .toSorted((left, right) => left.timestamp - right.timestamp || left.index - right.index)
+    .map((entry) => entry.message);
+}
+
 function isNearDuplicateAssistantMessage(left: unknown, right: unknown): boolean {
   if (!left || typeof left !== "object" || !right || typeof right !== "object") {
     return false;
@@ -674,10 +712,10 @@ function upsertChatMessage(state: ChatState, message: unknown) {
   if (!nextId) {
     const last = state.chatMessages.at(-1);
     if (last && isNearDuplicateAssistantMessage(last, message)) {
-      state.chatMessages = [...state.chatMessages.slice(0, -1), message];
+      state.chatMessages = orderChatMessages([...state.chatMessages.slice(0, -1), message]);
       return;
     }
-    state.chatMessages = [...state.chatMessages, message];
+    state.chatMessages = orderChatMessages([...state.chatMessages, message]);
     return;
   }
   let replaced = false;
@@ -692,6 +730,7 @@ function upsertChatMessage(state: ChatState, message: unknown) {
   if (!replaced) {
     state.chatMessages = [...state.chatMessages, message];
   }
+  state.chatMessages = orderChatMessages(state.chatMessages);
 }
 
 function removeChatMessageByIdempotencyKey(state: ChatState, id: string) {
@@ -889,7 +928,7 @@ export async function sendChatMessage(
           state,
           buildSystemTextMessage(
             response.effectiveUserMessage.trim(),
-            Date.now(),
+            now,
             `${response.runId.trim()}:effective-user-message`,
           ),
         );
@@ -1045,16 +1084,15 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
 
   if (payload.state === "delta") {
     state.chatRunPhase = normalizeChatPhase(payload.phase) ?? "typing";
-    const next = extractText(payload.message);
+    const next = extractRawText(payload.message);
     if (typeof next === "string" && !isSilentReplyStream(next)) {
-      const committed = Math.max(0, state.chatStreamCommittedPrefixLength ?? 0);
-      const visible = next.length > committed ? next.slice(committed) : "";
       const current = state.chatStream ?? "";
-      if (!current || visible.length >= current.length) {
-        if (!current && committed > 0 && visible.length > 0) {
+      const merged = appendUniqueSuffix(current, next);
+      if (merged !== current) {
+        if (!current && next.length > 0) {
           state.chatStreamStartedAt = Date.now();
         }
-        state.chatStream = visible;
+        state.chatStream = merged;
       }
     }
   } else if (payload.state === "final") {

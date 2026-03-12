@@ -83,6 +83,7 @@ import { applyGatewayLaneConcurrency } from "./server-lanes.js";
 import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
 import { GATEWAY_EVENTS, listGatewayMethods } from "./server-methods-list.js";
 import { coreGatewayHandlers } from "./server-methods.js";
+import { resetAgentJobState } from "./server-methods/agent-job.js";
 import { createExecApprovalHandlers } from "./server-methods/exec-approval.js";
 import { safeParseJson } from "./server-methods/nodes.helpers.js";
 import { createSecretsHandlers } from "./server-methods/secrets.js";
@@ -266,6 +267,7 @@ export async function startGatewayServer(
   port = 18789,
   opts: GatewayServerOptions = {},
 ): Promise<GatewayServer> {
+  resetAgentJobState();
   const minimalTestGateway =
     process.env.VITEST === "1" && process.env.OPENCLAW_TEST_MINIMAL_GATEWAY === "1";
 
@@ -586,8 +588,8 @@ export async function startGatewayServer(
     addChatRun,
     removeChatRun,
     chatAbortControllers,
-    toolEventRecipients,
-    sessionToolEventRecipients,
+    liveEventRecipients,
+    sessionLiveEventRecipients,
   } = await createGatewayRuntimeState({
     cfg: cfgAtStart,
     bindHost,
@@ -858,11 +860,15 @@ export async function startGatewayServer(
     chatAbortedRuns: chatRunState.abortedRuns,
     chatRunBuffers: chatRunState.buffers,
     chatRunPhases: chatRunState.phases,
+    chatCommittedVisibleText: chatRunState.committedVisibleText,
     chatDeltaSentAt: chatRunState.deltaSentAt,
+    chatDeltaLastBroadcastLen: chatRunState.deltaLastBroadcastLen,
     addChatRun,
     removeChatRun,
-    registerToolEventRecipient: toolEventRecipients.add,
-    registerSessionToolEventRecipient: sessionToolEventRecipients.add,
+    registerLiveEventRecipient: liveEventRecipients.add,
+    registerSessionLiveEventRecipient: sessionLiveEventRecipients.add,
+    registerToolEventRecipient: liveEventRecipients.add,
+    registerSessionToolEventRecipient: sessionLiveEventRecipients.add,
     dedupe,
     wizardSessions,
     findRunningWizard,
@@ -892,8 +898,8 @@ export async function startGatewayServer(
           resolveSessionKeyForRun,
           resolveVisibleRunIdForSession,
           clearAgentRunContext,
-          toolEventRecipients,
-          sessionToolEventRecipients,
+          liveEventRecipients,
+          sessionLiveEventRecipients,
           gatewayContext: gatewayRequestContext,
         }),
       );

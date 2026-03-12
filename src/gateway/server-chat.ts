@@ -11,9 +11,10 @@ import { resolveMentionRouteInText } from "./server-methods/agent-mentions.js";
 import {
   appendAssistantTranscriptMessage,
   forwardMentionRouteToAgent,
+  resolveUnseenTerminalAssistantText,
 } from "./server-methods/chat.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
-import { loadSessionEntry } from "./session-utils.js";
+import { loadSessionEntry, readSessionMessages } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 
 function resolveHeartbeatAckMaxChars(): number {
@@ -51,6 +52,12 @@ function resolveVisibleSessionKey(params: {
   if (params.chatLinkSessionKey) {
     return params.chatLinkSessionKey;
   }
+  if (params.eventSessionKey) {
+    return params.eventSessionKey;
+  }
+  if (params.resolvedRunSessionKey) {
+    return params.resolvedRunSessionKey;
+  }
   if (params.inputProvenance && typeof params.inputProvenance === "object") {
     const provenance = params.inputProvenance as Record<string, unknown>;
     const sourceSessionKey =
@@ -60,7 +67,80 @@ function resolveVisibleSessionKey(params: {
       return sourceSessionKey;
     }
   }
-  return params.eventSessionKey ?? params.resolvedRunSessionKey;
+  return undefined;
+}
+
+function resolveInterSessionSourceSessionKey(inputProvenance?: unknown): string | undefined {
+  if (!inputProvenance || typeof inputProvenance !== "object") {
+    return undefined;
+  }
+  const provenance = inputProvenance as Record<string, unknown>;
+  const sourceSessionKey =
+    typeof provenance.sourceSessionKey === "string" ? provenance.sourceSessionKey.trim() : "";
+  const kind = typeof provenance.kind === "string" ? provenance.kind.trim() : "";
+  if (kind === "inter_session" && sourceSessionKey) {
+    return sourceSessionKey;
+  }
+  return undefined;
+}
+
+function deriveLegacyActivityKind(evt: AgentEventPayload): string | undefined {
+  if (typeof evt.kind === "string" && evt.kind.trim()) {
+    return evt.kind;
+  }
+  if (evt.stream === "assistant") {
+    return "assistant_message";
+  }
+  if (evt.stream === "tool") {
+    return "tool_call";
+  }
+  if (evt.stream === "reasoning") {
+    return "reasoning";
+  }
+  return undefined;
+}
+
+function deriveLegacyEventType(evt: AgentEventPayload, kind?: string): string {
+  if (typeof evt.eventType === "string" && evt.eventType.trim()) {
+    return evt.eventType;
+  }
+  if (evt.stream === "assistant" || evt.stream === "reasoning") {
+    const phase = typeof evt.data?.phase === "string" ? evt.data.phase.trim() : "";
+    if (phase === "start" || phase === "started") {
+      return "activity.started";
+    }
+    if (phase === "end" || phase === "completed" || phase === "failed" || phase === "aborted") {
+      return "activity.completed";
+    }
+    return "activity.output";
+  }
+  if (evt.stream === "tool") {
+    const phase = typeof evt.data?.phase === "string" ? evt.data.phase.trim() : "";
+    if (phase === "start" || phase === "started") {
+      return "activity.started";
+    }
+    if (
+      phase === "end" ||
+      phase === "completed" ||
+      phase === "failed" ||
+      phase === "cancelled" ||
+      phase === "canceled"
+    ) {
+      return "activity.completed";
+    }
+    return "activity.updated";
+  }
+  if (evt.stream === "lifecycle") {
+    const phase = typeof evt.data?.phase === "string" ? evt.data.phase.trim() : "";
+    if (phase === "start" || phase === "started") {
+      return "run.started";
+    }
+    if (phase === "end" || phase === "completed" || phase === "failed" || phase === "aborted") {
+      return "run.completed";
+    }
+    return "run.updated";
+  }
+  return kind ? "activity.updated" : "run.updated";
 }
 
 /**
@@ -137,19 +217,76 @@ function appendUniqueSuffix(base: string, suffix: string): string {
   return base + suffix;
 }
 
-function resolveUnbroadcastSuffix(params: { fullText: string; lastBroadcastLen: number }): string {
+function resolveCommittedVisibleText(params: {
+  fullText: string;
+  lastBroadcastLen: number;
+}): string {
   const { fullText } = params;
   const lastBroadcastLen = Math.max(0, params.lastBroadcastLen);
-  if (!fullText) {
+  if (!fullText || lastBroadcastLen <= 0) {
     return "";
-  }
-  if (lastBroadcastLen <= 0) {
-    return fullText;
   }
   if (fullText.length <= lastBroadcastLen) {
-    return "";
+    return fullText.trim();
   }
-  return fullText.slice(lastBroadcastLen);
+  return fullText.slice(0, lastBroadcastLen).trim();
+}
+
+function resolvePersistedCanonicalAssistantPrefix(params: {
+  sessionKey: string;
+  clientRunId: string;
+}): string {
+  try {
+    const { storePath, entry } = loadSessionEntry(params.sessionKey);
+    const sessionId = entry?.sessionId?.trim();
+    if (!sessionId) {
+      return "";
+    }
+    const history = readSessionMessages(sessionId, storePath, entry?.sessionFile);
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const candidate = history[i] as Record<string, unknown>;
+      if (!candidate || typeof candidate !== "object") {
+        continue;
+      }
+      const runId = typeof candidate.runId === "string" ? candidate.runId.trim() : "";
+      const role = typeof candidate.role === "string" ? candidate.role.trim().toLowerCase() : "";
+      const timeline = candidate.__openclaw as { timeline?: { canonical?: boolean } } | undefined;
+      if (
+        runId !== params.clientRunId ||
+        role !== "assistant" ||
+        timeline?.timeline?.canonical !== true
+      ) {
+        continue;
+      }
+      const content = candidate.content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      const text = content
+        .map((block) =>
+          block &&
+          typeof block === "object" &&
+          (block as { type?: unknown }).type === "text" &&
+          typeof (block as { text?: unknown }).text === "string"
+            ? (block as { text: string }).text
+            : "",
+        )
+        .join("\n");
+      if (text.trim()) {
+        return text;
+      }
+    }
+  } catch {
+    // Fallback to in-memory state only when transcript lookup is unavailable.
+  }
+  return "";
+}
+
+function resolveUnbroadcastSuffix(params: { fullText: string; lastBroadcastLen: number }): string {
+  return resolveUnseenTerminalAssistantText({
+    fullText: params.fullText,
+    committedVisibleText: resolveCommittedVisibleText(params),
+  });
 }
 
 function resolveMergedAssistantText(params: {
@@ -258,7 +395,8 @@ export function createChatRunRegistry(): ChatRunRegistry {
 export type ChatRunState = {
   registry: ChatRunRegistry;
   buffers: Map<string, string>;
-  phases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+  phases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
+  committedVisibleText: Map<string, string>;
   deltaSentAt: Map<string, number>;
   /** Length of text at the time of the last broadcast, used to avoid duplicate flushes. */
   deltaLastBroadcastLen: Map<string, number>;
@@ -273,10 +411,8 @@ export type ChatRunState = {
 export function createChatRunState(): ChatRunState {
   const registry = createChatRunRegistry();
   const buffers = new Map<string, string>();
-  const phases = new Map<
-    string,
-    "processing" | "thinking" | "typing" | "tool_running" | "finalizing"
-  >();
+  const phases = new Map<string, "processing" | "thinking" | "typing" | "tool_running">();
+  const committedVisibleText = new Map<string, string>();
   const deltaSentAt = new Map<string, number>();
   const deltaLastBroadcastLen = new Map<string, number>();
   const pendingDeltaCount = new Map<string, number>();
@@ -287,6 +423,7 @@ export function createChatRunState(): ChatRunState {
     registry.clear();
     buffers.clear();
     phases.clear();
+    committedVisibleText.clear();
     deltaSentAt.clear();
     deltaLastBroadcastLen.clear();
     pendingDeltaCount.clear();
@@ -298,6 +435,7 @@ export function createChatRunState(): ChatRunState {
     registry,
     buffers,
     phases,
+    committedVisibleText,
     deltaSentAt,
     deltaLastBroadcastLen,
     pendingDeltaCount,
@@ -309,7 +447,7 @@ export function createChatRunState(): ChatRunState {
   };
 }
 
-export type ToolEventRecipientRegistry = {
+export type LiveEventRecipientRegistry = {
   add: (key: string, connId: string) => void;
   get: (key: string) => ReadonlySet<string> | undefined;
   markFinal: (key: string) => void;
@@ -324,7 +462,7 @@ type ToolRecipientEntry = {
 const TOOL_EVENT_RECIPIENT_TTL_MS = 10 * 60 * 1000;
 const TOOL_EVENT_RECIPIENT_FINAL_GRACE_MS = 30 * 1000;
 
-export function createToolEventRecipientRegistry(): ToolEventRecipientRegistry {
+export function createLiveEventRecipientRegistry(): LiveEventRecipientRegistry {
   const recipients = new Map<string, ToolRecipientEntry>();
 
   const prune = () => {
@@ -382,6 +520,8 @@ export function createToolEventRecipientRegistry(): ToolEventRecipientRegistry {
   return { add, get, markFinal };
 }
 
+export const createToolEventRecipientRegistry = createLiveEventRecipientRegistry;
+
 export type ChatEventBroadcast = (
   event: string,
   payload: unknown,
@@ -407,8 +547,8 @@ export type AgentEventHandlerOptions = {
     sessionKey?: string;
   }) => string | undefined;
   clearAgentRunContext: (runId: string) => void;
-  toolEventRecipients: ToolEventRecipientRegistry;
-  sessionToolEventRecipients: ToolEventRecipientRegistry;
+  liveEventRecipients: LiveEventRecipientRegistry;
+  sessionLiveEventRecipients: LiveEventRecipientRegistry;
   gatewayContext?: Pick<
     GatewayRequestContext,
     "broadcast" | "nodeSendToSession" | "agentRunSeq" | "dedupe" | "logGateway"
@@ -424,8 +564,8 @@ export function createAgentEventHandler({
   resolveSessionKeyForRun,
   resolveVisibleRunIdForSession,
   clearAgentRunContext,
-  toolEventRecipients,
-  sessionToolEventRecipients,
+  liveEventRecipients,
+  sessionLiveEventRecipients,
   gatewayContext,
 }: AgentEventHandlerOptions) {
   const emitChatDelta = (
@@ -509,6 +649,10 @@ export function createAgentEventHandler({
       chatRunState.phases.set(sourceRunId, "typing");
     }
     chatRunState.deltaLastBroadcastLen.set(clientRunId, mergedText.length);
+    chatRunState.committedVisibleText.set(clientRunId, mergedText);
+    if (clientRunId !== sourceRunId) {
+      chatRunState.committedVisibleText.set(sourceRunId, mergedText);
+    }
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -611,6 +755,40 @@ export function createAgentEventHandler({
     return { handled: true, text: routedNotice };
   };
 
+  const persistCanonicalAssistantTimelineRow = (params: {
+    sessionKey: string;
+    clientRunId: string;
+    text: string;
+    seq: number;
+  }) => {
+    if (!gatewayContext) {
+      return;
+    }
+    const text = params.text.trim();
+    if (!text) {
+      return;
+    }
+    const { cfg, entry, storePath } = loadSessionEntry(params.sessionKey);
+    const sessionId = entry?.sessionId ?? params.clientRunId;
+    appendAssistantTranscriptMessage({
+      message: text,
+      runId: params.clientRunId,
+      sessionId,
+      storePath,
+      sessionFile: entry?.sessionFile,
+      agentId: resolveSessionAgentId({
+        sessionKey: params.sessionKey,
+        config: cfg,
+      }),
+      createIfMissing: true,
+      idempotencyKey: `${params.clientRunId}:timeline:${params.seq}`,
+      timeline: {
+        canonical: true,
+        seq: params.seq,
+      },
+    });
+  };
+
   const emitChatFinal = (
     sessionKey: string,
     clientRunId: string,
@@ -636,6 +814,22 @@ export function createAgentEventHandler({
         clientRunId,
         sourceRunId,
       );
+      const lastBroadcastLen = chatRunState.deltaLastBroadcastLen.get(clientRunId) ?? 0;
+      const committedVisibleText =
+        chatRunState.committedVisibleText.get(clientRunId) ||
+        resolvePersistedCanonicalAssistantPrefix({
+          sessionKey,
+          clientRunId,
+        }) ||
+        resolveCommittedVisibleText({
+          fullText: text,
+          lastBroadcastLen,
+        });
+      const unbroadcastSuffix = resolveUnseenTerminalAssistantText({
+        fullText: text,
+        committedVisibleText,
+      });
+      let flushedVisibleSuffix = false;
       if (
         text &&
         !routedMentionFinal &&
@@ -643,12 +837,13 @@ export function createAgentEventHandler({
         !shouldSuppressSilentLeadFragment &&
         !shouldSuppressHeartbeatStreaming
       ) {
-        const lastBroadcastLen = chatRunState.deltaLastBroadcastLen.get(clientRunId) ?? 0;
-        const unbroadcastSuffix = resolveUnbroadcastSuffix({
-          fullText: text,
-          lastBroadcastLen,
-        });
         if (unbroadcastSuffix) {
+          persistCanonicalAssistantTimelineRow({
+            sessionKey,
+            clientRunId,
+            text: unbroadcastSuffix,
+            seq,
+          });
           const flushPayload = {
             runId: clientRunId,
             sessionKey,
@@ -662,10 +857,13 @@ export function createAgentEventHandler({
           };
           broadcast("chat", flushPayload, { dropIfSlow: true });
           nodeSendToSession(sessionKey, "chat", flushPayload);
+          flushedVisibleSuffix = true;
         }
       }
       chatRunState.deltaLastBroadcastLen.delete(clientRunId);
       chatRunState.buffers.delete(clientRunId);
+      chatRunState.committedVisibleText.delete(clientRunId);
+      chatRunState.committedVisibleText.delete(sourceRunId);
       chatRunState.phases.delete(clientRunId);
       if (clientRunId !== sourceRunId) {
         chatRunState.phases.delete(sourceRunId);
@@ -674,6 +872,10 @@ export function createAgentEventHandler({
       chatRunState.pendingDeltaCount.delete(clientRunId);
       chatRunState.oldestPendingDeltaAt.delete(clientRunId);
       if (jobState === "done") {
+        const hadVisibleAssistantOutput =
+          Boolean(committedVisibleText) || lastBroadcastLen > 0 || flushedVisibleSuffix;
+        const finalVisibleText =
+          routedMentionFinal || !hadVisibleAssistantOutput ? text : undefined;
         const payload = {
           runId: clientRunId,
           sessionKey,
@@ -681,11 +883,11 @@ export function createAgentEventHandler({
           state: "final" as const,
           ...(stopReason && { stopReason }),
           message:
-            text && !shouldSuppressSilent
+            finalVisibleText && !shouldSuppressSilent
               ? {
                   role: "assistant",
                   idempotencyKey: `${clientRunId}:assistant`,
-                  content: [{ type: "text", text }],
+                  content: [{ type: "text", text: finalVisibleText }],
                   timestamp: Date.now(),
                 }
               : undefined,
@@ -753,18 +955,41 @@ export function createAgentEventHandler({
     const eventSessionKey =
       typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined;
     const isControlUiVisible = runContext?.isControlUiVisible ?? true;
+    const eventKind = deriveLegacyActivityKind(evt);
+    const eventType = deriveLegacyEventType(evt, eventKind);
+    const eventData =
+      eventType === "activity.output"
+        ? (evt.output ?? evt.data)
+        : eventType === "activity.started"
+          ? (evt.input ?? evt.data)
+          : eventType === "activity.updated"
+            ? (evt.patch ?? evt.data)
+            : eventType === "activity.completed"
+              ? (evt.result ?? evt.data)
+              : eventType === "run.updated"
+                ? (evt.patch ?? evt.data)
+                : eventType === "run.completed"
+                  ? (evt.result ?? evt.data)
+                  : undefined;
     const inputProvenance =
-      (evt.data?.inputProvenance as Record<string, unknown> | undefined) ??
-      runContext?.inputProvenance;
+      (evt.inputProvenance as Record<string, unknown> | undefined) ?? runContext?.inputProvenance;
     const sessionKey = resolveVisibleSessionKey({
       chatLinkSessionKey: chatLink?.sessionKey,
       eventSessionKey,
       resolvedRunSessionKey: resolveSessionKeyForRun(evt.runId),
       inputProvenance,
     });
+    const isToolEvent =
+      eventType.startsWith("activity.") &&
+      (eventKind === "tool_call" ||
+        eventKind === "subagent_call" ||
+        eventKind === "peer_agent_call");
+    const toolVisibleSessionKey = isToolEvent
+      ? (resolveInterSessionSourceSessionKey(inputProvenance) ?? sessionKey)
+      : sessionKey;
     const visibleRunId =
       chatLink?.clientRunId ??
-      resolveVisibleRunIdForSession?.({ runId: evt.runId, sessionKey }) ??
+      resolveVisibleRunIdForSession?.({ runId: evt.runId, sessionKey: toolVisibleSessionKey }) ??
       evt.runId;
     const clientRunId = visibleRunId;
     const eventRunId = visibleRunId;
@@ -773,22 +998,30 @@ export function createAgentEventHandler({
     const isAborted =
       chatRunState.abortedRuns.has(clientRunId) || chatRunState.abortedRuns.has(evt.runId);
     // Include sessionKey so Control UI can filter tool streams per session.
-    const agentPayload = sessionKey ? { ...eventForClients, sessionKey } : eventForClients;
+    const payloadSessionKey = isToolEvent ? toolVisibleSessionKey : sessionKey;
+    const agentPayload = payloadSessionKey
+      ? { ...eventForClients, sessionKey: payloadSessionKey }
+      : eventForClients;
     const last = agentRunSeq.get(evt.runId) ?? 0;
-    const isToolEvent = evt.stream === "tool";
     const toolVerbose = isToolEvent ? resolveToolVerboseLevel(evt.runId, sessionKey) : "off";
     // Build node/session tool payload: strip result/partialResult unless verbose=full.
     // WS/control-ui recipients should always receive full tool payload for live cards.
     const toolPayloadForSession =
       isToolEvent && toolVerbose !== "full"
-        ? (() => {
-            const data = evt.data ? { ...evt.data } : {};
-            delete data.result;
-            delete data.partialResult;
-            return sessionKey
-              ? { ...eventForClients, sessionKey, data }
-              : { ...eventForClients, data };
-          })()
+        ? {
+            ...agentPayload,
+            ...(agentPayload.data && typeof agentPayload.data === "object"
+              ? {
+                  data: {
+                    ...agentPayload.data,
+                    result: undefined,
+                    partialResult: undefined,
+                  },
+                }
+              : {}),
+            result: undefined,
+            partialResult: undefined,
+          }
         : agentPayload;
     if (evt.seq !== last + 1) {
       broadcast("agent", {
@@ -804,56 +1037,70 @@ export function createAgentEventHandler({
       });
     }
     agentRunSeq.set(evt.runId, evt.seq);
-    if (isToolEvent) {
-      // Always broadcast tool events to registered WS recipients with
-      // tool-events capability, regardless of verboseLevel. The verbose
-      // setting only controls whether tool details are sent as channel
-      // messages to messaging surfaces (Telegram, Discord, etc.).
-      let recipients = toolEventRecipients.get(evt.runId);
-      // Tool events may be emitted with an internal run id while the UI
-      // recipient was registered on the linked client run id.
-      if ((!recipients || recipients.size === 0) && visibleRunId !== evt.runId) {
-        const linkedRecipients = toolEventRecipients.get(clientRunId);
-        if (linkedRecipients && linkedRecipients.size > 0) {
-          recipients = linkedRecipients;
-          for (const connId of linkedRecipients) {
-            toolEventRecipients.add(evt.runId, connId);
+    let recipients = liveEventRecipients.get(evt.runId);
+    // Events may be emitted with an internal run id while the UI
+    // recipient was registered on the linked client run id.
+    if ((!recipients || recipients.size === 0) && visibleRunId !== evt.runId) {
+      const linkedRecipients = liveEventRecipients.get(clientRunId);
+      if (linkedRecipients && linkedRecipients.size > 0) {
+        recipients = linkedRecipients;
+        for (const connId of linkedRecipients) {
+          liveEventRecipients.add(evt.runId, connId);
+        }
+      }
+    }
+    if ((!recipients || recipients.size === 0) && payloadSessionKey) {
+      const sessionRecipients = sessionLiveEventRecipients.get(payloadSessionKey);
+      if (sessionRecipients && sessionRecipients.size > 0) {
+        recipients = sessionRecipients;
+        for (const connId of sessionRecipients) {
+          liveEventRecipients.add(evt.runId, connId);
+          if (visibleRunId !== evt.runId) {
+            liveEventRecipients.add(clientRunId, connId);
           }
         }
       }
-      if ((!recipients || recipients.size === 0) && sessionKey) {
-        const sessionRecipients = sessionToolEventRecipients.get(sessionKey);
-        if (sessionRecipients && sessionRecipients.size > 0) {
-          recipients = sessionRecipients;
-          for (const connId of sessionRecipients) {
-            toolEventRecipients.add(evt.runId, connId);
-            if (visibleRunId !== evt.runId) {
-              toolEventRecipients.add(clientRunId, connId);
-            }
-          }
-        }
-      }
-      if (recipients && recipients.size > 0) {
-        broadcastToConnIds("agent", agentPayload, recipients);
-      }
-    } else {
+    }
+    if (recipients && recipients.size > 0) {
+      broadcastToConnIds("agent", agentPayload, recipients);
+    } else if (!isToolEvent) {
       broadcast("agent", agentPayload);
     }
 
-    const lifecyclePhase =
-      evt.stream === "lifecycle" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
-    const toolPhase =
-      evt.stream === "tool" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
-    const assistantPhase =
-      evt.stream === "assistant" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
-    const reasoningPhase =
-      evt.stream === "reasoning" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
+    const runCompleted = eventType === "run.completed";
+    const activityStarted = eventType === "activity.started";
+    const activityCompleted = eventType === "activity.completed";
+    const outputData = (evt.output ?? eventData) as Record<string, unknown> | undefined;
+    const isAssistantOutput = eventType === "activity.output" && eventKind === "assistant_message";
+    const isReasoningStart = activityStarted && eventKind === "reasoning";
+    const isReasoningEnd = activityCompleted && eventKind === "reasoning";
 
     const setChatPhase = (
-      phase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing",
+      phase: "processing" | "thinking" | "typing" | "tool_running",
       opts?: { allowNew?: boolean; silent?: boolean },
     ) => {
       const previous = chatRunState.phases.get(clientRunId);
+      if (previous === "typing" && phase !== "typing") {
+        const bufferedText = stripInlineDirectiveTagsForDisplay(
+          chatRunState.buffers.get(clientRunId) ?? "",
+        ).text;
+        const lastBroadcastLen = chatRunState.deltaLastBroadcastLen.get(clientRunId) ?? 0;
+        const committedVisibleText = bufferedText.slice(0, Math.max(0, lastBroadcastLen)).trim();
+        if (committedVisibleText) {
+          chatRunState.committedVisibleText.set(clientRunId, committedVisibleText);
+          if (clientRunId !== evt.runId) {
+            chatRunState.committedVisibleText.set(evt.runId, committedVisibleText);
+          }
+          if (sessionKey) {
+            persistCanonicalAssistantTimelineRow({
+              sessionKey,
+              clientRunId,
+              text: committedVisibleText,
+              seq: evt.seq,
+            });
+          }
+        }
+      }
       if (!previous && opts?.allowNew !== true) {
         return;
       }
@@ -876,7 +1123,7 @@ export function createAgentEventHandler({
     };
 
     if (isControlUiVisible && sessionKey) {
-      if (!isAborted && lifecyclePhase === "start" && !chatLink) {
+      if (!isAborted && eventType === "run.started" && !chatLink) {
         setChatPhase("processing", { allowNew: true });
         const payload = {
           runId: eventRunId,
@@ -892,34 +1139,41 @@ export function createAgentEventHandler({
       }
       // Send tool events to node/channel subscribers only when verbose is enabled;
       // WS clients already received the event above via broadcastToConnIds.
-      if (!isToolEvent || toolVerbose !== "off") {
-        nodeSendToSession(sessionKey, "agent", isToolEvent ? toolPayloadForSession : agentPayload);
+      if ((!isToolEvent || toolVerbose !== "off") && payloadSessionKey) {
+        nodeSendToSession(
+          payloadSessionKey,
+          "agent",
+          isToolEvent ? toolPayloadForSession : agentPayload,
+        );
       }
-      if (!isAborted && (evt.stream === "compaction" || evt.stream === "fallback")) {
+      if (!isAborted && eventType.startsWith("activity.") && eventKind === "compaction") {
         setChatPhase("processing");
       }
-      if (!isAborted && evt.stream === "tool") {
+      if (!isAborted && isToolEvent) {
         setChatPhase("tool_running");
+      }
+      if (!isAborted && isToolEvent) {
+        setChatPhase("tool_running");
+      }
+      if (!isAborted && activityCompleted && isToolEvent) {
+        setChatPhase("processing");
       }
       if (
         !isAborted &&
-        (toolPhase === "start" || toolPhase === "update" || toolPhase === "result")
+        (isReasoningStart || (eventType === "activity.output" && eventKind === "reasoning"))
       ) {
-        setChatPhase("tool_running");
-      }
-      if (!isAborted && (reasoningPhase === "delta" || reasoningPhase === "start")) {
         setChatPhase("thinking");
       }
-      if (!isAborted && reasoningPhase === "end") {
+      if (!isAborted && isReasoningEnd) {
         setChatPhase("processing");
       }
-      if (!isAborted && assistantPhase === "end") {
+      if (!isAborted && activityCompleted && eventKind === "assistant_message") {
         setChatPhase("processing");
       }
       if (
         !isAborted &&
-        evt.stream === "assistant" &&
-        (typeof evt.data?.text === "string" || typeof evt.data?.delta === "string")
+        isAssistantOutput &&
+        (typeof outputData?.text === "string" || typeof outputData?.delta === "string")
       ) {
         setChatPhase("typing", { allowNew: true, silent: true });
         emitChatDelta(
@@ -927,15 +1181,11 @@ export function createAgentEventHandler({
           clientRunId,
           evt.runId,
           evt.seq,
-          typeof evt.data?.text === "string" ? evt.data.text : "",
-          evt.data.delta,
+          typeof outputData?.text === "string" ? outputData.text : "",
+          outputData?.delta,
         );
-      } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
-        if (lifecyclePhase === "end") {
-          setChatPhase("finalizing");
-        }
-        const evtStopReason =
-          typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
+      } else if (!isAborted && runCompleted) {
+        const evtStopReason = typeof evt.stopReason === "string" ? evt.stopReason : undefined;
         if (hasDirectChatLink) {
           const finished = chatRunState.registry.shift(evt.runId);
           if (!finished) {
@@ -947,8 +1197,8 @@ export function createAgentEventHandler({
             finished.clientRunId,
             evt.runId,
             evt.seq,
-            lifecyclePhase === "error" ? "error" : "done",
-            evt.data?.error,
+            evt.outcome === "failed" ? "error" : "done",
+            evt.error,
             evtStopReason,
           );
         } else if (evt.runId === visibleRunId) {
@@ -957,15 +1207,17 @@ export function createAgentEventHandler({
             eventRunId,
             evt.runId,
             evt.seq,
-            lifecyclePhase === "error" ? "error" : "done",
-            evt.data?.error,
+            evt.outcome === "failed" ? "error" : "done",
+            evt.error,
             evtStopReason,
           );
         }
-      } else if (isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
+      } else if (isAborted && runCompleted) {
         chatRunState.abortedRuns.delete(clientRunId);
         chatRunState.abortedRuns.delete(evt.runId);
         chatRunState.buffers.delete(clientRunId);
+        chatRunState.committedVisibleText.delete(clientRunId);
+        chatRunState.committedVisibleText.delete(evt.runId);
         chatRunState.phases.delete(clientRunId);
         if (clientRunId !== evt.runId) {
           chatRunState.phases.delete(evt.runId);
@@ -979,8 +1231,8 @@ export function createAgentEventHandler({
       }
     }
 
-    if (lifecyclePhase === "end" || lifecyclePhase === "error") {
-      toolEventRecipients.markFinal(evt.runId);
+    if (runCompleted) {
+      liveEventRecipients.markFinal(evt.runId);
       clearAgentRunContext(evt.runId);
       agentRunSeq.delete(evt.runId);
       agentRunSeq.delete(clientRunId);

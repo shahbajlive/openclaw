@@ -76,7 +76,7 @@ export async function createGatewayRuntimeState(params: {
   dedupe: Map<string, DedupeEntry>;
   chatRunState: ReturnType<typeof createChatRunState>;
   chatRunBuffers: Map<string, string>;
-  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
   chatDeltaSentAt: Map<string, number>;
   addChatRun: (sessionId: string, entry: ChatRunEntry) => void;
   removeChatRun: (
@@ -85,8 +85,8 @@ export async function createGatewayRuntimeState(params: {
     sessionKey?: string,
   ) => ChatRunEntry | undefined;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
-  toolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
-  sessionToolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+  liveEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+  sessionLiveEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
 }> {
   let canvasHost: CanvasHostHandler | null = null;
   if (params.canvasHostEnabled) {
@@ -210,8 +210,8 @@ export async function createGatewayRuntimeState(params: {
   const addChatRun = chatRunRegistry.add;
   const removeChatRun = chatRunRegistry.remove;
   const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
-  const toolEventRecipients = createToolEventRecipientRegistry();
-  const sessionToolEventRecipients = createToolEventRecipientRegistry();
+  const liveEventRecipients = createToolEventRecipientRegistry();
+  const sessionLiveEventRecipients = createToolEventRecipientRegistry();
 
   return {
     canvasHost,
@@ -231,7 +231,7 @@ export async function createGatewayRuntimeState(params: {
     addChatRun,
     removeChatRun,
     chatAbortControllers,
-    toolEventRecipients,
-    sessionToolEventRecipients,
+    liveEventRecipients,
+    sessionLiveEventRecipients,
   };
 }

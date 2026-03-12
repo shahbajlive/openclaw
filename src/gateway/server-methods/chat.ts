@@ -30,13 +30,14 @@ import { loadConfig } from "../../config/config.js";
 import { resolveSessionFilePath, resolveSessionFilePathOptions } from "../../config/sessions.js";
 import {
   clearAgentRunContext,
-  emitAgentEvent,
+  emitRunCompleted,
   getAgentRunContext,
 } from "../../infra/agent-events.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
+import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
 import {
   stripInlineDirectiveTagsForDisplay,
   stripInlineDirectiveTagsFromMessageForDisplay,
@@ -88,6 +89,7 @@ import { agentHandlers } from "./agent.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
 import {
   appendInjectedAssistantMessageToTranscript,
+  appendInjectedSystemMessageToTranscript,
   appendInjectedUserMessageToTranscript,
 } from "./chat-transcript-inject.js";
 import type { GatewayClient, GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
@@ -105,6 +107,7 @@ type AbortedPartialSnapshot = {
   runId: string;
   sessionId: string;
   text: string;
+  committedVisibleText?: string;
   abortOrigin: AbortOrigin;
 };
 
@@ -670,6 +673,24 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   for (const message of messages) {
     const res = sanitizeChatHistoryMessage(message);
     changed ||= res.changed;
+    const entry =
+      res.message && typeof res.message === "object"
+        ? (res.message as Record<string, unknown>)
+        : undefined;
+    const visibleText = extractVisibleHistoryText(res.message)?.trim() ?? "";
+    if (
+      entry?.role === "user" &&
+      visibleText.startsWith(
+        "A new session was started via /new or /reset. Execute your Session Startup sequence now",
+      )
+    ) {
+      next.push({
+        ...entry,
+        role: "system",
+      });
+      changed = true;
+      continue;
+    }
     // Drop assistant messages whose entire visible text is the silent reply token.
     const text = extractAssistantTextForSilentCheck(res.message);
     if (text !== undefined && isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
@@ -686,6 +707,245 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
     }
     next.push(res.message);
   }
+  const chronologyPreserved = preserveAssistantAbortSuffixChronology(next);
+  const canonicalTimeline = dropMergedAssistantRowsCoveredByCanonicalTimeline(chronologyPreserved);
+  if (chronologyPreserved !== next || canonicalTimeline !== chronologyPreserved) {
+    changed = true;
+  }
+  return changed ? canonicalTimeline : messages;
+}
+
+function hasCanonicalVisibleAssistantRow(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (toTrimmedString(entry.role).toLowerCase() !== "assistant") {
+    return false;
+  }
+  const marker =
+    entry.__openclaw && typeof entry.__openclaw === "object"
+      ? (entry.__openclaw as Record<string, unknown>)
+      : undefined;
+  const timeline =
+    marker?.timeline && typeof marker.timeline === "object"
+      ? (marker.timeline as Record<string, unknown>)
+      : undefined;
+  return timeline?.canonical === true;
+}
+
+function dropMergedAssistantRowsCoveredByCanonicalTimeline(messages: unknown[]): unknown[] {
+  const canonicalAssistantRuns = new Set<string>();
+  for (const message of messages) {
+    if (!hasCanonicalVisibleAssistantRow(message)) {
+      continue;
+    }
+    const runId = extractHistoryRunId(message);
+    if (runId) {
+      canonicalAssistantRuns.add(runId);
+    }
+  }
+  if (canonicalAssistantRuns.size === 0) {
+    return messages;
+  }
+
+  let changed = false;
+  const next = messages.filter((message) => {
+    if (!message || typeof message !== "object") {
+      return true;
+    }
+    if (hasCanonicalVisibleAssistantRow(message)) {
+      return true;
+    }
+    if (isGatewayInjectedTeammateRouteNotice(message)) {
+      return true;
+    }
+    const entry = message as Record<string, unknown>;
+    const role = toTrimmedString(entry.role).toLowerCase();
+    const runId = extractHistoryRunId(message);
+    if (role !== "assistant" || !runId || !canonicalAssistantRuns.has(runId)) {
+      return true;
+    }
+    const visibleText = extractVisibleHistoryText(message)?.trim() ?? "";
+    if (!visibleText && !hasAssistantToolCallContent(message)) {
+      return true;
+    }
+    changed = true;
+    return false;
+  });
+  return changed ? next : messages;
+}
+
+function extractVisibleHistoryText(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const entry = message as Record<string, unknown>;
+  if (typeof entry.text === "string") {
+    return entry.text;
+  }
+  if (typeof entry.content === "string") {
+    return entry.content;
+  }
+  if (!Array.isArray(entry.content) || entry.content.length === 0) {
+    return undefined;
+  }
+  const texts: string[] = [];
+  for (const block of entry.content) {
+    if (!block || typeof block !== "object") {
+      return undefined;
+    }
+    const typed = block as { type?: unknown; text?: unknown };
+    if (typed.type !== "text" || typeof typed.text !== "string") {
+      return undefined;
+    }
+    texts.push(typed.text);
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
+function extractHistoryRunId(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const entry = message as Record<string, unknown>;
+  if (typeof entry.runId === "string" && entry.runId.trim()) {
+    return entry.runId.trim();
+  }
+  if (typeof entry.run_id === "string" && entry.run_id.trim()) {
+    return entry.run_id.trim();
+  }
+  if (typeof entry.idempotencyKey === "string") {
+    const trimmed = entry.idempotencyKey.trim();
+    const assistantSuffixIndex = trimmed.indexOf(":assistant");
+    if (assistantSuffixIndex > 0) {
+      return trimmed.slice(0, assistantSuffixIndex);
+    }
+  }
+  return "";
+}
+
+function hasAssistantToolCallContent(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (!Array.isArray(entry.content)) {
+    return false;
+  }
+  return entry.content.some((block) => {
+    if (!block || typeof block !== "object") {
+      return false;
+    }
+    const typed = block as { type?: unknown };
+    const type = typeof typed.type === "string" ? typed.type.trim().toLowerCase() : "";
+    return type === "toolcall" || type === "tool_call";
+  });
+}
+
+function trimTextContentSuffix(message: unknown, suffix: string): unknown {
+  if (!message || typeof message !== "object" || !suffix.trim()) {
+    return message;
+  }
+  const entry = message as Record<string, unknown>;
+  if (!Array.isArray(entry.content)) {
+    return message;
+  }
+  const content = [...entry.content];
+  for (let i = content.length - 1; i >= 0; i -= 1) {
+    const block = content[i];
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const typed = block as { type?: unknown; text?: unknown };
+    if (typed.type !== "text" || typeof typed.text !== "string") {
+      continue;
+    }
+    if (!typed.text.endsWith(suffix)) {
+      return message;
+    }
+    content[i] = {
+      ...(block as Record<string, unknown>),
+      text: typed.text.slice(0, typed.text.length - suffix.length).replace(/[ \t]+\n?$/u, ""),
+    };
+    return {
+      ...entry,
+      content,
+    };
+  }
+  return message;
+}
+
+function preserveAssistantAbortSuffixChronology(messages: unknown[]): unknown[] {
+  const abortSuffixes = new Map<string, string[]>();
+  for (const message of messages) {
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const entry = message as Record<string, unknown>;
+    const role = typeof entry.role === "string" ? entry.role.toLowerCase() : "";
+    if (role !== "assistant") {
+      continue;
+    }
+    if (!entry.openclawAbort || typeof entry.openclawAbort !== "object") {
+      continue;
+    }
+    const runId = extractHistoryRunId(message);
+    const suffix = extractVisibleHistoryText(message)?.trim();
+    if (!runId || !suffix) {
+      continue;
+    }
+    const existing = abortSuffixes.get(runId) ?? [];
+    existing.push(suffix);
+    abortSuffixes.set(runId, existing);
+  }
+  if (abortSuffixes.size === 0) {
+    return messages;
+  }
+
+  let changed = false;
+  const adjusted = messages.map((message) => {
+    const runId = extractHistoryRunId(message);
+    const suffixes = abortSuffixes.get(runId);
+    if (!suffixes || !hasAssistantToolCallContent(message)) {
+      return message;
+    }
+    let nextMessage = message;
+    for (const suffix of suffixes) {
+      const candidate = trimTextContentSuffix(nextMessage, suffix);
+      if (candidate !== nextMessage) {
+        nextMessage = candidate;
+        changed = true;
+      }
+    }
+    return nextMessage;
+  });
+  return changed ? adjusted : messages;
+}
+
+function dropInFlightEffectiveUserDuplicates(
+  messages: unknown[],
+  effectiveUserMessage?: string,
+): unknown[] {
+  const effective = effectiveUserMessage?.trim();
+  if (!effective) {
+    return messages;
+  }
+  let changed = false;
+  const next = messages.filter((message) => {
+    if (!message || typeof message !== "object") {
+      return true;
+    }
+    const entry = message as Record<string, unknown>;
+    if (entry.role !== "user") {
+      return true;
+    }
+    if ((extractVisibleHistoryText(message)?.trim() ?? "") !== effective) {
+      return true;
+    }
+    changed = true;
+    return false;
+  });
   return changed ? next : messages;
 }
 
@@ -709,7 +969,7 @@ type ActiveChatRunSnapshot = {
   startedAtMs: number;
   expiresAtMs: number;
   streamText: string;
-  phase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing";
+  phase: "processing" | "thinking" | "typing" | "tool_running";
   effectiveUserMessage?: string;
   inputProvenance?: InputProvenance;
 };
@@ -1091,7 +1351,7 @@ function buildCanonicalToolInvocations(params: {
 function resolveActiveChatRunSnapshot(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
-  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
   dedupe: Map<string, { payload?: unknown }>;
   historyMessages: unknown[];
   activeAgentRuns?: Array<{
@@ -1197,6 +1457,10 @@ function resolveActiveChatRunSnapshot(params: {
     expiresAtMs: now + 60_000,
     streamText: truncated.text,
     phase: params.chatRunPhases.get(selectedAgentRun.runId) ?? "processing",
+    ...(typeof selectedChatRun?.entry.effectiveUserMessage === "string" &&
+    selectedChatRun.entry.effectiveUserMessage.trim()
+      ? { effectiveUserMessage: selectedChatRun.entry.effectiveUserMessage }
+      : {}),
     ...(selectedAgentRun.inputProvenance
       ? { inputProvenance: selectedAgentRun.inputProvenance }
       : {}),
@@ -1346,6 +1610,10 @@ export function appendAssistantTranscriptMessage(params: {
     origin: AbortOrigin;
     runId: string;
   };
+  timeline?: {
+    canonical: true;
+    seq?: number;
+  };
 }): TranscriptAppendResult {
   const transcriptPath = resolveTranscriptPath({
     sessionId: params.sessionId,
@@ -1381,6 +1649,55 @@ export function appendAssistantTranscriptMessage(params: {
     runId: params.runId,
     idempotencyKey: params.idempotencyKey,
     abortMeta: params.abortMeta,
+    timeline: params.timeline,
+  });
+}
+
+export function appendSystemTranscriptMessage(params: {
+  message: string;
+  runId?: string;
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile?: string;
+  createIfMissing?: boolean;
+  idempotencyKey?: string;
+  timeline?: {
+    canonical: true;
+    seq?: number;
+  };
+}): TranscriptAppendResult {
+  const transcriptPath = resolveTranscriptPath({
+    sessionId: params.sessionId,
+    storePath: params.storePath,
+    sessionFile: params.sessionFile,
+  });
+  if (!transcriptPath) {
+    return { ok: false, error: "transcript path not resolved" };
+  }
+
+  if (!fs.existsSync(transcriptPath)) {
+    if (!params.createIfMissing) {
+      return { ok: false, error: "transcript file not found" };
+    }
+    const ensured = ensureTranscriptFile({
+      transcriptPath,
+      sessionId: params.sessionId,
+    });
+    if (!ensured.ok) {
+      return { ok: false, error: ensured.error ?? "failed to create transcript file" };
+    }
+  }
+
+  if (params.idempotencyKey && transcriptHasIdempotencyKey(transcriptPath, params.idempotencyKey)) {
+    return { ok: true };
+  }
+
+  return appendInjectedSystemMessageToTranscript({
+    transcriptPath,
+    message: params.message,
+    runId: params.runId,
+    idempotencyKey: params.idempotencyKey,
+    timeline: params.timeline,
   });
 }
 
@@ -1398,7 +1715,6 @@ function appendUserTranscriptMessage(params: {
     sessionId: params.sessionId,
     storePath: params.storePath,
     sessionFile: params.sessionFile,
-    agentId: params.agentId,
   });
   if (!transcriptPath) {
     return { ok: false, error: "transcript path not resolved" };
@@ -1497,6 +1813,7 @@ export async function forwardMentionRouteToAgent(params: {
       ...queueSettings,
       dropPolicy: queueSettings.dropPolicy === "new" ? "summarize" : queueSettings.dropPolicy,
     } as const;
+    const targetDelivery = normalizeSessionDeliveryFields(targetEntry);
     const stampedMessage = injectTimestamp(
       params.message,
       timestampOptsFromConfig(target.cfg),
@@ -1514,10 +1831,9 @@ export async function forwardMentionRouteToAgent(params: {
         sessionId: targetSessionId,
         sessionKey: targetSessionKey,
         messageProvider: INTERNAL_MESSAGE_CHANNEL,
-        agentAccountId: targetEntry?.accountId,
+        agentAccountId: targetDelivery.lastAccountId,
         groupId: targetEntry?.groupId,
         groupChannel: targetEntry?.groupChannel,
-        groupSpace: targetEntry?.groupSpace,
         inputProvenance,
         sessionFile,
         workspaceDir: resolveAgentWorkspaceDir(target.cfg, targetAgentId),
@@ -1634,6 +1950,7 @@ export async function forwardMentionRouteToAgent(params: {
 function collectSessionAbortPartials(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
+  chatCommittedVisibleText: Map<string, string>;
   sessionKey: string;
   abortOrigin: AbortOrigin;
 }): AbortedPartialSnapshot[] {
@@ -1650,6 +1967,7 @@ function collectSessionAbortPartials(params: {
       runId,
       sessionId: active.sessionId,
       text,
+      committedVisibleText: params.chatCommittedVisibleText.get(runId),
       abortOrigin: params.abortOrigin,
     });
   }
@@ -1667,12 +1985,16 @@ function persistAbortedPartials(params: {
   const { storePath, entry } = loadSessionEntry(params.sessionKey);
   for (const snapshot of params.snapshots) {
     const sessionId = entry?.sessionId ?? snapshot.sessionId ?? snapshot.runId;
+    const committedVisibleText = stripInlineDirectiveTagsForDisplay(
+      snapshot.committedVisibleText ?? "",
+    ).text.trim();
     const trimmedAbortText = trimAbortPartialAgainstTranscript({
       sessionId,
       storePath,
       sessionFile: entry?.sessionFile,
       runId: snapshot.runId,
       text: snapshot.text,
+      committedVisibleText,
     });
     if (!trimmedAbortText) {
       continue;
@@ -1690,6 +2012,9 @@ function persistAbortedPartials(params: {
         origin: snapshot.abortOrigin,
         runId: snapshot.runId,
       },
+      timeline: {
+        canonical: true,
+      },
     });
     if (!appended.ok) {
       params.context.logGateway.warn(
@@ -1705,8 +2030,12 @@ function trimAbortPartialAgainstTranscript(params: {
   sessionFile?: string;
   runId: string;
   text: string;
+  committedVisibleText?: string;
 }): string {
-  const nextText = stripInlineDirectiveTagsForDisplay(params.text).text.trim();
+  const nextText = resolveUnseenTerminalAssistantText({
+    fullText: params.text,
+    committedVisibleText: params.committedVisibleText,
+  }).trimStart();
   if (!nextText) {
     return "";
   }
@@ -1748,6 +2077,29 @@ function trimAbortPartialAgainstTranscript(params: {
   return nextText;
 }
 
+export function resolveUnseenTerminalAssistantText(params: {
+  fullText?: string;
+  committedVisibleText?: string;
+}): string {
+  const fullText = stripInlineDirectiveTagsForDisplay(params.fullText ?? "").text;
+  if (!fullText.trim()) {
+    return "";
+  }
+  const committedVisibleText = stripInlineDirectiveTagsForDisplay(
+    params.committedVisibleText ?? "",
+  ).text;
+  if (!committedVisibleText.trim()) {
+    return fullText;
+  }
+  if (fullText === committedVisibleText) {
+    return "";
+  }
+  if (fullText.startsWith(committedVisibleText)) {
+    return fullText.slice(committedVisibleText.length);
+  }
+  return fullText;
+}
+
 function extractTranscriptAssistantText(message: Record<string, unknown>): string {
   const raw = message.content;
   if (typeof raw === "string") {
@@ -1782,6 +2134,7 @@ function createChatAbortOps(context: GatewayRequestContext): ChatAbortOps {
     chatRunBuffers: context.chatRunBuffers,
     chatRunPhases: context.chatRunPhases,
     chatDeltaSentAt: context.chatDeltaSentAt,
+    chatDeltaLastBroadcastLen: context.chatDeltaLastBroadcastLen,
     chatAbortedRuns: context.chatAbortedRuns,
     removeChatRun: context.removeChatRun,
     agentRunSeq: context.agentRunSeq,
@@ -1800,6 +2153,7 @@ function abortChatRunsForSessionKeyWithPartials(params: {
   const snapshots = collectSessionAbortPartials({
     chatAbortControllers: params.context.chatAbortControllers,
     chatRunBuffers: params.context.chatRunBuffers,
+    chatCommittedVisibleText: params.context.chatCommittedVisibleText,
     sessionKey: params.sessionKey,
     abortOrigin: params.abortOrigin,
   });
@@ -1823,22 +2177,58 @@ function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: strin
   return next;
 }
 
+function trimTerminalBroadcastMessage(
+  message: Record<string, unknown> | undefined,
+  committedVisibleText?: string,
+): Record<string, unknown> | undefined {
+  const strippedMessage = stripEnvelopeFromMessage(message) as Record<string, unknown> | undefined;
+  const visibleMessage = stripInlineDirectiveTagsFromMessageForDisplay(strippedMessage) as
+    | Record<string, unknown>
+    | undefined;
+  if (!visibleMessage) {
+    return undefined;
+  }
+  const fullText = extractVisibleHistoryText(visibleMessage);
+  const unseenText = resolveUnseenTerminalAssistantText({
+    fullText: fullText ?? "",
+    committedVisibleText,
+  });
+  if (!fullText?.trim()) {
+    return visibleMessage;
+  }
+  if (!unseenText) {
+    return undefined;
+  }
+  if (unseenText === fullText) {
+    return visibleMessage;
+  }
+  const nextContent = [{ type: "text", text: unseenText }];
+  return {
+    ...visibleMessage,
+    content: nextContent,
+  };
+}
+
 function broadcastChatFinal(params: {
-  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
+  context: Pick<
+    GatewayRequestContext,
+    "broadcast" | "nodeSendToSession" | "agentRunSeq" | "chatCommittedVisibleText"
+  >;
   runId: string;
   sessionKey: string;
   message?: Record<string, unknown>;
 }) {
   const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.runId);
-  const strippedEnvelopeMessage = stripEnvelopeFromMessage(params.message) as
-    | Record<string, unknown>
-    | undefined;
+  const terminalMessage = trimTerminalBroadcastMessage(
+    params.message,
+    params.context.chatCommittedVisibleText.get(params.runId),
+  );
   const payload = {
     runId: params.runId,
     sessionKey: params.sessionKey,
     seq,
     state: "final" as const,
-    message: stripInlineDirectiveTagsFromMessageForDisplay(strippedEnvelopeMessage),
+    message: terminalMessage,
   };
   params.context.broadcast("chat", payload);
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
@@ -1865,23 +2255,27 @@ function broadcastChatError(params: {
 }
 
 function broadcastChatAborted(params: {
-  context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
+  context: Pick<
+    GatewayRequestContext,
+    "broadcast" | "nodeSendToSession" | "agentRunSeq" | "chatCommittedVisibleText"
+  >;
   runId: string;
   sessionKey: string;
   stopReason?: string;
   message?: Record<string, unknown>;
 }) {
   const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.runId);
-  const strippedEnvelopeMessage = stripEnvelopeFromMessage(params.message) as
-    | Record<string, unknown>
-    | undefined;
+  const terminalMessage = trimTerminalBroadcastMessage(
+    params.message,
+    params.context.chatCommittedVisibleText.get(params.runId),
+  );
   const payload = {
     runId: params.runId,
     sessionKey: params.sessionKey,
     seq,
     state: "aborted" as const,
     stopReason: params.stopReason,
-    message: stripInlineDirectiveTagsFromMessageForDisplay(strippedEnvelopeMessage),
+    message: terminalMessage,
   };
   params.context.broadcast("chat", payload);
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
@@ -2072,6 +2466,10 @@ export const chatHandlers: GatewayRequestHandlers = {
       requestedSessionKey: sessionKey,
       canonicalSessionKey: canonicalKey || sessionKey,
     });
+    const responseMessages = dropInFlightEffectiveUserDuplicates(
+      bounded.messages,
+      activeRun?.effectiveUserMessage,
+    );
     const normalizedToolInvocations = activeRun
       ? toolInvocations.map((invocation) => {
           const message =
@@ -2094,6 +2492,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
     );
     if (activeRun && connId && wantsToolEvents) {
+      context.registerLiveEventRecipient(activeRun.runId, connId);
+      context.registerSessionLiveEventRecipient(sessionKey, connId);
+      if (canonicalKey && canonicalKey !== sessionKey) {
+        context.registerSessionLiveEventRecipient(canonicalKey, connId);
+      }
       context.registerToolEventRecipient(activeRun.runId, connId);
       context.registerSessionToolEventRecipient(sessionKey, connId);
       if (canonicalKey && canonicalKey !== sessionKey) {
@@ -2106,6 +2509,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           activeRunId !== activeRun.runId &&
           (active.sessionKey === sessionKey || active.sessionKey === canonicalKey)
         ) {
+          context.registerLiveEventRecipient(activeRunId, connId);
           context.registerToolEventRecipient(activeRunId, connId);
         }
       }
@@ -2123,7 +2527,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     respond(true, {
       sessionKey,
       sessionId,
-      messages: bounded.messages,
+      messages: responseMessages,
       toolInvocations: normalizedToolInvocations,
       activeRun,
       queuedMessages,
@@ -2209,6 +2613,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       // queue policy is configured to drop new items when full.
       dropPolicy: queueSettings.dropPolicy === "new" ? "summarize" : queueSettings.dropPolicy,
     } as const;
+    const entryDelivery = normalizeSessionDeliveryFields(entry);
     const queuedRun = ensureFollowupRunId({
       id: clientRunId,
       prompt: stampedMessage,
@@ -2226,10 +2631,9 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionId,
         sessionKey,
         messageProvider: INTERNAL_MESSAGE_CHANNEL,
-        agentAccountId: entry?.accountId,
+        agentAccountId: entryDelivery.lastAccountId,
         groupId: entry?.groupId,
         groupChannel: entry?.groupChannel,
-        groupSpace: entry?.groupSpace,
         senderId: clientInfo?.id,
         senderName: clientInfo?.displayName,
         senderUsername: clientInfo?.displayName,
@@ -2455,17 +2859,29 @@ export const chatHandlers: GatewayRequestHandlers = {
 
         const aborted = abortEmbeddedPiRun(sessionId);
         if (aborted) {
-          emitAgentEvent({
+          const partialText = context.chatRunBuffers.get(runId);
+          emitRunCompleted({
             runId,
             sessionKey: runSessionKey,
-            stream: "lifecycle",
-            data: {
-              phase: "end",
-              endedAt: Date.now(),
-              aborted: true,
-            },
+            outcome: "aborted",
+            endedAt: Date.now(),
           });
           clearAgentRunContext(runId);
+          if (partialText && partialText.trim()) {
+            persistAbortedPartials({
+              context,
+              sessionKey: runSessionKey,
+              snapshots: [
+                {
+                  runId,
+                  sessionId,
+                  text: partialText,
+                  committedVisibleText: context.chatCommittedVisibleText.get(runId),
+                  abortOrigin: "rpc",
+                },
+              ],
+            });
+          }
           broadcastChatAborted({
             context,
             runId,
@@ -2516,6 +2932,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             runId,
             sessionId: active.sessionId,
             text: partialText,
+            committedVisibleText: context.chatCommittedVisibleText.get(runId),
             abortOrigin: "rpc",
           },
         ],
@@ -2602,6 +3019,9 @@ export const chatHandlers: GatewayRequestHandlers = {
       normalizedAttachments.length === 0 && BARE_SESSION_RESET_RE.test(rawMessage)
         ? buildBareSessionResetPrompt(cfg)
         : undefined;
+    const effectiveUserMessageId = effectiveUserMessage
+      ? `${clientRunId}:effective-user-message`
+      : undefined;
 
     const sendPolicy = resolveSendPolicy({
       cfg,
@@ -2763,6 +3183,25 @@ export const chatHandlers: GatewayRequestHandlers = {
         status: "started" as const,
         ...(effectiveUserMessage ? { effectiveUserMessage } : {}),
       };
+      if (effectiveUserMessage && effectiveUserMessageId) {
+        const persistedSystemMessage = appendSystemTranscriptMessage({
+          message: effectiveUserMessage,
+          runId: clientRunId,
+          sessionId: entry?.sessionId ?? clientRunId,
+          storePath,
+          sessionFile: entry?.sessionFile,
+          createIfMissing: true,
+          idempotencyKey: effectiveUserMessageId,
+          timeline: {
+            canonical: true,
+          },
+        });
+        if (!persistedSystemMessage.ok) {
+          context.logGateway.warn(
+            `chat.send system transcript append failed: ${persistedSystemMessage.error ?? "unknown error"}`,
+          );
+        }
+      }
       debugGateway(
         context,
         `[chat.send] ack runId=${clientRunId} sessionKey=${rawSessionKey} status=started`,
@@ -2865,6 +3304,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           abortSignal: abortController.signal,
           images: parsedImages.length > 0 ? parsedImages : undefined,
           forceQueueMode: p.queueMode === "followup" ? "followup" : undefined,
+          persistedDisplayRole: effectiveUserMessage ? "system" : undefined,
           onAgentRunStart: (runId) => {
             agentRunStarted = true;
             linkedAgentRunId = runId;
@@ -2882,6 +3322,11 @@ export const chatHandlers: GatewayRequestHandlers = {
               GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
             );
             if (connId && wantsToolEvents) {
+              context.registerLiveEventRecipient(runId, connId);
+              context.registerSessionLiveEventRecipient(sessionKey, connId);
+              if (p.sessionKey !== sessionKey) {
+                context.registerSessionLiveEventRecipient(p.sessionKey, connId);
+              }
               context.registerToolEventRecipient(runId, connId);
               context.registerSessionToolEventRecipient(sessionKey, connId);
               if (p.sessionKey !== sessionKey) {
@@ -2895,6 +3340,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                   activeRunId !== runId &&
                   (active.sessionKey === sessionKey || active.sessionKey === p.sessionKey)
                 ) {
+                  context.registerLiveEventRecipient(activeRunId, connId);
                   context.registerToolEventRecipient(activeRunId, connId);
                 }
               }
@@ -3087,6 +3533,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey: string;
       message: string;
       label?: string;
+      runId?: string;
     };
 
     // Load session to find transcript file

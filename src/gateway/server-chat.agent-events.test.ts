@@ -36,6 +36,25 @@ vi.mock("./server-methods/agent-mentions.js", () => ({
 vi.mock("./server-methods/chat.js", () => ({
   appendAssistantTranscriptMessage: vi.fn(() => ({ ok: true })),
   forwardMentionRouteToAgent: vi.fn(),
+  resolveUnseenTerminalAssistantText: vi.fn(
+    ({ fullText, committedVisibleText }: { fullText?: string; committedVisibleText?: string }) => {
+      const next = String(fullText ?? "");
+      const committed = String(committedVisibleText ?? "");
+      if (!next.trim()) {
+        return "";
+      }
+      if (!committed.trim()) {
+        return next;
+      }
+      if (next === committed) {
+        return "";
+      }
+      if (next.startsWith(committed)) {
+        return next.slice(committed.length);
+      }
+      return next;
+    },
+  ),
 }));
 
 vi.mock("./session-utils.js", async (importOriginal) => {
@@ -114,8 +133,8 @@ describe("agent event handler", () => {
     const nodeSendToSession = vi.fn();
     const agentRunSeq = new Map<string, number>();
     const chatRunState = createChatRunState();
-    const toolEventRecipients = createToolEventRecipientRegistry();
-    const sessionToolEventRecipients = createToolEventRecipientRegistry();
+    const liveEventRecipients = createToolEventRecipientRegistry();
+    const sessionLiveEventRecipients = createToolEventRecipientRegistry();
 
     const handler = createAgentEventHandler({
       broadcast,
@@ -126,8 +145,8 @@ describe("agent event handler", () => {
       resolveSessionKeyForRun: params?.resolveSessionKeyForRun ?? (() => undefined),
       resolveVisibleRunIdForSession: params?.resolveVisibleRunIdForSession,
       clearAgentRunContext: vi.fn(),
-      toolEventRecipients,
-      sessionToolEventRecipients,
+      liveEventRecipients,
+      sessionLiveEventRecipients,
       gatewayContext: params?.gatewayContext,
     });
 
@@ -138,8 +157,10 @@ describe("agent event handler", () => {
       nodeSendToSession,
       agentRunSeq,
       chatRunState,
-      toolEventRecipients,
-      sessionToolEventRecipients,
+      toolEventRecipients: liveEventRecipients,
+      sessionToolEventRecipients: sessionLiveEventRecipients,
+      liveEventRecipients,
+      sessionLiveEventRecipients,
       handler,
     };
   }
@@ -355,7 +376,7 @@ describe("agent event handler", () => {
 
     const payload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
     expect(payload.message).toBeUndefined();
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy?.mockRestore();
   });
 
@@ -463,11 +484,11 @@ describe("agent event handler", () => {
 
     const payload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
     expect(payload.message).toBeUndefined();
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy?.mockRestore();
   });
 
-  it("emits stable assistant idempotency key on final chat payloads", () => {
+  it("omits final assistant message when the full reply was already broadcast as deltas", () => {
     const { broadcast, chatRunState, handler } = createHarness({
       now: 2_250,
       resolveSessionKeyForRun: () => "session-final-idem",
@@ -486,11 +507,8 @@ describe("agent event handler", () => {
     });
     emitLifecycleEnd(handler, "run-final-idem", 2);
 
-    const payload = expectSingleFinalChatPayload(broadcast) as {
-      message?: { idempotencyKey?: string; content?: Array<{ text?: string }> };
-    };
-    expect(payload.message?.idempotencyKey).toBe("client-final-idem:assistant");
-    expect(payload.message?.content?.[0]?.text).toBe("Hello there");
+    const payload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
+    expect(payload.message).toBeUndefined();
   });
 
   it("keeps final short replies like 'No' even when lead-fragment deltas are suppressed", () => {
@@ -512,7 +530,7 @@ describe("agent event handler", () => {
       message?: { content?: Array<{ text?: string }> };
     };
     expect(payload.message?.content?.[0]?.text).toBe("No");
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy?.mockRestore();
   });
 
@@ -545,20 +563,18 @@ describe("agent event handler", () => {
     emitLifecycleEnd(handler, "run-flush");
 
     const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(4);
+    expect(chatCalls).toHaveLength(3);
     const firstPayload = chatCalls[0]?.[1] as { state?: string };
     const secondPayload = chatCalls[1]?.[1] as {
       state?: string;
       message?: { content?: Array<{ text?: string }> };
     };
     const thirdPayload = chatCalls[2]?.[1] as { state?: string; phase?: string };
-    const fourthPayload = chatCalls[3]?.[1] as { state?: string };
     expect(firstPayload.state).toBe("delta");
     expect(secondPayload.state).toBe("delta");
     expect(secondPayload.message?.content?.[0]?.text).toBe(" world");
-    expect(thirdPayload).toMatchObject({ state: "phase", phase: "finalizing" });
-    expect(fourthPayload.state).toBe("final");
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(4);
+    expect(thirdPayload.state).toBe("final");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
     nowSpy.mockRestore();
   });
 
@@ -591,7 +607,7 @@ describe("agent event handler", () => {
     emitLifecycleEnd(handler, "run-segmented", 3);
 
     const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(4);
+    expect(chatCalls).toHaveLength(3);
     const secondPayload = chatCalls[1]?.[1] as {
       state?: string;
       message?: { content?: Array<{ text?: string }> };
@@ -603,9 +619,69 @@ describe("agent event handler", () => {
     };
     expect(secondPayload.state).toBe("delta");
     expect(secondPayload.message?.content?.[0]?.text).toBe("\nAfter tool call");
-    expect(phasePayload).toMatchObject({ state: "phase", phase: "finalizing" });
+    expect(phasePayload.state).toBe("final");
+    expect(finalPayload).toBeUndefined();
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
+  });
+
+  it("omits final payload message after a prefix was already committed before tool work", () => {
+    let now = 10_950;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-tool-final", {
+      sessionKey: "session-tool-final",
+      clientRunId: "client-tool-final",
+    });
+
+    handler({
+      runId: "run-tool-final",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: {
+        text: "Got it! I'm Developer Lead. Let me check my identity and the SOUL.md file to understand who I",
+      },
+    });
+
+    handler({
+      runId: "run-tool-final",
+      seq: 2,
+      stream: "tool",
+      ts: Date.now(),
+      data: { phase: "start", name: "read", toolCallId: "t1" },
+    });
+
+    now = 11_050;
+    handler({
+      runId: "run-tool-final",
+      seq: 3,
+      stream: "assistant",
+      ts: Date.now(),
+      data: {
+        text: "Got it! I'm Developer Lead. Let me check my identity and the SOUL.md file to understand who I am better.",
+      },
+    });
+
+    emitLifecycleEnd(handler, "run-tool-final", 4);
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    const finalPayload = chatCalls.at(-1)?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(chatCalls.map(([, payload]) => (payload as { state?: string }).state)).toEqual([
+      "delta",
+      "phase",
+      "delta",
+      "final",
+    ]);
+    const thirdPayload = chatCalls[2]?.[1] as
+      | { message?: { content?: Array<{ text?: string }> } }
+      | undefined;
+    expect(thirdPayload?.message?.content?.[0]?.text).toBe(" am better.");
     expect(finalPayload.state).toBe("final");
-    expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(finalPayload.message).toBeUndefined();
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(4);
     nowSpy.mockRestore();
   });
@@ -639,7 +715,7 @@ describe("agent event handler", () => {
     emitLifecycleEnd(handler, "run-segmented-flush", 3);
 
     const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(4);
+    expect(chatCalls).toHaveLength(3);
     const flushPayload = chatCalls[1]?.[1] as {
       state?: string;
       message?: { content?: Array<{ text?: string }> };
@@ -651,10 +727,9 @@ describe("agent event handler", () => {
     };
     expect(flushPayload.state).toBe("delta");
     expect(flushPayload.message?.content?.[0]?.text).toBe("\nAfter tool call");
-    expect(phasePayload).toMatchObject({ state: "phase", phase: "finalizing" });
-    expect(finalPayload.state).toBe("final");
-    expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(4);
+    expect(phasePayload.state).toBe("final");
+    expect(finalPayload).toBeUndefined();
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
     nowSpy.mockRestore();
   });
 
@@ -687,14 +762,13 @@ describe("agent event handler", () => {
     emitLifecycleEnd(handler, "run-no-dup-flush");
 
     const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(4);
+    expect(chatCalls).toHaveLength(3);
     expect(chatCalls.map(([, payload]) => (payload as { state?: string }).state)).toEqual([
       "delta",
       "delta",
-      "phase",
       "final",
     ]);
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(4);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
     nowSpy.mockRestore();
   });
 
@@ -922,7 +996,7 @@ describe("agent event handler", () => {
     expect(nodeSendToSession).not.toHaveBeenCalled();
   });
 
-  it("broadcasts deterministic chat phases for reasoning, typing, tool work, and finalizing", () => {
+  it("broadcasts deterministic chat phases for reasoning, typing, and tool work", () => {
     const { broadcast, handler } = createHarness({
       resolveSessionKeyForRun: () => "session-phase",
     });
@@ -984,7 +1058,123 @@ describe("agent event handler", () => {
     expect(chatPayloads[3]).toMatchObject({ state: "delta", phase: "typing" });
     expect(chatPayloads[4]).toMatchObject({ state: "phase", phase: "tool_running" });
     expect(chatPayloads[5]).toMatchObject({ state: "phase", phase: "processing" });
-    expect(chatPayloads[6]).toMatchObject({ state: "phase", phase: "finalizing" });
+    expect(chatPayloads[6]).toMatchObject({ state: "final" });
+  });
+
+  it("captures only the broadcast-visible assistant prefix when leaving typing for tool work", () => {
+    const { handler, chatRunState } = createHarness({
+      resolveSessionKeyForRun: () => "session-phase",
+      gatewayContext: {
+        broadcast: vi.fn(),
+        nodeSendToSession: vi.fn(),
+        agentRunSeq: new Map<string, number>(),
+        dedupe: new Map<string, DedupeEntry>(),
+        logGateway: {
+          warn: vi.fn(),
+          subsystem: "gateway",
+          isEnabled: () => false,
+          trace: vi.fn(),
+          debug: vi.fn(),
+          info: vi.fn(),
+          error: vi.fn(),
+          fatal: vi.fn(),
+          child: vi.fn(),
+          raw: vi.fn(),
+        },
+      },
+    });
+
+    chatRunState.registry.add("run-phase", {
+      sessionKey: "session-phase",
+      clientRunId: "run-phase",
+    });
+    chatRunState.buffers.set(
+      "run-phase",
+      "I'm ready to help! Let me check what files are available in the workspace and then respond.",
+    );
+    chatRunState.deltaLastBroadcastLen.set(
+      "run-phase",
+      "I'm ready to help! Let me check what files are available in the workspace and then".length,
+    );
+    chatRunState.phases.set("run-phase", "typing");
+
+    handler({
+      runId: "run-phase",
+      seq: 5,
+      stream: "tool",
+      ts: Date.now(),
+      data: { phase: "start", name: "read", toolCallId: "t1" },
+    });
+
+    expect(chatRunState.committedVisibleText.get("run-phase")).toBe(
+      "I'm ready to help! Let me check what files are available in the workspace and then",
+    );
+    expect(appendAssistantTranscriptMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-phase",
+        idempotencyKey: "run-phase:timeline:5",
+        timeline: {
+          canonical: true,
+          seq: 5,
+        },
+      }),
+    );
+  });
+
+  it("persists a canonical final suffix row when a run completes after tool work", () => {
+    const { handler, chatRunState } = createHarness({
+      resolveSessionKeyForRun: () => "session-phase",
+      gatewayContext: {
+        broadcast: vi.fn(),
+        nodeSendToSession: vi.fn(),
+        agentRunSeq: new Map<string, number>(),
+        dedupe: new Map<string, DedupeEntry>(),
+        logGateway: {
+          warn: vi.fn(),
+          subsystem: "gateway",
+          isEnabled: () => false,
+          trace: vi.fn(),
+          debug: vi.fn(),
+          info: vi.fn(),
+          error: vi.fn(),
+          fatal: vi.fn(),
+          child: vi.fn(),
+          raw: vi.fn(),
+        },
+      },
+    });
+
+    chatRunState.registry.add("run-phase", {
+      sessionKey: "session-phase",
+      clientRunId: "run-phase",
+    });
+    chatRunState.buffers.set(
+      "run-phase",
+      "I'm ready to help! Let me check what files are available in the workspace and then respond.",
+    );
+    chatRunState.deltaLastBroadcastLen.set(
+      "run-phase",
+      "I'm ready to help! Let me check what files are available in the workspace and then".length,
+    );
+
+    handler({
+      runId: "run-phase",
+      seq: 7,
+      stream: "lifecycle",
+      ts: Date.now(),
+      data: { phase: "end", endedAt: 7 },
+    });
+
+    expect(appendAssistantTranscriptMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-phase",
+        idempotencyKey: "run-phase:timeline:7",
+        timeline: {
+          canonical: true,
+          seq: 7,
+        },
+      }),
+    );
   });
 
   it("does not mark typing on assistant start before any token text arrives", () => {
@@ -1303,7 +1493,7 @@ describe("agent event handler", () => {
 
     const finalPayload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
     expect(finalPayload.message).toBeUndefined();
-    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
   });
 
   it("keeps heartbeat alert text in final chat output when remainder exceeds ackMaxChars", () => {

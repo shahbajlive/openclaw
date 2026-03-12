@@ -155,11 +155,15 @@ function createChatContext(): Pick<
   | "chatAbortControllers"
   | "chatRunBuffers"
   | "chatRunPhases"
+  | "chatCommittedVisibleText"
   | "chatDeltaSentAt"
+  | "chatDeltaLastBroadcastLen"
   | "chatAbortedRuns"
   | "addChatRun"
   | "removeChatRun"
   | "dedupe"
+  | "registerLiveEventRecipient"
+  | "registerSessionLiveEventRecipient"
   | "registerToolEventRecipient"
   | "registerSessionToolEventRecipient"
   | "loadGatewayModelCatalog"
@@ -172,11 +176,15 @@ function createChatContext(): Pick<
     chatAbortControllers: new Map(),
     chatRunBuffers: new Map(),
     chatRunPhases: new Map(),
+    chatCommittedVisibleText: new Map(),
     chatDeltaSentAt: new Map(),
+    chatDeltaLastBroadcastLen: new Map(),
     chatAbortedRuns: new Map(),
     addChatRun: vi.fn(),
     removeChatRun: vi.fn(),
     dedupe: new Map(),
+    registerLiveEventRecipient: vi.fn(),
+    registerSessionLiveEventRecipient: vi.fn(),
     registerToolEventRecipient: vi.fn(),
     registerSessionToolEventRecipient: vi.fn(),
     loadGatewayModelCatalog: vi.fn(async () => ({ providers: [] })),
@@ -296,8 +304,8 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     expect(register).not.toHaveBeenCalledWith("run-other-session", "conn-1");
   });
 
-  it("chat.history re-registers tool-event recipients for an active run after refresh", async () => {
-    createTranscriptFixture("openclaw-chat-history-tool-events-reregister-");
+  it("chat.history re-registers live recipients for an active run after refresh", async () => {
+    createTranscriptFixture("openclaw-chat-history-live-events-reregister-");
     const respond = vi.fn();
     const context = createChatContext();
     context.chatAbortControllers.set("run-history-active", {
@@ -334,10 +342,23 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       context: context as GatewayRequestContext,
     });
 
+    const registerLiveRun = context.registerLiveEventRecipient as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    const registerLiveSession = context.registerSessionLiveEventRecipient as unknown as ReturnType<
+      typeof vi.fn
+    >;
     const registerRun = context.registerToolEventRecipient as unknown as ReturnType<typeof vi.fn>;
     const registerSession = context.registerSessionToolEventRecipient as unknown as ReturnType<
       typeof vi.fn
     >;
+    expect(registerLiveRun).toHaveBeenCalledWith("run-history-active", "conn-history");
+    expect(registerLiveRun).toHaveBeenCalledWith("run-same-session", "conn-history");
+    expect(registerLiveRun).not.toHaveBeenCalledWith("run-other-session", "conn-history");
+    expect(registerLiveSession).toHaveBeenCalledWith(
+      "agent:frontend_engineer:clawport",
+      "conn-history",
+    );
     expect(registerRun).toHaveBeenCalledWith("run-history-active", "conn-history");
     expect(registerRun).toHaveBeenCalledWith("run-same-session", "conn-history");
     expect(registerRun).not.toHaveBeenCalledWith("run-other-session", "conn-history");

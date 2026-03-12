@@ -591,6 +591,8 @@ export const agentHandlers: GatewayRequestHandlers = {
       GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
     );
     if (connId && wantsToolEvents && requestedSessionKey) {
+      context.registerLiveEventRecipient(runId, connId);
+      context.registerSessionLiveEventRecipient(requestedSessionKey, connId);
       context.registerToolEventRecipient(runId, connId);
       context.registerSessionToolEventRecipient(requestedSessionKey, connId);
       // Register for any other active runs *in the same session* so
@@ -598,6 +600,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       // in-progress tool events without leaking cross-session data.
       for (const [activeRunId, active] of context.chatAbortControllers) {
         if (activeRunId !== runId && active.sessionKey === requestedSessionKey) {
+          context.registerLiveEventRecipient(activeRunId, connId);
           context.registerToolEventRecipient(activeRunId, connId);
         }
       }

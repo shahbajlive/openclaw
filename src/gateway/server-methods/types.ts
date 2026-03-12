@@ -56,14 +56,18 @@ export type GatewayRequestContext = {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatAbortedRuns: Map<string, number>;
   chatRunBuffers: Map<string, string>;
-  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
+  chatCommittedVisibleText: Map<string, string>;
   chatDeltaSentAt: Map<string, number>;
+  chatDeltaLastBroadcastLen: Map<string, number>;
   addChatRun: (sessionId: string, entry: { sessionKey: string; clientRunId: string }) => void;
   removeChatRun: (
     sessionId: string,
     clientRunId: string,
     sessionKey?: string,
   ) => { sessionKey: string; clientRunId: string } | undefined;
+  registerLiveEventRecipient: (runId: string, connId: string) => void;
+  registerSessionLiveEventRecipient: (sessionKey: string, connId: string) => void;
   registerToolEventRecipient: (runId: string, connId: string) => void;
   registerSessionToolEventRecipient: (sessionKey: string, connId: string) => void;
   dedupe: Map<string, DedupeEntry>;

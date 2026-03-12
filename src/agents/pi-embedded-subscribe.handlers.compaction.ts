@@ -1,5 +1,10 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
-import { emitAgentEvent } from "../infra/agent-events.js";
+import {
+  createActivityRef,
+  emitActivityCompleted,
+  emitActivityStarted,
+  emitActivityUpdated,
+} from "../infra/agent-events.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
 import { makeZeroUsageSnapshot } from "./usage.js";
@@ -8,10 +13,14 @@ export function handleAutoCompactionStart(ctx: EmbeddedPiSubscribeContext) {
   ctx.state.compactionInFlight = true;
   ctx.ensureCompactionPromise();
   ctx.log.debug(`embedded run compaction start: runId=${ctx.params.runId}`);
-  emitAgentEvent({
+  emitActivityStarted({
     runId: ctx.params.runId,
-    stream: "compaction",
-    data: { phase: "start" },
+    sessionKey: ctx.params.sessionKey,
+    activity: createActivityRef({
+      activityId: `${ctx.params.runId}:compaction`,
+      kind: "compaction",
+      origin: { type: "system", source: "auto_compaction" },
+    }),
   });
   void ctx.params.onAgentEvent?.({
     stream: "compaction",
@@ -55,11 +64,30 @@ export function handleAutoCompactionEnd(
     ctx.maybeResolveCompactionWait();
     clearStaleAssistantUsageOnSessionMessages(ctx);
   }
-  emitAgentEvent({
-    runId: ctx.params.runId,
-    stream: "compaction",
-    data: { phase: "end", willRetry },
-  });
+  if (willRetry) {
+    emitActivityUpdated({
+      runId: ctx.params.runId,
+      sessionKey: ctx.params.sessionKey,
+      activity: createActivityRef({
+        activityId: `${ctx.params.runId}:compaction`,
+        kind: "compaction",
+        origin: { type: "system", source: "auto_compaction" },
+      }),
+      patch: { willRetry: true },
+    });
+  } else {
+    emitActivityCompleted({
+      runId: ctx.params.runId,
+      sessionKey: ctx.params.sessionKey,
+      activity: createActivityRef({
+        activityId: `${ctx.params.runId}:compaction`,
+        kind: "compaction",
+        origin: { type: "system", source: "auto_compaction" },
+      }),
+      outcome: "completed",
+      result: { willRetry: false },
+    });
+  }
   void ctx.params.onAgentEvent?.({
     stream: "compaction",
     data: { phase: "end", willRetry },

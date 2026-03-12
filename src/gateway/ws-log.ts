@@ -169,11 +169,14 @@ export function summarizeAgentEventForWsLog(payload: unknown): Record<string, un
   }
   const rec = payload as Record<string, unknown>;
   const runId = typeof rec.runId === "string" ? rec.runId : undefined;
-  const stream = typeof rec.stream === "string" ? rec.stream : undefined;
+  const eventType = typeof rec.eventType === "string" ? rec.eventType : undefined;
+  const activityKind = typeof rec.kind === "string" ? rec.kind : undefined;
+  const stream = activityKind ?? eventType;
   const seq = typeof rec.seq === "number" ? rec.seq : undefined;
   const sessionKey = typeof rec.sessionKey === "string" ? rec.sessionKey : undefined;
-  const data =
-    rec.data && typeof rec.data === "object" ? (rec.data as Record<string, unknown>) : undefined;
+  const data = (rec.output ?? rec.input ?? rec.patch ?? rec.result) as
+    | Record<string, unknown>
+    | undefined;
 
   const extra: Record<string, unknown> = {};
   if (runId) {
@@ -199,7 +202,7 @@ export function summarizeAgentEventForWsLog(payload: unknown): Record<string, un
     return extra;
   }
 
-  if (stream === "assistant") {
+  if (eventType === "activity.output" && activityKind === "assistant_message") {
     const text = typeof data.text === "string" ? data.text : undefined;
     if (text?.trim()) {
       extra.text = compactPreview(text);
@@ -211,35 +214,34 @@ export function summarizeAgentEventForWsLog(payload: unknown): Record<string, un
     return extra;
   }
 
-  if (stream === "tool") {
-    const phase = typeof data.phase === "string" ? data.phase : undefined;
-    const name = typeof data.name === "string" ? data.name : undefined;
-    if (phase || name) {
-      extra.tool = `${phase ?? "?"}:${name ?? "?"}`;
-    }
-    const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : undefined;
-    if (toolCallId) {
-      extra.call = shortId(toolCallId);
+  if (
+    eventType?.startsWith("activity.") &&
+    (activityKind === "tool_call" ||
+      activityKind === "subagent_call" ||
+      activityKind === "peer_agent_call")
+  ) {
+    const name = typeof data?.name === "string" ? data.name : undefined;
+    extra.tool = `${eventType}:${name ?? activityKind}`;
+    const activityId = typeof rec.activityId === "string" ? rec.activityId : undefined;
+    if (activityId) {
+      extra.call = shortId(activityId);
     }
     const meta = typeof data.meta === "string" ? data.meta : undefined;
     if (meta?.trim()) {
       extra.meta = meta;
     }
-    if (typeof data.isError === "boolean") {
-      extra.err = data.isError;
+    if (rec.outcome === "failed") {
+      extra.err = true;
     }
     return extra;
   }
 
-  if (stream === "lifecycle") {
-    const phase = typeof data.phase === "string" ? data.phase : undefined;
-    if (phase) {
-      extra.phase = phase;
+  if (eventType?.startsWith("run.")) {
+    extra.phase = eventType;
+    if (rec.outcome === "aborted") {
+      extra.aborted = true;
     }
-    if (typeof data.aborted === "boolean") {
-      extra.aborted = data.aborted;
-    }
-    const error = typeof data.error === "string" ? data.error : undefined;
+    const error = typeof rec.error === "string" ? rec.error : undefined;
     if (error?.trim()) {
       extra.error = compactPreview(error, 120);
     }

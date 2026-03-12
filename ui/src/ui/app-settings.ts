@@ -269,6 +269,7 @@ export async function refreshActiveTab(host: SettingsHost) {
       host.chatMentionEnd = null;
       host.chatMentionSelectedIndex = 0;
       host.chatAttachments = [];
+      host.chatLiveActivities = [];
       host.chatRunId = null;
       host.chatStream = null;
       host.chatStreamStartedAt = null;

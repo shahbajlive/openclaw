@@ -283,11 +283,8 @@ export function startAcpSpawnParentStreamRelay(params: {
       return;
     }
 
-    if (event.stream === "assistant") {
-      const data = event.data;
-      const deltaCandidate =
-        (data as { delta?: unknown } | undefined)?.delta ??
-        (data as { text?: unknown } | undefined)?.text;
+    if (event.eventType === "activity.output" && event.kind === "assistant_message") {
+      const deltaCandidate = event.output?.delta ?? event.output?.text;
       const delta = typeof deltaCandidate === "string" ? deltaCandidate : undefined;
       if (!delta || !delta.trim()) {
         return;
@@ -312,18 +309,16 @@ export function startAcpSpawnParentStreamRelay(params: {
       return;
     }
 
-    if (event.stream !== "lifecycle") {
+    if (event.eventType !== "run.completed") {
       return;
     }
 
-    const phase = toTrimmedString((event.data as { phase?: unknown } | undefined)?.phase);
-    logEvent("lifecycle", { phase: phase ?? "unknown", data: event.data });
+    const phase = event.outcome === "failed" ? "error" : "end";
+    logEvent("lifecycle", { phase, data: event });
     if (phase === "end") {
       flushPending();
-      const startedAt = toFiniteNumber(
-        (event.data as { startedAt?: unknown } | undefined)?.startedAt,
-      );
-      const endedAt = toFiniteNumber((event.data as { endedAt?: unknown } | undefined)?.endedAt);
+      const startedAt = toFiniteNumber(event.startedAt);
+      const endedAt = toFiniteNumber(event.endedAt);
       const durationMs =
         startedAt != null && endedAt != null && endedAt >= startedAt
           ? endedAt - startedAt
@@ -342,7 +337,7 @@ export function startAcpSpawnParentStreamRelay(params: {
 
     if (phase === "error") {
       flushPending();
-      const errorText = toTrimmedString((event.data as { error?: unknown } | undefined)?.error);
+      const errorText = toTrimmedString(event.error);
       if (errorText) {
         emit(`${relayLabel} run failed: ${errorText}`, `${contextPrefix}:error`);
       } else {

@@ -5,7 +5,7 @@ type PersistedChatRuntimeState = {
   sessionKey: string;
   runId: string;
   stream: string;
-  phase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  phase: "processing" | "thinking" | "typing" | "tool_running" | null;
   streamStartedAt: number | null;
   streamCommittedPrefixLength: number;
   updatedAt: number;
@@ -14,7 +14,7 @@ type PersistedChatRuntimeState = {
 export type ChatRuntimeState = {
   runId: string;
   stream: string;
-  phase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  phase: "processing" | "thinking" | "typing" | "tool_running" | null;
   streamStartedAt: number | null;
   streamCommittedPrefixLength: number;
 };
@@ -61,7 +61,6 @@ export function loadChatRuntimeState(sessionKey: string): ChatRuntimeState | nul
         parsed.phase === "thinking" ||
         parsed.phase === "typing" ||
         parsed.phase === "tool_running" ||
-        parsed.phase === "finalizing" ||
         parsed.phase === "processing"
           ? parsed.phase
           : "processing",
@@ -81,7 +80,7 @@ export function persistChatRuntimeState(params: {
   sessionKey: string;
   runId: string | null;
   stream: string | null;
-  phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  phase?: "processing" | "thinking" | "typing" | "tool_running" | null;
   streamStartedAt: number | null;
   streamCommittedPrefixLength?: number;
 }) {

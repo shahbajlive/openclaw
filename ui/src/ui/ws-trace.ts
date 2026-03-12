@@ -30,5 +30,4 @@ function pushTrace(entry: UiWsTraceEntry) {
 
 export function traceUiWs(entry: UiWsTraceEntry) {
   pushTrace(entry);
-  console.info("[ws-trace/ui]", entry);
 }

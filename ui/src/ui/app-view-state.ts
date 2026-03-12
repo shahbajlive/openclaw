@@ -33,6 +33,7 @@ import type {
   WorkspaceConversationSummary,
   WorkspaceFilesListResult,
 } from "./types.ts";
+import type { ChatLiveActivity } from "./types/chat-types.ts";
 import type { ChatAttachment, ChatQueueItem } from "./ui-types.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
 import type { SessionLogEntry } from "./views/usage.ts";
@@ -71,9 +72,10 @@ export type AppViewState = {
   chatAttachments: ChatAttachment[];
   chatMessages: unknown[];
   chatToolMessages: unknown[];
+  chatLiveActivities: ChatLiveActivity[];
   chatStream: string | null;
   chatStreamStartedAt: number | null;
-  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | null;
   chatRunId: string | null;
   chatResetInFlight: boolean;
   compactionStatus: CompactionStatus | null;

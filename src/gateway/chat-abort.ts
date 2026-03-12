@@ -1,4 +1,5 @@
 import { isAbortRequestText } from "../auto-reply/reply/abort.js";
+import { resolveUnseenTerminalAssistantText } from "./server-methods/chat.js";
 
 export type ChatAbortControllerEntry = {
   controller: AbortController;
@@ -35,7 +36,9 @@ export function resolveChatRunExpiresAtMs(params: {
 export type ChatAbortOps = {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunBuffers: Map<string, string>;
-  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+  chatCommittedVisibleText?: Map<string, string>;
+  chatDeltaLastBroadcastLen?: Map<string, number>;
+  chatRunPhases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
   chatDeltaSentAt: Map<string, number>;
   chatAbortedRuns: Map<string, number>;
   removeChatRun: (
@@ -58,19 +61,37 @@ function broadcastChatAborted(
   },
 ) {
   const { runId, sessionKey, stopReason, partialText } = params;
+  const lastBroadcastLen = Math.max(0, ops.chatDeltaLastBroadcastLen?.get(runId) ?? 0);
+  const committedVisibleText =
+    ops.chatCommittedVisibleText?.get(runId) ??
+    (partialText && lastBroadcastLen > 0 ? partialText.slice(0, lastBroadcastLen) : undefined);
+  const visiblePartialText = resolveUnseenTerminalAssistantText({
+    fullText: partialText,
+    committedVisibleText,
+  });
+  const baseSeq = ops.agentRunSeq.get(runId) ?? 0;
+  if (visiblePartialText.trim()) {
+    const deltaPayload = {
+      runId,
+      sessionKey,
+      seq: baseSeq + 1,
+      state: "delta" as const,
+      phase: "typing" as const,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: visiblePartialText }],
+        timestamp: Date.now(),
+      },
+    };
+    ops.broadcast("chat", deltaPayload);
+    ops.nodeSendToSession(sessionKey, "chat", deltaPayload);
+  }
   const payload = {
     runId,
     sessionKey,
-    seq: (ops.agentRunSeq.get(runId) ?? 0) + 1,
+    seq: baseSeq + (visiblePartialText.trim() ? 2 : 1),
     state: "aborted" as const,
     stopReason,
-    message: partialText
-      ? {
-          role: "assistant",
-          content: [{ type: "text", text: partialText }],
-          timestamp: Date.now(),
-        }
-      : undefined,
   };
   ops.broadcast("chat", payload);
   ops.nodeSendToSession(sessionKey, "chat", payload);
@@ -103,6 +124,8 @@ export function abortChatRunById(
   ops.chatDeltaSentAt.delete(runId);
   const removed = ops.removeChatRun(runId, runId, sessionKey);
   broadcastChatAborted(ops, { runId, sessionKey, stopReason, partialText });
+  ops.chatCommittedVisibleText?.delete(runId);
+  ops.chatDeltaLastBroadcastLen?.delete(runId);
   ops.agentRunSeq.delete(runId);
   if (removed?.clientRunId) {
     ops.agentRunSeq.delete(removed.clientRunId);

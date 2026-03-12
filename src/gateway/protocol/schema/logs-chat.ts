@@ -91,7 +91,6 @@ export const ChatEventSchema = Type.Object(
         Type.Literal("thinking"),
         Type.Literal("typing"),
         Type.Literal("tool_running"),
-        Type.Literal("finalizing"),
       ]),
     ),
     message: Type.Optional(Type.Unknown()),

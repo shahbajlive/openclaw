@@ -2,27 +2,61 @@
  * Chat message types for the UI layer.
  */
 
+export type ChatLiveActor = {
+  role: "assistant" | "peer";
+  actorKey: string;
+  label: string;
+  avatar?: string | null;
+  accent?: string | null;
+};
+
+export type ChatLiveActivity = {
+  activityId: string;
+  runId: string;
+  parentActivityId?: string | null;
+  kind: string;
+  actor: ChatLiveActor;
+  startedAt: number;
+  updatedAt: number;
+  text?: string;
+  statusLabel?: string | null;
+  completed?: boolean;
+};
+
 /** Union type for items in the chat thread */
 export type ChatItem =
   | { kind: "message"; key: string; message: unknown; runId?: string | null }
   | { kind: "divider"; key: string; label: string; timestamp: number }
-  | { kind: "stream"; key: string; text: string; startedAt: number; runId?: string | null }
+  | {
+      kind: "stream";
+      key: string;
+      text: string;
+      startedAt: number;
+      runId?: string | null;
+      activityId?: string | null;
+      actor?: ChatLiveActor;
+      statusLabel?: string | null;
+    }
   | { kind: "reading-indicator"; key: string; runId?: string | null }
   | {
       kind: "processing-indicator";
       key: string;
       startedAt: number;
       runId?: string | null;
-      phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+      activityId?: string | null;
+      actor?: ChatLiveActor;
+      phase?: "processing" | "thinking" | "typing" | "tool_running" | null;
+      statusLabel?: string | null;
     };
 
 export type MessageGroupChild =
   | { kind: "message"; message: unknown; key: string }
-  | { kind: "stream"; text: string; startedAt: number }
+  | { kind: "stream"; text: string; startedAt: number; statusLabel?: string | null }
   | { kind: "reading-indicator" }
   | {
       kind: "processing-indicator";
-      phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+      phase?: "processing" | "thinking" | "typing" | "tool_running" | null;
+      statusLabel?: string | null;
     };
 
 /** A group of consecutive messages from the same role (Slack-style layout) */

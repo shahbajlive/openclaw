@@ -20,6 +20,11 @@ export async function loadControlUiBootstrapConfig(state: ControlUiBootstrapStat
   if (typeof fetch !== "function") {
     return;
   }
+  if (import.meta.env.DEV) {
+    // The bootstrap endpoint is only served by the Gateway-hosted control UI.
+    // Skip it under the standalone Vite dev server to avoid expected 404 noise.
+    return;
+  }
 
   const basePath = normalizeBasePath(state.basePath ?? "");
   const url = basePath

@@ -1,40 +1,10 @@
 import { extractRawText, extractText } from "../chat/message-extract.ts";
-import {
-  buildToolDedupeKeys,
-  resolveToolCallId,
-  resolveToolRunId,
-  resolveToolSessionKey,
-} from "../chat/tool-identity.ts";
 import type { GatewayBrowserClient } from "../gateway.ts";
+import type { ChatLiveActivity } from "../types/chat-types.ts";
 import type { ChatAttachment } from "../ui-types.ts";
 import type { ChatQueueItem } from "../ui-types.ts";
 import { generateUUID } from "../uuid.ts";
 import { traceUiWs } from "../ws-trace.ts";
-
-const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/;
-const ASSISTANT_DUPLICATE_WINDOW_MS = 10_000;
-
-function isSilentReplyStream(text: string): boolean {
-  return SILENT_REPLY_PATTERN.test(text);
-}
-
-/** Client-side defense-in-depth: detect assistant messages whose text is purely NO_REPLY. */
-function isAssistantSilentReply(message: unknown): boolean {
-  if (!message || typeof message !== "object") {
-    return false;
-  }
-  const entry = message as Record<string, unknown>;
-  const role = typeof entry.role === "string" ? entry.role.toLowerCase() : "";
-  if (role !== "assistant") {
-    return false;
-  }
-  // entry.text takes precedence — matches gateway extractAssistantTextForSilentCheck
-  if (typeof entry.text === "string") {
-    return isSilentReplyStream(entry.text);
-  }
-  const text = extractText(message);
-  return typeof text === "string" && isSilentReplyStream(text);
-}
 
 export type ChatState = {
   client: GatewayBrowserClient | null;
@@ -44,6 +14,7 @@ export type ChatState = {
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatThinkingLevel: string | null;
+  chatLiveActivities?: ChatLiveActivity[];
   chatSending: boolean;
   chatMessage: string;
   chatDraftSelectionStart?: number | null;
@@ -52,7 +23,7 @@ export type ChatState = {
   chatQueue: ChatQueueItem[];
   chatQueueRequestInFlight?: boolean;
   chatRunId: string | null;
-  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | null;
   chatResetInFlight?: boolean;
   chatStream: string | null;
   chatStreamStartedAt: number | null;
@@ -64,7 +35,7 @@ export type ChatEventPayload = {
   runId: string;
   sessionKey: string;
   state: "queued" | "queue_removed" | "started" | "phase" | "delta" | "final" | "aborted" | "error";
-  phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing";
+  phase?: "processing" | "thinking" | "typing" | "tool_running";
   message?: unknown;
   errorMessage?: string;
   source?: string;
@@ -117,126 +88,11 @@ function normalizeQueueItem(item: ChatQueueItem): ChatQueueItem {
   };
 }
 
-function appendUniqueSuffix(base: string, suffix: string): string {
-  if (!suffix) {
-    return base;
-  }
-  if (!base) {
-    return suffix;
-  }
-  if (base.endsWith(suffix)) {
-    return base;
-  }
-  const maxOverlap = Math.min(base.length, suffix.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (base.slice(-overlap) === suffix.slice(0, overlap)) {
-      return base + suffix.slice(overlap);
-    }
-  }
-  return base + suffix;
-}
-
 function normalizeQueueSnapshot(queue: ChatQueueItem[] | undefined): ChatQueueItem[] | null {
   if (!Array.isArray(queue)) {
     return null;
   }
   return queue.map((item) => normalizeQueueItem(item));
-}
-
-function filterQueuedTranscriptMessages(
-  messages: unknown[],
-  queuedItems: ChatQueueItem[],
-): unknown[] {
-  if (!messages.length || !queuedItems.length) {
-    return messages;
-  }
-  const queuedIds = new Set(
-    queuedItems.map((item) => item.id.trim()).filter((id) => id.length > 0),
-  );
-  if (queuedIds.size === 0) {
-    return messages;
-  }
-  return messages.filter((message) => {
-    if (!message || typeof message !== "object") {
-      return true;
-    }
-    const entry = message as Record<string, unknown>;
-    const idempotencyKey = trimIdempotencyKey(entry.idempotencyKey);
-    if (!idempotencyKey || !queuedIds.has(idempotencyKey)) {
-      return true;
-    }
-    const role = typeof entry.role === "string" ? entry.role.toLowerCase() : "";
-    return role !== "user";
-  });
-}
-
-function extractToolTimestamp(message: unknown): number | null {
-  if (!message || typeof message !== "object") {
-    return null;
-  }
-  const raw = (message as { timestamp?: unknown }).timestamp;
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-}
-
-function extractToolName(message: unknown): string | null {
-  if (!message || typeof message !== "object") {
-    return null;
-  }
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return null;
-  }
-  for (const item of content) {
-    if (!item || typeof item !== "object") {
-      continue;
-    }
-    const record = item as { type?: unknown; name?: unknown };
-    const type = typeof record.type === "string" ? record.type.trim().toLowerCase() : "";
-    if (
-      (type === "toolcall" || type === "tool_call" || type === "tooluse" || type === "tool_use") &&
-      typeof record.name === "string" &&
-      record.name.trim()
-    ) {
-      return record.name.trim();
-    }
-  }
-  return null;
-}
-
-function mergeHydratedToolMessages(historyMessages: unknown[], liveMessages: unknown[]): unknown[] {
-  if (historyMessages.length === 0) {
-    return liveMessages;
-  }
-  if (liveMessages.length === 0) {
-    return historyMessages;
-  }
-
-  const liveKeys = new Set<string>();
-  for (const message of liveMessages) {
-    const keys = buildToolDedupeKeys({
-      toolCallId: resolveToolCallId(message),
-      runId: resolveToolRunId(message),
-      sessionKey: resolveToolSessionKey(message),
-      name: extractToolName(message),
-      timestamp: extractToolTimestamp(message),
-    });
-    for (const key of keys) {
-      liveKeys.add(key);
-    }
-  }
-
-  const preservedHistory = historyMessages.filter((message) => {
-    const keys = buildToolDedupeKeys({
-      toolCallId: resolveToolCallId(message),
-      runId: resolveToolRunId(message),
-      sessionKey: resolveToolSessionKey(message),
-      name: extractToolName(message),
-      timestamp: extractToolTimestamp(message),
-    });
-    return !keys.some((key) => liveKeys.has(key));
-  });
-
-  return [...preservedHistory, ...liveMessages];
 }
 
 function matchesQueuedItemForCurrentSession(
@@ -255,13 +111,12 @@ function matchesQueuedItemForCurrentSession(
 
 function normalizeChatPhase(
   phase: unknown,
-): "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null {
+): "processing" | "thinking" | "typing" | "tool_running" | null {
   switch (phase) {
     case "processing":
     case "thinking":
     case "typing":
     case "tool_running":
-    case "finalizing":
       return phase;
     default:
       return null;
@@ -269,20 +124,28 @@ function normalizeChatPhase(
 }
 
 function commitVisibleStreamToTranscript(
-  state: Pick<ChatState, "chatMessages" | "chatStream" | "chatStreamStartedAt" | "chatRunId">,
+  state: Pick<
+    ChatState,
+    | "chatMessages"
+    | "chatStream"
+    | "chatStreamStartedAt"
+    | "chatRunId"
+    | "chatStreamCommittedPrefixLength"
+  >,
   opts?: { clearOnly?: boolean; timestamp?: number },
 ) {
   const streamText = typeof state.chatStream === "string" ? state.chatStream : "";
-  const trimmed = streamText.trim();
-  if (!opts?.clearOnly && trimmed && !isSilentReplyStream(trimmed)) {
+  if (!opts?.clearOnly && streamText.trim()) {
     const timestamp =
       typeof state.chatStreamStartedAt === "number"
         ? state.chatStreamStartedAt
         : (opts?.timestamp ?? Date.now());
-    state.chatMessages = [
-      ...state.chatMessages,
-      buildAssistantTextMessage(streamText, timestamp, state.chatRunId),
-    ];
+    const nextMessage = buildAssistantTextMessage(streamText, timestamp, state.chatRunId);
+    if (nextMessage) {
+      state.chatMessages = [...state.chatMessages, nextMessage];
+      const nextText = extractText(nextMessage) ?? "";
+      state.chatStreamCommittedPrefixLength = nextText.length;
+    }
   }
   state.chatStream = null;
   state.chatStreamStartedAt = null;
@@ -323,18 +186,12 @@ export async function loadChatHistory(state: ChatState) {
       ? res.queuedMessages.map((item) => normalizeQueueItem(item))
       : [];
     const messages = Array.isArray(res.messages) ? res.messages : [];
-    state.chatMessages = filterQueuedTranscriptMessages(
-      orderChatMessages(messages.filter((message) => !isAssistantSilentReply(message))),
-      queueSnapshot,
-    );
+    state.chatMessages = orderChatMessages(messages);
     const toolInvocations = Array.isArray(res.toolInvocations) ? res.toolInvocations : [];
     const hydratedToolMessages = toolInvocations
       .map((row) => row?.message)
       .filter((message): message is unknown => message !== undefined);
-    state.chatToolMessages = mergeHydratedToolMessages(
-      hydratedToolMessages,
-      Array.isArray(state.chatToolMessages) ? state.chatToolMessages : [],
-    );
+    state.chatToolMessages = hydratedToolMessages;
     state.chatQueue = queueSnapshot;
     state.chatThinkingLevel = res.thinkingLevel ?? null;
     const activeRun = res.activeRun;
@@ -343,43 +200,44 @@ export async function loadChatHistory(state: ChatState) {
     if (activeRunId) {
       const streamText = typeof activeRun?.streamText === "string" ? activeRun.streamText : "";
       const activeRunPhase = normalizeChatPhase(activeRun?.phase) ?? "processing";
-      const effectiveUserMessage =
-        typeof activeRun?.effectiveUserMessage === "string"
-          ? activeRun.effectiveUserMessage.trim()
-          : "";
+      const activeRunTimestamp =
+        typeof activeRun?.startedAtMs === "number" ? activeRun.startedAtMs : Date.now();
       state.chatRunId = activeRunId;
       state.chatRunPhase = activeRunPhase;
-      if (effectiveUserMessage) {
-        upsertChatMessage(
-          state,
-          buildSystemTextMessage(
-            effectiveUserMessage,
-            typeof activeRun?.startedAtMs === "number" ? activeRun.startedAtMs : Date.now(),
-            `${activeRunId}:effective-user-message`,
-          ),
-        );
-      }
+      state.chatLiveActivities = [
+        {
+          activityId: `history:${activeRunId}`,
+          runId: activeRunId,
+          kind: "assistant_message",
+          actor: { role: "assistant", actorKey: "assistant:main", label: "Assistant" },
+          startedAt: activeRunTimestamp,
+          updatedAt: Date.now(),
+          text: streamText.trim() ? streamText : undefined,
+          statusLabel:
+            activeRunPhase === "thinking"
+              ? "Thinking"
+              : activeRunPhase === "tool_running"
+                ? "Using tool"
+                : activeRunPhase === "typing"
+                  ? "Typing"
+                  : null,
+          completed: false,
+        },
+      ];
       if (activeRunPhase === "typing" && streamText.trim()) {
         state.chatStream = streamText;
-        state.chatStreamStartedAt =
-          typeof activeRun?.startedAtMs === "number" ? activeRun.startedAtMs : Date.now();
+        state.chatStreamStartedAt = activeRunTimestamp;
       } else {
         state.chatStream = null;
-        state.chatStreamStartedAt = null;
-        if (streamText.trim() && !isSilentReplyStream(streamText)) {
-          state.chatMessages = [
-            ...state.chatMessages,
-            buildAssistantTextMessage(
-              streamText,
-              typeof activeRun?.startedAtMs === "number" ? activeRun.startedAtMs : Date.now(),
-              activeRunId,
-            ),
-          ];
-        }
+        // Non-typing phases still need a fresh activity anchor so the live
+        // status bubble sorts with the latest active work, not the original
+        // run-start event.
+        state.chatStreamStartedAt = activeRunTimestamp;
       }
       state.chatStreamCommittedPrefixLength = 0;
       state.chatSending = false;
     } else {
+      state.chatLiveActivities = [];
       state.chatRunId = null;
       state.chatRunPhase = state.chatSending ? "processing" : null;
       state.chatStream = null;
@@ -613,43 +471,6 @@ function buildSystemTextMessage(
   };
 }
 
-function trimCommittedAssistantMessage(
-  message: unknown,
-  committedPrefixLength: number,
-  fallbackRunId?: string | null,
-): Record<string, unknown> | null {
-  const normalized = normalizeFinalAssistantMessage(message);
-  if (!normalized) {
-    return null;
-  }
-  if (committedPrefixLength <= 0) {
-    return normalized;
-  }
-  const fullText = extractText(normalized);
-  if (typeof fullText !== "string") {
-    return normalized;
-  }
-  const remainingText = fullText.slice(Math.max(0, committedPrefixLength));
-  if (!remainingText.trim()) {
-    return null;
-  }
-  const timestamp = typeof normalized.timestamp === "number" ? normalized.timestamp : Date.now();
-  const runId =
-    typeof normalized.runId === "string"
-      ? normalized.runId
-      : typeof normalized.run_id === "string"
-        ? normalized.run_id
-        : fallbackRunId;
-  const extras: Record<string, unknown> = {};
-  if (typeof normalized.idempotencyKey === "string" && normalized.idempotencyKey.trim()) {
-    extras.idempotencyKey = normalized.idempotencyKey.trim();
-  }
-  if (normalized.openclawAbort && typeof normalized.openclawAbort === "object") {
-    extras.openclawAbort = normalized.openclawAbort;
-  }
-  return buildAssistantTextMessage(remainingText, timestamp, runId, extras);
-}
-
 function trimIdempotencyKey(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -673,48 +494,9 @@ function orderChatMessages(messages: unknown[]): unknown[] {
     .map((entry) => entry.message);
 }
 
-function isNearDuplicateAssistantMessage(left: unknown, right: unknown): boolean {
-  if (!left || typeof left !== "object" || !right || typeof right !== "object") {
-    return false;
-  }
-  const leftRole =
-    typeof (left as Record<string, unknown>).role === "string"
-      ? String((left as Record<string, unknown>).role).toLowerCase()
-      : "";
-  const rightRole =
-    typeof (right as Record<string, unknown>).role === "string"
-      ? String((right as Record<string, unknown>).role).toLowerCase()
-      : "";
-  if (leftRole !== "assistant" || rightRole !== "assistant") {
-    return false;
-  }
-  const leftText = extractText(left)?.trim();
-  const rightText = extractText(right)?.trim();
-  if (!leftText || !rightText || leftText !== rightText) {
-    return false;
-  }
-  const leftTs =
-    typeof (left as Record<string, unknown>).timestamp === "number"
-      ? ((left as Record<string, unknown>).timestamp as number)
-      : null;
-  const rightTs =
-    typeof (right as Record<string, unknown>).timestamp === "number"
-      ? ((right as Record<string, unknown>).timestamp as number)
-      : null;
-  if (leftTs === null || rightTs === null) {
-    return false;
-  }
-  return Math.abs(leftTs - rightTs) <= ASSISTANT_DUPLICATE_WINDOW_MS;
-}
-
 function upsertChatMessage(state: ChatState, message: unknown) {
   const nextId = trimIdempotencyKey((message as { idempotencyKey?: unknown })?.idempotencyKey);
   if (!nextId) {
-    const last = state.chatMessages.at(-1);
-    if (last && isNearDuplicateAssistantMessage(last, message)) {
-      state.chatMessages = orderChatMessages([...state.chatMessages.slice(0, -1), message]);
-      return;
-    }
     state.chatMessages = orderChatMessages([...state.chatMessages, message]);
     return;
   }
@@ -919,17 +701,19 @@ export async function sendChatMessage(
       state.chatStreamStartedAt = null;
       state.chatStreamCommittedPrefixLength = 0;
     } else if (typeof response?.runId === "string" && response.runId.trim()) {
-      state.chatRunId = response.runId.trim();
-      if (
-        typeof response?.effectiveUserMessage === "string" &&
-        response.effectiveUserMessage.trim()
-      ) {
+      const responseRunId = response.runId.trim();
+      state.chatRunId = responseRunId;
+      const effectiveUserMessage =
+        typeof response.effectiveUserMessage === "string"
+          ? response.effectiveUserMessage.trim()
+          : "";
+      if (effectiveUserMessage) {
         upsertChatMessage(
           state,
           buildSystemTextMessage(
-            response.effectiveUserMessage.trim(),
+            effectiveUserMessage,
             now,
-            `${response.runId.trim()}:effective-user-message`,
+            `${responseRunId}:effective-user-message`,
           ),
         );
       }
@@ -1065,6 +849,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
       commitVisibleStreamToTranscript(state);
     }
     state.chatRunPhase = nextPhase;
+    state.chatStreamStartedAt = Date.now();
     return "phase";
   }
 
@@ -1073,7 +858,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   if (payload.runId && state.chatRunId && payload.runId !== state.chatRunId) {
     if (payload.state === "final") {
       const finalMessage = normalizeFinalAssistantMessage(payload.message);
-      if (finalMessage && !isAssistantSilentReply(finalMessage)) {
+      if (finalMessage) {
         upsertChatMessage(state, finalMessage);
         return null;
       }
@@ -1085,9 +870,9 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   if (payload.state === "delta") {
     state.chatRunPhase = normalizeChatPhase(payload.phase) ?? "typing";
     const next = extractRawText(payload.message);
-    if (typeof next === "string" && !isSilentReplyStream(next)) {
+    if (typeof next === "string") {
       const current = state.chatStream ?? "";
-      const merged = appendUniqueSuffix(current, next);
+      const merged = current + next;
       if (merged !== current) {
         if (!current && next.length > 0) {
           state.chatStreamStartedAt = Date.now();
@@ -1098,12 +883,9 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   } else if (payload.state === "final") {
     state.chatSending = false;
     state.chatRunPhase = null;
-    const finalMessage = trimCommittedAssistantMessage(
-      payload.message,
-      Math.max(0, state.chatStreamCommittedPrefixLength ?? 0),
-      payload.runId,
-    );
-    if (finalMessage && !isAssistantSilentReply(finalMessage)) {
+    state.chatLiveActivities = [];
+    const finalMessage = normalizeFinalAssistantMessage(payload.message);
+    if (finalMessage) {
       upsertChatMessage(state, finalMessage);
       traceUiWs({
         ts: Date.now(),
@@ -1117,7 +899,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
           messageCountAfter: state.chatMessages.length,
         },
       });
-    } else if (state.chatStream?.trim() && !isSilentReplyStream(state.chatStream)) {
+    } else if (state.chatStream?.trim()) {
       state.chatMessages = [
         ...state.chatMessages,
         {
@@ -1132,12 +914,9 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   } else if (payload.state === "aborted") {
     state.chatSending = false;
     state.chatRunPhase = null;
-    const normalizedMessage = trimCommittedAssistantMessage(
-      normalizeAbortedAssistantMessage(payload.message),
-      Math.max(0, state.chatStreamCommittedPrefixLength ?? 0),
-      payload.runId,
-    );
-    if (normalizedMessage && !isAssistantSilentReply(normalizedMessage)) {
+    state.chatLiveActivities = [];
+    const normalizedMessage = normalizeAbortedAssistantMessage(payload.message);
+    if (normalizedMessage) {
       upsertChatMessage(state, normalizedMessage);
       traceUiWs({
         ts: Date.now(),
@@ -1153,7 +932,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
       });
     } else {
       const streamedText = state.chatStream ?? "";
-      if (streamedText.trim() && !isSilentReplyStream(streamedText)) {
+      if (streamedText.trim()) {
         state.chatMessages = [
           ...state.chatMessages,
           {
@@ -1169,6 +948,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   } else if (payload.state === "error") {
     state.chatSending = false;
     state.chatRunPhase = null;
+    state.chatLiveActivities = [];
     state.chatStream = null;
     state.chatRunId = null;
     state.chatStreamStartedAt = null;

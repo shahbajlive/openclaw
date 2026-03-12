@@ -71,7 +71,10 @@ import {
 } from "../config/sessions.js";
 import {
   clearAgentRunContext,
-  emitAgentEvent,
+  createActivityRef,
+  emitActivityOutput,
+  emitRunCompleted,
+  emitRunStarted,
   registerAgentRunContext,
 } from "../infra/agent-events.js";
 import { buildOutboundSessionContext } from "../infra/outbound/session-context.js";
@@ -564,14 +567,7 @@ async function agentCommandInternal(
         sessionKey,
         inputProvenance: opts.inputProvenance,
       });
-      emitAgentEvent({
-        runId,
-        stream: "lifecycle",
-        data: {
-          phase: "start",
-          startedAt,
-        },
-      });
+      emitRunStarted({ runId, sessionKey, startedAt });
 
       const visibleTextAccumulator = createAcpVisibleTextAccumulator();
       let stopReason: string | undefined;
@@ -613,10 +609,15 @@ async function agentCommandInternal(
             if (!visibleUpdate) {
               return;
             }
-            emitAgentEvent({
+            emitActivityOutput({
               runId,
-              stream: "assistant",
-              data: {
+              sessionKey,
+              activity: createActivityRef({
+                activityId: `${runId}:assistant`,
+                kind: "assistant_message",
+                origin: { type: "self" },
+              }),
+              output: {
                 text: visibleUpdate.text,
                 delta: visibleUpdate.delta,
               },
@@ -629,25 +630,21 @@ async function agentCommandInternal(
           fallbackCode: "ACP_TURN_FAILED",
           fallbackMessage: "ACP turn failed before completion.",
         });
-        emitAgentEvent({
+        emitRunCompleted({
           runId,
-          stream: "lifecycle",
-          data: {
-            phase: "error",
-            error: acpError.message,
-            endedAt: Date.now(),
-          },
+          sessionKey,
+          outcome: "failed",
+          error: acpError.message,
+          endedAt: Date.now(),
         });
         throw acpError;
       }
 
-      emitAgentEvent({
+      emitRunCompleted({
         runId,
-        stream: "lifecycle",
-        data: {
-          phase: "end",
-          endedAt: Date.now(),
-        },
+        sessionKey,
+        outcome: "completed",
+        endedAt: Date.now(),
       });
 
       const normalizedFinalPayload = normalizeReplyPayload({
@@ -971,29 +968,23 @@ async function agentCommandInternal(
         if (stopReason && stopReason !== "end_turn") {
           console.error(`[agent] run ${runId} ended with stopReason=${stopReason}`);
         }
-        emitAgentEvent({
+        emitRunCompleted({
           runId,
-          stream: "lifecycle",
-          data: {
-            phase: "end",
-            startedAt,
-            endedAt: Date.now(),
-            aborted: result.meta.aborted ?? false,
-            stopReason,
-          },
+          outcome: result.meta.aborted ? "aborted" : "completed",
+          startedAt,
+          endedAt: Date.now(),
+          stopReason,
+          result: { aborted: result.meta.aborted ?? false },
         });
       }
     } catch (err) {
       if (!lifecycleEnded) {
-        emitAgentEvent({
+        emitRunCompleted({
           runId,
-          stream: "lifecycle",
-          data: {
-            phase: "error",
-            startedAt,
-            endedAt: Date.now(),
-            error: String(err),
-          },
+          outcome: "failed",
+          startedAt,
+          endedAt: Date.now(),
+          error: String(err),
         });
       }
       throw err;

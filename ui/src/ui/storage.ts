@@ -26,6 +26,10 @@ export type UiSettings = {
 
 export function loadSettings(): UiSettings {
   const defaultUrl = (() => {
+    const envUrl = import.meta.env.VITE_OPENCLAW_GATEWAY_URL?.trim();
+    if (envUrl) {
+      return envUrl;
+    }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const configured =
       typeof window !== "undefined" &&
@@ -39,7 +43,7 @@ export function loadSettings(): UiSettings {
 
   const defaults: UiSettings = {
     gatewayUrl: defaultUrl,
-    token: "",
+    token: import.meta.env.VITE_OPENCLAW_GATEWAY_TOKEN?.trim() ?? "",
     sessionKey: "main",
     lastActiveSessionKey: "main",
     workspaceSelectedAgentId: "main",

@@ -1,4 +1,9 @@
-import { emitAgentEvent } from "../infra/agent-events.js";
+import {
+  createActivityRef,
+  emitActivityCompleted,
+  emitRunCompleted,
+  emitRunStarted,
+} from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
 import { formatAssistantErrorText } from "./pi-embedded-helpers.js";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
@@ -11,13 +16,10 @@ export {
 
 export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
   ctx.log.debug(`embedded run agent start: runId=${ctx.params.runId}`);
-  emitAgentEvent({
+  emitRunStarted({
     runId: ctx.params.runId,
-    stream: "lifecycle",
-    data: {
-      phase: "start",
-      startedAt: Date.now(),
-    },
+    sessionKey: ctx.params.sessionKey,
+    startedAt: Date.now(),
   });
   void ctx.params.onAgentEvent?.({
     stream: "lifecycle",
@@ -28,26 +30,42 @@ export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
 export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
   const lastAssistant = ctx.state.lastAssistant;
   const isError = isAssistantMessage(lastAssistant) && lastAssistant.stopReason === "error";
+  const errorText =
+    isError && lastAssistant
+      ? (
+          formatAssistantErrorText(lastAssistant, {
+            cfg: ctx.params.config,
+            sessionKey: ctx.params.sessionKey,
+            provider: lastAssistant.provider,
+            model: lastAssistant.model,
+          }) ||
+          lastAssistant.errorMessage ||
+          "LLM request failed."
+        ).trim()
+      : undefined;
+
+  emitActivityCompleted({
+    runId: ctx.params.runId,
+    sessionKey: ctx.params.sessionKey,
+    activity: createActivityRef({
+      activityId: `${ctx.params.runId}:assistant`,
+      kind: "assistant_message",
+      origin: { type: "self" },
+    }),
+    outcome: isError ? "failed" : "completed",
+    ...(errorText ? { error: errorText } : {}),
+  });
 
   if (isError && lastAssistant) {
-    const friendlyError = formatAssistantErrorText(lastAssistant, {
-      cfg: ctx.params.config,
-      sessionKey: ctx.params.sessionKey,
-      provider: lastAssistant.provider,
-      model: lastAssistant.model,
-    });
-    const errorText = (friendlyError || lastAssistant.errorMessage || "LLM request failed.").trim();
     ctx.log.warn(
       `embedded run agent end: runId=${ctx.params.runId} isError=true error=${errorText}`,
     );
-    emitAgentEvent({
+    emitRunCompleted({
       runId: ctx.params.runId,
-      stream: "lifecycle",
-      data: {
-        phase: "error",
-        error: errorText,
-        endedAt: Date.now(),
-      },
+      sessionKey: ctx.params.sessionKey,
+      outcome: "failed",
+      endedAt: Date.now(),
+      error: errorText,
     });
     void ctx.params.onAgentEvent?.({
       stream: "lifecycle",
@@ -58,13 +76,11 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
     });
   } else {
     ctx.log.debug(`embedded run agent end: runId=${ctx.params.runId} isError=${isError}`);
-    emitAgentEvent({
+    emitRunCompleted({
       runId: ctx.params.runId,
-      stream: "lifecycle",
-      data: {
-        phase: "end",
-        endedAt: Date.now(),
-      },
+      sessionKey: ctx.params.sessionKey,
+      outcome: "completed",
+      endedAt: Date.now(),
     });
     void ctx.params.onAgentEvent?.({
       stream: "lifecycle",

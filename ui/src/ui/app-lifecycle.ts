@@ -41,6 +41,7 @@ type LifecycleHost = {
   chatLoading: boolean;
   chatMessages: unknown[];
   chatToolMessages: unknown[];
+  chatLiveActivities?: unknown[];
   sessionKey: string;
   chatStream: string | null;
   chatRunId: string | null;
@@ -127,6 +128,7 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
     host.tab === "chat" &&
     (changed.has("chatMessages") ||
       changed.has("chatToolMessages") ||
+      changed.has("chatLiveActivities") ||
       changed.has("chatStream") ||
       changed.has("chatLoading") ||
       changed.has("tab"))
@@ -143,6 +145,7 @@ export function handleUpdated(host: LifecycleHost, changed: Map<PropertyKey, unk
     host.tab === "workspace-messages" &&
     (changed.has("chatMessages") ||
       changed.has("chatToolMessages") ||
+      changed.has("chatLiveActivities") ||
       changed.has("chatStream") ||
       changed.has("tab"))
   ) {

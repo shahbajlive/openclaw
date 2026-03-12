@@ -5,7 +5,7 @@ import { toSanitizedMarkdownHtml } from "../markdown.ts";
 import { openExternalUrlSafe } from "../open-external-url.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { WorkspaceAgentRow } from "../types.ts";
-import type { MessageGroup, MessageGroupChild } from "../types/chat-types.ts";
+import type { ChatLiveActor, MessageGroup, MessageGroupChild } from "../types/chat-types.ts";
 import { renderCopyAsMarkdownButton } from "./copy-as-markdown.ts";
 import {
   extractTextCached,
@@ -114,15 +114,18 @@ export function renderReadingIndicatorGroup(
 }
 
 export function renderProcessingIndicatorGroup(
-  assistant?: AssistantIdentity,
-  phase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null,
+  assistant?: AssistantIdentity | ChatLiveActor,
+  phase?: "processing" | "thinking" | "typing" | "tool_running" | null,
+  statusLabel?: string | null,
   opts?: { compact?: boolean },
 ) {
   const startedAt = Date.now();
   const absoluteTimestamp = formatAbsoluteTimestamp(startedAt);
+  const role = assistant?.role ?? "assistant";
+  const name = assistant?.name ?? assistant?.label ?? "Assistant";
   return html`
-    <div class="chat-group assistant ${opts?.compact ? "chat-group--continuation" : ""}">
-      ${opts?.compact ? nothing : renderAvatar("assistant", assistant)}
+    <div class="chat-group ${role === "peer" ? "assistant is-peer" : "assistant"} ${opts?.compact ? "chat-group--continuation" : ""}">
+      ${opts?.compact ? nothing : renderAvatar(role, assistant)}
       <div class="chat-group-messages">
         <div class="chat-bubble chat-reading-indicator" aria-hidden="true">
           <span class="chat-reading-indicator__dots">
@@ -130,11 +133,13 @@ export function renderProcessingIndicatorGroup(
           </span>
         </div>
         ${
-          phase === "thinking"
+          statusLabel || phase === "thinking"
             ? html`
                 <div class="chat-group-footer">
-                  <span class="chat-sender-name">${assistant?.name ?? "Assistant"}</span>
-                  <span class="chat-group-status" title=${absoluteTimestamp}>Thinking...</span>
+                  <span class="chat-sender-name">${name}</span>
+                  <span class="chat-group-status" title=${absoluteTimestamp}
+                    >${statusLabel ?? "Thinking"}</span
+                  >
                 </div>
               `
             : nothing
@@ -148,26 +153,28 @@ export function renderStreamingGroup(
   text: string,
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
-  assistant?: AssistantIdentity,
+  assistant?: AssistantIdentity | ChatLiveActor,
   assistantLabelTooltip?: string | null,
-  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null,
+  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | null,
   typingActive?: boolean,
   assistantAccent?: string | null,
   agentDirectory?: WorkspaceAgentRow[],
+  statusLabel?: string | null,
   opts?: { compact?: boolean },
 ) {
-  const name = assistant?.name ?? "Assistant";
+  const name = assistant?.name ?? assistant?.label ?? "Assistant";
+  const role = assistant?.role ?? "assistant";
   const absoluteTimestamp = formatAbsoluteTimestamp(startedAt);
 
   return html`
-    <div class="chat-group assistant ${opts?.compact ? "chat-group--continuation" : ""}">
+    <div class="chat-group ${role === "peer" ? "assistant is-peer" : "assistant"} ${opts?.compact ? "chat-group--continuation" : ""}">
       ${
         opts?.compact
           ? nothing
-          : renderAvatar("assistant", {
+          : renderAvatar(role, {
               name,
               avatar: assistant?.avatar ?? null,
-              accent: assistantAccent ?? null,
+              accent: assistant?.accent ?? assistantAccent ?? null,
             })
       }
       <div class="chat-group-messages">
@@ -184,11 +191,13 @@ export function renderStreamingGroup(
         <div class="chat-group-footer">
           <span class="chat-sender-name" title=${assistantLabelTooltip || nothing}>${name}</span>
           ${
-            runPhase === "thinking"
-              ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Thinking...</span>`
-              : typingActive
-                ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Typing...</span>`
-                : nothing
+            statusLabel
+              ? html`<span class="chat-group-status" title=${absoluteTimestamp}>${statusLabel}</span>`
+              : runPhase === "thinking"
+                ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Thinking...</span>`
+                : typingActive
+                  ? html`<span class="chat-group-status" title=${absoluteTimestamp}>Typing...</span>`
+                  : nothing
           }
         </div>
       </div>
@@ -223,11 +232,13 @@ export function renderMessageGroup(
           ? "System"
           : identityRole);
   const roleClass =
-    identityRole === "user" || identityRole === "system"
+    identityRole === "user"
       ? "user"
-      : identityRole === "assistant"
-        ? "assistant"
-        : "other";
+      : identityRole === "system"
+        ? "system"
+        : identityRole === "assistant"
+          ? "assistant"
+          : "other";
   const timestamp = formatRelativeTimestamp(group.timestamp);
   const absoluteTimestamp = formatAbsoluteTimestamp(group.timestamp);
   const isPeer = normalizedRole === "peer";
@@ -329,12 +340,14 @@ function renderGroupChild(
 
 function renderAvatar(
   role: string,
-  assistant?: Pick<AssistantIdentity, "name" | "avatar"> & { accent?: string | null },
+  assistant?:
+    | (Pick<AssistantIdentity, "name" | "avatar"> & { accent?: string | null })
+    | ChatLiveActor,
 ) {
   const normalized = normalizeRoleForGrouping(role);
-  const assistantName = assistant?.name?.trim() || "Assistant";
-  const assistantAvatar = assistant?.avatar?.trim() || "";
-  const assistantAccent = assistant?.accent?.trim() || "";
+  const assistantName = (assistant?.name ?? assistant?.label)?.trim() || "Assistant";
+  const assistantAvatar = (assistant?.avatar ?? "")?.trim() || "";
+  const assistantAccent = (assistant?.accent ?? "")?.trim() || "";
   const initial =
     normalized === "user"
       ? "U"
@@ -346,18 +359,20 @@ function renderAvatar(
             ? "⚙"
             : "?";
   const className =
-    normalized === "user" || normalized === "system"
+    normalized === "user"
       ? "user"
-      : normalized === "assistant"
-        ? "assistant"
-        : normalized === "peer"
+      : normalized === "system"
+        ? "system"
+        : normalized === "assistant"
           ? "assistant"
-          : normalized === "tool"
-            ? "tool"
-            : "other";
+          : normalized === "peer"
+            ? "assistant"
+            : normalized === "tool"
+              ? "tool"
+              : "other";
   const style = assistantAccent ? `--chat-peer-accent: ${assistantAccent};` : nothing;
 
-  if (assistantAvatar && normalized === "assistant") {
+  if (assistantAvatar && (normalized === "assistant" || normalized === "peer")) {
     if (isAvatarUrl(assistantAvatar)) {
       return html`<img
         class="chat-avatar ${className}"

@@ -49,13 +49,12 @@ import type {
 import { traceUiWs } from "./ws-trace.ts";
 function normalizeChatPhase(
   phase: unknown,
-): "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null {
+): "processing" | "thinking" | "typing" | "tool_running" | null {
   switch (phase) {
     case "processing":
     case "thinking":
     case "typing":
     case "tool_running":
-    case "finalizing":
       return phase;
     default:
       return null;
@@ -92,7 +91,7 @@ type GatewayHost = {
   chatLiveToolEventsEnabled: boolean;
   sessionKey: string;
   chatRunId: string | null;
-  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | null;
   chatStreamCommittedPrefixLength?: number;
   chatResetInFlight: boolean;
   chatLastTerminalRunId?: string | null;

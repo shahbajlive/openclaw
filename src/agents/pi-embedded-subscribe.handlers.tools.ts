@@ -1,5 +1,10 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
-import { emitAgentEvent } from "../infra/agent-events.js";
+import {
+  createActivityRef,
+  emitActivityCompleted,
+  emitActivityStarted,
+  emitActivityUpdated,
+} from "../infra/agent-events.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import type { PluginHookAfterToolCallEvent } from "../plugins/types.js";
 import { normalizeTextForComparison } from "./pi-embedded-helpers.js";
@@ -49,6 +54,27 @@ function buildToolCallSummary(toolName: string, args: unknown, meta?: string): T
     mutatingAction: mutation.mutatingAction,
     actionFingerprint: mutation.actionFingerprint,
   };
+}
+
+function toolActivity(runId: string, toolCallId: string, toolName: string) {
+  const normalized = toolName.trim().toLowerCase();
+  const kind =
+    normalized === "sessions_spawn" || normalized === "subagents"
+      ? "subagent_call"
+      : normalized === "sessions_send"
+        ? "peer_agent_call"
+        : "tool_call";
+  return createActivityRef({
+    activityId: toolCallId,
+    kind,
+    parentActivityId: `${runId}:assistant`,
+    origin:
+      kind === "peer_agent_call"
+        ? { type: "peer_agent" }
+        : kind === "subagent_call"
+          ? { type: "subagent" }
+          : { type: "self" },
+  });
 }
 
 function extendExecMeta(toolName: string, args: unknown, meta?: string): string | undefined {
@@ -220,13 +246,12 @@ export async function handleToolExecutionStart(
   );
 
   const shouldEmitToolEvents = ctx.shouldEmitToolResult();
-  emitAgentEvent({
+  emitActivityStarted({
     runId: ctx.params.runId,
-    stream: "tool",
-    data: {
-      phase: "start",
+    sessionKey: ctx.params.sessionKey,
+    activity: toolActivity(ctx.params.runId, toolCallId, toolName),
+    input: {
       name: toolName,
-      toolCallId,
       args: args as Record<string, unknown>,
     },
   });
@@ -281,13 +306,12 @@ export function handleToolExecutionUpdate(
   const toolCallId = String(evt.toolCallId);
   const partial = evt.partialResult;
   const sanitized = sanitizeToolResult(partial);
-  emitAgentEvent({
+  emitActivityUpdated({
     runId: ctx.params.runId,
-    stream: "tool",
-    data: {
-      phase: "update",
+    sessionKey: ctx.params.sessionKey,
+    activity: toolActivity(ctx.params.runId, toolCallId, toolName),
+    patch: {
       name: toolName,
-      toolCallId,
       partialResult: sanitized,
     },
   });
@@ -400,13 +424,14 @@ export async function handleToolExecutionEnd(
     ctx.state.successfulCronAdds += 1;
   }
 
-  emitAgentEvent({
+  emitActivityCompleted({
     runId: ctx.params.runId,
-    stream: "tool",
-    data: {
-      phase: "result",
+    sessionKey: ctx.params.sessionKey,
+    activity: toolActivity(ctx.params.runId, toolCallId, toolName),
+    outcome: isToolError ? "failed" : "completed",
+    ...(isToolError ? { error: extractToolErrorMessage(sanitizedResult) } : {}),
+    result: {
       name: toolName,
-      toolCallId,
       meta,
       isError: isToolError,
       result: sanitizedResult,

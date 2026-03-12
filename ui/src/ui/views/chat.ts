@@ -20,7 +20,12 @@ import { icons } from "../icons.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { SessionsListResult } from "../types.ts";
 import type { WorkspaceAgentRow } from "../types.ts";
-import type { ChatItem, MessageGroup, MessageGroupChild } from "../types/chat-types.ts";
+import type {
+  ChatItem,
+  ChatLiveActivity,
+  MessageGroup,
+  MessageGroupChild,
+} from "../types/chat-types.ts";
 import type { ChatAttachment, ChatQueueItem } from "../ui-types.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
 import "../components/resizable-divider.ts";
@@ -56,9 +61,10 @@ export type ChatProps = {
   fallbackStatus?: FallbackIndicatorStatus | null;
   messages: unknown[];
   toolMessages: unknown[];
+  liveActivities?: ChatLiveActivity[];
   stream: string | null;
   streamStartedAt: number | null;
-  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | "finalizing" | null;
+  runPhase?: "processing" | "thinking" | "typing" | "tool_running" | null;
   typingActive?: boolean;
   assistantAvatarUrl?: string | null;
   draft: string;
@@ -461,7 +467,11 @@ export function renderChat(props: ChatProps) {
         }
 
         if (item.kind === "processing-indicator") {
-          return renderProcessingIndicatorGroup(assistantIdentity, item.phase ?? null);
+          return renderProcessingIndicatorGroup(
+            item.actor ?? assistantIdentity,
+            item.phase ?? null,
+            item.statusLabel ?? null,
+          );
         }
 
         if (item.kind === "stream") {
@@ -469,12 +479,13 @@ export function renderChat(props: ChatProps) {
             item.text,
             item.startedAt,
             props.onOpenSidebar,
-            assistantIdentity,
+            item.actor ?? assistantIdentity,
             props.assistantLabelTooltip ?? null,
             props.runPhase ?? null,
-            Boolean(props.typingActive),
+            item.actor ? item.statusLabel === "Typing" : Boolean(props.typingActive),
             props.assistantAccent,
             props.agentDirectory,
+            item.statusLabel ?? null,
           );
         }
 
@@ -1166,13 +1177,22 @@ function toGroupChild(item: ChatItem): MessageGroupChild | null {
     return { kind: "message", message: item.message, key: item.key };
   }
   if (item.kind === "stream") {
-    return { kind: "stream", text: item.text, startedAt: item.startedAt };
+    return {
+      kind: "stream",
+      text: item.text,
+      startedAt: item.startedAt,
+      statusLabel: item.statusLabel ?? null,
+    };
   }
   if (item.kind === "reading-indicator") {
     return { kind: "reading-indicator" };
   }
   if (item.kind === "processing-indicator") {
-    return { kind: "processing-indicator", phase: item.phase ?? null };
+    return {
+      kind: "processing-indicator",
+      phase: item.phase ?? null,
+      statusLabel: item.statusLabel ?? null,
+    };
   }
   return null;
 }
@@ -1184,7 +1204,7 @@ function groupMessages(
   const result: Array<ChatItem | MessageGroup> = [];
   let currentGroup: MessageGroup | null = null;
   let currentThreadKey: string | null = null;
-  const assistantGroupByRunId = new Map<string, MessageGroup>();
+  const liveGroupByActorKey = new Map<string, MessageGroup>();
 
   const resolveThreadKey = (message: unknown) => {
     const normalized = normalizeMessage(message);
@@ -1209,43 +1229,60 @@ function groupMessages(
   };
 
   for (const item of items) {
+    const liveActorKey =
+      item.kind === "stream" || item.kind === "processing-indicator"
+        ? (item.actor?.actorKey ?? "")
+        : "";
     const isAssistantRunFragment =
       item.kind !== "divider" &&
-      typeof item.runId === "string" &&
-      item.runId.length > 0 &&
+      ((typeof item.runId === "string" && item.runId.length > 0) || Boolean(liveActorKey)) &&
       (item.kind === "stream" ||
         item.kind === "reading-indicator" ||
         item.kind === "processing-indicator" ||
         (item.kind === "message" && isAssistantOwnedMessage(item.message)));
     if (isAssistantRunFragment) {
-      const runId = item.runId as string;
+      const runId = (item.runId as string) || "";
       const child = toGroupChild(item);
       if (child) {
-        const existing = assistantGroupByRunId.get(runId);
+        const actorKey =
+          liveActorKey ||
+          (item.kind === "message"
+            ? (normalizeMessage(item.message).speakerKey ?? `assistant:${runId || item.key}`)
+            : `assistant:${runId || item.key}`);
+        const existing = liveGroupByActorKey.get(actorKey);
         if (existing) {
           existing.children.push(child);
           continue;
         }
         const seedMessage =
-          item.kind === "message" ? item.message : { role: "assistant", timestamp: Date.now() };
+          item.kind === "message"
+            ? item.message
+            : {
+                role: item.actor?.role ?? "assistant",
+                timestamp: Date.now(),
+                speakerKey: item.actor?.actorKey,
+                speakerLabel: item.actor?.label,
+                speakerAvatar: item.actor?.avatar ?? undefined,
+                speakerAccent: item.actor?.accent ?? undefined,
+              };
         const normalized = normalizeMessage(seedMessage);
         const peerMeta = resolvePeerSpeakerMeta(normalized, agentDirectory);
         const timestamp =
           item.kind === "message"
             ? normalized.timestamp || Date.now()
-            : item.kind === "stream"
+            : "startedAt" in item
               ? item.startedAt
-              : item.startedAt;
+              : Date.now();
         const created: MessageGroup = {
           kind: "group",
-          key: `group:assistant:run:${runId}`,
-          role: "assistant",
-          runId,
-          speakerKey: normalized.speakerKey ?? "assistant",
-          speakerLabel: peerMeta.speakerLabel ?? normalized.speakerLabel,
+          key: `group:live:${actorKey}:${runId || "no-run"}`,
+          role: item.actor?.role ?? "assistant",
+          runId: runId || undefined,
+          speakerKey: item.actor?.actorKey ?? normalized.speakerKey ?? "assistant",
+          speakerLabel: item.actor?.label ?? peerMeta.speakerLabel ?? normalized.speakerLabel,
           speakerInitial: normalized.speakerInitial,
-          speakerAvatar: peerMeta.speakerAvatar ?? normalized.speakerAvatar,
-          speakerAccent: peerMeta.speakerAccent ?? normalized.speakerAccent,
+          speakerAvatar: item.actor?.avatar ?? peerMeta.speakerAvatar ?? normalized.speakerAvatar,
+          speakerAccent: item.actor?.accent ?? peerMeta.speakerAccent ?? normalized.speakerAccent,
           children: [child],
           timestamp,
           isStreaming: false,
@@ -1256,7 +1293,7 @@ function groupMessages(
           currentThreadKey = null;
         }
         result.push(created);
-        assistantGroupByRunId.set(runId, created);
+        liveGroupByActorKey.set(actorKey, created);
         continue;
       }
     }
@@ -1300,7 +1337,7 @@ function groupMessages(
         isStreaming: false,
       };
       if (assistantRunId) {
-        assistantGroupByRunId.set(assistantRunId, currentGroup);
+        liveGroupByActorKey.set(`assistant:${assistantRunId}`, currentGroup);
       }
       currentThreadKey = thread.threadKey;
     } else {
@@ -1473,23 +1510,81 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     items.push(...toolItems);
   }
 
-  const hasActiveAssistantRun = Boolean(props.activeRun ?? props.canAbort) || props.stream !== null;
+  const liveActivities = Array.isArray(props.liveActivities) ? props.liveActivities : [];
+  for (const activity of liveActivities) {
+    const startedAt = activity.startedAt || activity.updatedAt || Date.now();
+    const actor = activity.actor;
+    if (activity.text?.trim()) {
+      items.push({
+        kind: "stream",
+        key: `live:${activity.activityId}`,
+        text: activity.text,
+        startedAt,
+        runId: activity.runId,
+        activityId: activity.activityId,
+        actor,
+        statusLabel: activity.statusLabel ?? null,
+      });
+      continue;
+    }
+    items.push({
+      kind: "processing-indicator",
+      key: `live:${activity.activityId}`,
+      startedAt,
+      runId: activity.runId,
+      activityId: activity.activityId,
+      actor,
+      phase:
+        activity.kind === "reasoning"
+          ? "thinking"
+          : activity.kind === "tool_call" || activity.kind === "subagent_call"
+            ? "tool_running"
+            : activity.kind === "assistant_message"
+              ? "typing"
+              : "processing",
+      statusLabel: activity.statusLabel ?? null,
+    });
+  }
+
+  const hasLiveActivityRows = liveActivities.length > 0;
+  const hasActiveAssistantRun =
+    !hasLiveActivityRows && (Boolean(props.activeRun ?? props.canAbort) || props.stream !== null);
   if (hasActiveAssistantRun) {
     const streamText = typeof props.stream === "string" ? props.stream : "";
+    const latestVisibleTimestamp = items.reduce<number | null>((latest, item) => {
+      const timestamp =
+        item.kind === "divider"
+          ? item.timestamp
+          : item.kind === "message"
+            ? normalizeMessage(item.message).timestamp
+            : item.kind === "stream" || item.kind === "processing-indicator"
+              ? item.startedAt
+              : null;
+      if (timestamp === null) {
+        return latest;
+      }
+      return latest === null ? timestamp : Math.max(latest, timestamp);
+    }, null);
+    // Keep active assistant UI anchored to the visible tail so thinking/tool/text
+    // fragments stay below the latest tool or transcript row for the run.
+    const activeStartedAt = Math.max(
+      props.streamStartedAt ?? Date.now(),
+      latestVisibleTimestamp ?? Number.NEGATIVE_INFINITY,
+    );
     const key = `stream:${props.sessionKey}:${props.streamStartedAt ?? "live"}`;
     if (streamText.trim().length > 0) {
       items.push({
         kind: "stream",
         key,
         text: streamText,
-        startedAt: props.streamStartedAt ?? Date.now(),
+        startedAt: activeStartedAt,
         runId: props.chatRunId ?? null,
       });
     } else {
       items.push({
         kind: "processing-indicator",
         key,
-        startedAt: props.streamStartedAt ?? Date.now(),
+        startedAt: activeStartedAt,
         runId: props.chatRunId ?? null,
         phase: props.runPhase ?? null,
       });

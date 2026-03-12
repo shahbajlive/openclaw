@@ -151,7 +151,7 @@ type SessionMessageEntryLike = {
   };
 };
 
-type SessionManagerRewriteLike = SessionManager & {
+type SessionManagerRewriteLike = {
   fileEntries: Array<{ type?: string; message?: { role?: string; content?: unknown } }>;
   _rewriteFile?: () => void;
 };
@@ -166,13 +166,28 @@ export function applyPersistedDisplayRole(params: {
     return false;
   }
 
-  const sessionManager = params.sessionManager as SessionManagerRewriteLike;
+  const sessionManager = params.sessionManager as unknown as SessionManagerRewriteLike;
+  const matchesPrompt = (content: unknown): boolean => {
+    if (content === params.prompt) {
+      return true;
+    }
+    if (!Array.isArray(content)) {
+      return false;
+    }
+    return (
+      content.length === 1 &&
+      typeof content[0] === "object" &&
+      content[0] !== null &&
+      (content[0] as { type?: unknown }).type === "text" &&
+      (content[0] as { text?: unknown }).text === params.prompt
+    );
+  };
   for (let i = sessionManager.fileEntries.length - 1; i >= 0; i -= 1) {
     const entry = sessionManager.fileEntries[i] as SessionMessageEntryLike | undefined;
     if (entry?.type !== "message" || entry.message?.role !== "user") {
       continue;
     }
-    if (entry.message.content !== params.prompt) {
+    if (!matchesPrompt(entry.message.content)) {
       continue;
     }
     entry.message.role = "system";
@@ -180,7 +195,7 @@ export function applyPersistedDisplayRole(params: {
       (item) => item.role === "user" && item.content === params.prompt,
     );
     if (message) {
-      message.role = "system";
+      (message as unknown as { role?: "system" }).role = "system";
     }
     sessionManager._rewriteFile?.();
     return true;
@@ -1816,19 +1831,21 @@ export async function runEmbeddedAttempt(
               });
           }
 
-          // Only pass images option if there are actually images to pass
-          // This avoids potential issues with models that don't expect the images parameter
-          if (imageResult.images.length > 0) {
-            await abortable(activeSession.prompt(effectivePrompt, { images: imageResult.images }));
-          } else {
-            await abortable(activeSession.prompt(effectivePrompt));
-          }
+          // Only pass images option if there are actually images to pass.
+          // `prompt()` appends the user message immediately, so rewrite the persisted display role
+          // before awaiting the rest of the run. Otherwise refresh during an active run can still
+          // hydrate the generated bootstrap prompt as `user`.
+          const promptPromise =
+            imageResult.images.length > 0
+              ? activeSession.prompt(effectivePrompt, { images: imageResult.images })
+              : activeSession.prompt(effectivePrompt);
           applyPersistedDisplayRole({
             sessionManager,
             agentMessages: activeSession.messages,
             prompt: effectivePrompt,
             role: params.persistedDisplayRole,
           });
+          await abortable(promptPromise);
         } catch (err) {
           promptError = err;
           promptErrorSource = "prompt";

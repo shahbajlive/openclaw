@@ -1,4 +1,4 @@
-import { onAgentEvent } from "../../infra/agent-events.js";
+import { onAgentEvent, type AgentRunCompletedEvent } from "../../infra/agent-events.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 
 const AGENT_RUN_CACHE_TTL_MS = 10 * 60_000;
@@ -85,19 +85,14 @@ function getPendingAgentRunError(runId: string) {
   };
 }
 
-function createSnapshotFromLifecycleEvent(params: {
-  runId: string;
-  phase: "end" | "error";
-  data?: Record<string, unknown>;
-}): AgentRunSnapshot {
-  const { runId, phase, data } = params;
+function createSnapshotFromRunCompletedEvent(evt: AgentRunCompletedEvent): AgentRunSnapshot {
   const startedAt =
-    typeof data?.startedAt === "number" ? data.startedAt : agentRunStarts.get(runId);
-  const endedAt = typeof data?.endedAt === "number" ? data.endedAt : undefined;
-  const error = typeof data?.error === "string" ? data.error : undefined;
+    typeof evt.startedAt === "number" ? evt.startedAt : agentRunStarts.get(evt.runId);
+  const endedAt = typeof evt.endedAt === "number" ? evt.endedAt : undefined;
+  const error = typeof evt.error === "string" ? evt.error : undefined;
   return {
-    runId,
-    status: phase === "error" ? "error" : data?.aborted ? "timeout" : "ok",
+    runId: evt.runId,
+    status: evt.outcome === "failed" ? "error" : evt.outcome === "aborted" ? "timeout" : "ok",
     startedAt,
     endedAt,
     error,
@@ -114,12 +109,8 @@ function ensureAgentRunListener() {
     if (!evt) {
       return;
     }
-    if (evt.stream !== "lifecycle") {
-      return;
-    }
-    const phase = evt.data?.phase;
-    if (phase === "start") {
-      const startedAt = typeof evt.data?.startedAt === "number" ? evt.data.startedAt : undefined;
+    if (evt.eventType === "run.started") {
+      const startedAt = typeof evt.startedAt === "number" ? evt.startedAt : undefined;
       agentRunStarts.set(evt.runId, startedAt ?? Date.now());
       clearPendingAgentRunError(evt.runId);
       // A new start means this run is active again (or retried). Drop stale
@@ -132,26 +123,22 @@ function ensureAgentRunListener() {
           runId: evt.runId,
           sessionKey,
           startedAt: startedAt ?? Date.now(),
-          ...(evt.data?.inputProvenance &&
-          typeof evt.data.inputProvenance === "object" &&
-          evt.data.inputProvenance !== null
-            ? { inputProvenance: evt.data.inputProvenance as InputProvenance }
+          ...(evt.inputProvenance &&
+          typeof evt.inputProvenance === "object" &&
+          evt.inputProvenance !== null
+            ? { inputProvenance: evt.inputProvenance }
             : {}),
         });
       }
       return;
     }
-    if (phase !== "end" && phase !== "error") {
+    if (evt.eventType !== "run.completed") {
       return;
     }
     activeAgentRuns.delete(evt.runId);
-    const snapshot = createSnapshotFromLifecycleEvent({
-      runId: evt.runId,
-      phase,
-      data: evt.data,
-    });
+    const snapshot = createSnapshotFromRunCompletedEvent(evt);
     agentRunStarts.delete(evt.runId);
-    if (phase === "error") {
+    if (evt.outcome === "failed") {
       schedulePendingAgentRunError(snapshot);
       return;
     }
@@ -184,6 +171,10 @@ export function resetAgentJobStateForTest() {
   agentRunStarts.clear();
   pendingAgentRunErrors.clear();
   activeAgentRuns.clear();
+}
+
+export function resetAgentJobState() {
+  resetAgentJobStateForTest();
 }
 
 export async function waitForAgentJob(params: {
@@ -255,18 +246,14 @@ export async function waitForAgentJob(params: {
     }
 
     const unsubscribe = onAgentEvent((evt) => {
-      if (!evt || evt.stream !== "lifecycle") {
+      if (!evt || (evt.eventType !== "run.started" && evt.eventType !== "run.completed")) {
         return;
       }
       if (evt.runId !== runId) {
         return;
       }
-      const phase = evt.data?.phase;
-      if (phase === "start") {
+      if (evt.eventType === "run.started") {
         clearPendingErrorTimer();
-        return;
-      }
-      if (phase !== "end" && phase !== "error") {
         return;
       }
       const latest = ignoreCachedSnapshot ? undefined : getCachedAgentRun(runId);
@@ -274,12 +261,8 @@ export async function waitForAgentJob(params: {
         finish(latest);
         return;
       }
-      const snapshot = createSnapshotFromLifecycleEvent({
-        runId: evt.runId,
-        phase,
-        data: evt.data,
-      });
-      if (phase === "error") {
+      const snapshot = createSnapshotFromRunCompletedEvent(evt);
+      if (evt.outcome === "failed") {
         scheduleErrorFinish(snapshot);
         return;
       }

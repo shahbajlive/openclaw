@@ -290,10 +290,11 @@ export async function truncateOversizedToolResultsInSession(params: {
             (message as { runId?: string }).runId?.trim()
           )
         ) {
+          const messageRecord = message as unknown as Record<string, unknown>;
           message = {
-            ...(message as Record<string, unknown>),
+            ...messageRecord,
             runId: persistedRunId,
-          } as AgentMessage;
+          } as unknown as AgentMessage;
         }
 
         // appendMessage expects Message | CustomMessage | BashExecutionMessage

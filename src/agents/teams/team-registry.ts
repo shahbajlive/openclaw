@@ -1062,13 +1062,14 @@ function ensureListener(): void {
   listenerStarted = true;
 
   listenerStop = onAgentEvent((evt) => {
-    if (evt.stream !== "lifecycle") {
+    if (evt.eventType !== "run.started" && evt.eventType !== "run.completed") {
       return;
     }
 
     const mapping = runIdToTeammate.get(evt.runId);
     const leadTeamId = runIdToLead.get(evt.runId);
-    const phase = evt.data.phase as string | undefined;
+    const phase =
+      evt.eventType === "run.started" ? "start" : evt.outcome === "failed" ? "error" : "end";
 
     // 1. Handle Team Lead lifecycle events
     if (leadTeamId || evt.sessionKey) {

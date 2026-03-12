@@ -1,7 +1,10 @@
 import type { AgentEventPayload } from "../infra/agent-events.js";
 
 export function resolveAssistantStreamDeltaText(evt: AgentEventPayload): string {
-  const delta = evt.data.delta;
-  const text = evt.data.text;
+  if (evt.eventType !== "activity.output" || evt.kind !== "assistant_message") {
+    return "";
+  }
+  const delta = evt.output.delta;
+  const text = evt.output.text;
   return typeof delta === "string" ? delta : typeof text === "string" ? text : "";
 }

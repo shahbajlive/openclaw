@@ -15,7 +15,7 @@ import {
   updateSessionStoreEntry,
 } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
-import { emitAgentEvent } from "../../infra/agent-events.js";
+import { emitRunUpdated } from "../../infra/agent-events.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { generateSecureUuid } from "../../infra/secure-random.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
@@ -600,11 +600,10 @@ export async function runReplyAgent(params: {
     }
 
     if (fallbackTransition.fallbackTransitioned) {
-      emitAgentEvent({
+      emitRunUpdated({
         runId,
         sessionKey,
-        stream: "lifecycle",
-        data: {
+        patch: {
           phase: "fallback",
           selectedProvider,
           selectedModel,
@@ -629,11 +628,10 @@ export async function runReplyAgent(params: {
       }
     }
     if (fallbackTransition.fallbackCleared) {
-      emitAgentEvent({
+      emitRunUpdated({
         runId,
         sessionKey,
-        stream: "lifecycle",
-        data: {
+        patch: {
           phase: "fallback_cleared",
           selectedProvider,
           selectedModel,

@@ -748,32 +748,32 @@ function ensureListener() {
   listenerStarted = true;
   listenerStop = onAgentEvent((evt) => {
     void (async () => {
-      if (!evt || evt.stream !== "lifecycle") {
+      if (!evt || (evt.eventType !== "run.started" && evt.eventType !== "run.completed")) {
         return;
       }
-      const phase = evt.data?.phase;
       const entry = subagentRuns.get(evt.runId);
       if (!entry) {
-        if (phase === "end" && typeof evt.sessionKey === "string") {
+        if (
+          evt.eventType === "run.completed" &&
+          evt.outcome === "completed" &&
+          typeof evt.sessionKey === "string"
+        ) {
           await refreshFrozenResultFromSession(evt.sessionKey);
         }
         return;
       }
-      if (phase === "start") {
+      if (evt.eventType === "run.started") {
         clearPendingLifecycleError(evt.runId);
-        const startedAt = typeof evt.data?.startedAt === "number" ? evt.data.startedAt : undefined;
+        const startedAt = typeof evt.startedAt === "number" ? evt.startedAt : undefined;
         if (startedAt) {
           entry.startedAt = startedAt;
           persistSubagentRuns();
         }
         return;
       }
-      if (phase !== "end" && phase !== "error") {
-        return;
-      }
-      const endedAt = typeof evt.data?.endedAt === "number" ? evt.data.endedAt : Date.now();
-      const error = typeof evt.data?.error === "string" ? evt.data.error : undefined;
-      if (phase === "error") {
+      const endedAt = typeof evt.endedAt === "number" ? evt.endedAt : Date.now();
+      const error = typeof evt.error === "string" ? evt.error : undefined;
+      if (evt.outcome === "failed") {
         schedulePendingLifecycleError({
           runId: evt.runId,
           endedAt,
@@ -782,9 +782,8 @@ function ensureListener() {
         return;
       }
       clearPendingLifecycleError(evt.runId);
-      const outcome: SubagentRunOutcome = evt.data?.aborted
-        ? { status: "timeout" }
-        : { status: "ok" };
+      const outcome: SubagentRunOutcome =
+        evt.outcome === "aborted" ? { status: "timeout" } : { status: "ok" };
       await completeSubagentRun({
         runId: evt.runId,
         endedAt,

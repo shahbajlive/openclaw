@@ -20,7 +20,13 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
-import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
+import {
+  createActivityRef,
+  emitActivityOutput,
+  emitRunCompleted,
+  emitRunStarted,
+  registerAgentRunContext,
+} from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import {
   isMarkdownCapableMessageChannel,
@@ -206,14 +212,7 @@ export async function runAgentTurnWithFallback(params: {
           if (isCliProvider(provider, params.followupRun.run.config)) {
             const startedAt = Date.now();
             notifyAgentRunStart();
-            emitAgentEvent({
-              runId,
-              stream: "lifecycle",
-              data: {
-                phase: "start",
-                startedAt,
-              },
-            });
+            emitRunStarted({ runId, sessionKey: params.sessionKey, startedAt });
             const cliSessionId = getCliSessionId(params.getActiveSessionEntry(), provider);
             return (async () => {
               let lifecycleTerminalEmitted = false;
@@ -250,35 +249,36 @@ export async function runAgentTurnWithFallback(params: {
                 // and send the response to TUI/WebSocket clients.
                 const cliText = result.payloads?.[0]?.text?.trim();
                 if (cliText) {
-                  emitAgentEvent({
+                  emitActivityOutput({
                     runId,
-                    stream: "assistant",
-                    data: { text: cliText },
+                    sessionKey: params.sessionKey,
+                    activity: createActivityRef({
+                      activityId: `${runId}:assistant`,
+                      kind: "assistant_message",
+                      origin: { type: "self" },
+                    }),
+                    output: { text: cliText },
                   });
                 }
 
-                emitAgentEvent({
+                emitRunCompleted({
                   runId,
-                  stream: "lifecycle",
-                  data: {
-                    phase: "end",
-                    startedAt,
-                    endedAt: Date.now(),
-                  },
+                  sessionKey: params.sessionKey,
+                  outcome: "completed",
+                  startedAt,
+                  endedAt: Date.now(),
                 });
                 lifecycleTerminalEmitted = true;
 
                 return result;
               } catch (err) {
-                emitAgentEvent({
+                emitRunCompleted({
                   runId,
-                  stream: "lifecycle",
-                  data: {
-                    phase: "error",
-                    startedAt,
-                    endedAt: Date.now(),
-                    error: String(err),
-                  },
+                  sessionKey: params.sessionKey,
+                  outcome: "failed",
+                  startedAt,
+                  endedAt: Date.now(),
+                  error: String(err),
                 });
                 lifecycleTerminalEmitted = true;
                 throw err;
@@ -286,15 +286,13 @@ export async function runAgentTurnWithFallback(params: {
                 // Defensive backstop: never let a CLI run complete without a terminal
                 // lifecycle event, otherwise downstream consumers can hang.
                 if (!lifecycleTerminalEmitted) {
-                  emitAgentEvent({
+                  emitRunCompleted({
                     runId,
-                    stream: "lifecycle",
-                    data: {
-                      phase: "error",
-                      startedAt,
-                      endedAt: Date.now(),
-                      error: "CLI run completed without lifecycle terminal event",
-                    },
+                    sessionKey: params.sessionKey,
+                    outcome: "failed",
+                    startedAt,
+                    endedAt: Date.now(),
+                    error: "CLI run completed without lifecycle terminal event",
                   });
                 }
               }

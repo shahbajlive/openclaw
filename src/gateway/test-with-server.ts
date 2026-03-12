@@ -1,4 +1,4 @@
-import { afterAll, beforeAll } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 import { startServerWithClient } from "./test-helpers.js";
 import { connectOk } from "./test-helpers.js";
 
@@ -22,7 +22,7 @@ export function installConnectedControlUiServerSuite(
 ): void {
   let started: Awaited<ReturnType<StartServerWithClient>> | null = null;
 
-  beforeAll(async () => {
+  beforeEach(async () => {
     started = await startServerWithClient(undefined, { controlUiEnabled: true });
     onReady({
       server: started.server,
@@ -32,10 +32,11 @@ export function installConnectedControlUiServerSuite(
     await connectOk(started.ws);
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     started?.ws.close();
     if (started?.server) {
       await started.server.close();
     }
+    started = null;
   });
 }

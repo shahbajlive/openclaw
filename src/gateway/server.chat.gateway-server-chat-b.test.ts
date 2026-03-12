@@ -5,6 +5,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { GetReplyOptions } from "../auto-reply/types.js";
 import { GATEWAY_CLIENT_CAPS } from "../gateway/protocol/client-info.js";
 import { emitAgentEvent, registerAgentRunContext } from "../infra/agent-events.js";
+import { extractFirstTextBlock } from "../shared/chat-message-content.js";
 import { __setMaxChatHistoryMessagesBytesForTest } from "./server-constants.js";
 import {
   connectOk,
@@ -84,6 +85,18 @@ async function fetchHistoryMessages(
   });
   expect(historyRes.ok).toBe(true);
   return historyRes.payload?.messages ?? [];
+}
+
+function summarizeVisibleRows(messages: unknown[]): string[] {
+  return messages.map((message) => {
+    const role =
+      message &&
+      typeof message === "object" &&
+      typeof (message as { role?: unknown }).role === "string"
+        ? String((message as { role: string }).role)
+        : "unknown";
+    return `${role}:${extractFirstTextBlock(message) ?? ""}`;
+  });
 }
 
 describe("gateway server chat", () => {
@@ -473,6 +486,19 @@ describe("gateway server chat", () => {
       expect(historyRes.ok).toBe(true);
       expect(historyRes.payload?.activeRun?.runId).toBe("idem-reset-history-effective");
       expect(historyRes.payload?.activeRun?.effectiveUserMessage).toBe(effective);
+      expect(historyRes.payload?.messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "user",
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: effective,
+              }),
+            ]),
+          }),
+        ]),
+      );
 
       releaseRun();
     });
@@ -977,6 +1003,156 @@ describe("gateway server chat", () => {
         stream: "lifecycle",
         data: { phase: "end", startedAt: 123, endedAt: 124 },
       });
+    });
+  });
+
+  test("chat.history shows reset bootstrap and split assistant chronology as plain text rows", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      const sessionDir = await createSessionDir();
+      await writeMainSessionStore();
+
+      const lines = [
+        JSON.stringify({
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "/reset" }],
+            timestamp: 10,
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "system",
+            content: [
+              {
+                type: "text",
+                text: "A new session was started via /new or /reset.",
+              },
+            ],
+            timestamp: 20,
+            idempotencyKey: "run-reset:effective-user-message",
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "I'm ready to help!" }],
+            timestamp: 30,
+            runId: "run-reset",
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: " persona." }],
+            timestamp: 40,
+            runId: "run-reset",
+            idempotencyKey: "run-reset:assistant",
+          },
+        }),
+      ];
+      await writeMainSessionTranscript(sessionDir, lines);
+
+      const messages = await fetchHistoryMessages(ws);
+
+      expect(summarizeVisibleRows(messages)).toEqual([
+        "user:/reset",
+        "system:A new session was started via /new or /reset.",
+        "assistant:I'm ready to help!",
+        "assistant: persona.",
+      ]);
+    });
+  });
+
+  test("chat.history rewrites persisted bare reset bootstrap user rows to system", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      const sessionDir = await createSessionDir();
+      await writeMainSessionStore();
+
+      const lines = [
+        JSON.stringify({
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "A new session was started via /new or /reset. Execute your Session Startup sequence now - read the required files before responding to the user.",
+              },
+            ],
+            timestamp: 10,
+          },
+        }),
+      ];
+      await writeMainSessionTranscript(sessionDir, lines);
+
+      const messages = await fetchHistoryMessages(ws);
+
+      expect(summarizeVisibleRows(messages)).toEqual([
+        "system:A new session was started via /new or /reset. Execute your Session Startup sequence now - read the required files before responding to the user.",
+      ]);
+    });
+  });
+
+  test("chat.history preserves an aborted assistant suffix as a separate chronological row", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      const sessionDir = await createSessionDir();
+      await writeMainSessionStore();
+
+      const lines = [
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            runId: "run-split-1",
+            idempotencyKey: "run-split-1:timeline:5",
+            timestamp: 9,
+            __openclaw: {
+              timeline: { canonical: true, seq: 5 },
+            },
+            content: [
+              {
+                type: "text",
+                text: "I'm ready to help! Let me check what files are available in the workspace and then",
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            runId: "run-split-1",
+            timestamp: 10,
+            content: [
+              {
+                type: "text",
+                text: "I'm ready to help! Let me check what files are available in the workspace and then respond.",
+              },
+              { type: "toolCall", id: "call-1", name: "read", arguments: { path: "SOUL.md" } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          message: {
+            role: "assistant",
+            runId: "run-split-1",
+            idempotencyKey: "run-split-1:assistant",
+            timestamp: 20,
+            openclawAbort: { aborted: true, origin: "rpc", runId: "run-split-1" },
+            __openclaw: {
+              timeline: { canonical: true, seq: 20 },
+            },
+            content: [{ type: "text", text: "respond." }],
+          },
+        }),
+      ];
+      await writeMainSessionTranscript(sessionDir, lines);
+
+      const messages = await fetchHistoryMessages(ws);
+      expect(summarizeVisibleRows(messages)).toEqual([
+        "assistant:I'm ready to help! Let me check what files are available in the workspace and then",
+        "assistant:respond.",
+      ]);
     });
   });
 

@@ -4,7 +4,7 @@ import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
 import type { ImageContent } from "../commands/agent/types.js";
 import type { GatewayHttpChatCompletionsConfig } from "../config/types.gateway.js";
-import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
+import { emitRunCompleted, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
 import { estimateBase64DecodedBytes } from "../media/base64.js";
 import {
@@ -528,7 +528,7 @@ export async function handleOpenAiHttpRequest(
       return;
     }
 
-    if (evt.stream === "assistant") {
+    if (evt.eventType === "activity.output" && evt.kind === "assistant_message") {
       const content = resolveAssistantStreamDeltaText(evt) ?? "";
       if (!content) {
         return;
@@ -549,14 +549,11 @@ export async function handleOpenAiHttpRequest(
       return;
     }
 
-    if (evt.stream === "lifecycle") {
-      const phase = evt.data?.phase;
-      if (phase === "end" || phase === "error") {
-        closed = true;
-        unsubscribe();
-        writeDone(res);
-        res.end();
-      }
+    if (evt.eventType === "run.completed") {
+      closed = true;
+      unsubscribe();
+      writeDone(res);
+      res.end();
     }
   });
 
@@ -600,11 +597,7 @@ export async function handleOpenAiHttpRequest(
         content: "Error: internal error",
         finishReason: "stop",
       });
-      emitAgentEvent({
-        runId,
-        stream: "lifecycle",
-        data: { phase: "error" },
-      });
+      emitRunCompleted({ runId, outcome: "failed" });
     } finally {
       if (!closed) {
         closed = true;

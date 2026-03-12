@@ -25,13 +25,22 @@ function createStorageMock(): Storage {
 }
 
 describe("loadSettings default gateway URL derivation", () => {
+  let previousGatewayUrl: string | undefined;
+  let previousGatewayToken: string | undefined;
+
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal("localStorage", createStorageMock());
     vi.stubGlobal("navigator", { language: "en-US" } as Navigator);
+    previousGatewayUrl = import.meta.env.VITE_OPENCLAW_GATEWAY_URL;
+    previousGatewayToken = import.meta.env.VITE_OPENCLAW_GATEWAY_TOKEN;
+    import.meta.env.VITE_OPENCLAW_GATEWAY_URL = "";
+    import.meta.env.VITE_OPENCLAW_GATEWAY_TOKEN = "";
   });
 
   afterEach(() => {
+    import.meta.env.VITE_OPENCLAW_GATEWAY_URL = previousGatewayUrl;
+    import.meta.env.VITE_OPENCLAW_GATEWAY_TOKEN = previousGatewayToken;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -75,5 +84,23 @@ describe("loadSettings default gateway URL derivation", () => {
 
     const { loadSettings } = await import("./storage.ts");
     expect(loadSettings().workspaceMessagesSidebarCollapsed).toBe(true);
+  });
+
+  it("prefers Vite env defaults for gateway URL and token", async () => {
+    vi.stubGlobal("location", {
+      protocol: "http:",
+      host: "gateway.example:18789",
+      pathname: "/apps/openclaw/chat",
+    } as Location);
+    vi.stubGlobal("window", {} as Window & typeof globalThis);
+
+    const storageModule = await import("./storage.ts");
+    import.meta.env.VITE_OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:18789";
+    import.meta.env.VITE_OPENCLAW_GATEWAY_TOKEN = "env-token";
+
+    const { loadSettings } = storageModule;
+    const settings = loadSettings();
+    expect(settings.gatewayUrl).toBe("ws://127.0.0.1:18789");
+    expect(settings.token).toBe("env-token");
   });
 });

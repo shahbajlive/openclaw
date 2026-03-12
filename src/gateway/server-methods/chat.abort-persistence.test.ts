@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { registerAgentRunContext, resetAgentRunContextForTest } from "../../infra/agent-events.js";
 
 type TranscriptLine = {
   message?: Record<string, unknown>;
@@ -123,10 +124,8 @@ function createChatAbortContext(overrides: Record<string, unknown> = {}): {
   return {
     chatAbortControllers: new Map(),
     chatRunBuffers: new Map(),
-    chatRunPhases: new Map<
-      string,
-      "processing" | "thinking" | "typing" | "tool_running" | "finalizing"
-    >(),
+    chatCommittedVisibleText: new Map<string, string>(),
+    chatRunPhases: new Map<string, "processing" | "thinking" | "typing" | "tool_running">(),
     chatDeltaSentAt: new Map(),
     chatAbortedRuns: new Map<string, number>(),
     removeChatRun: vi
@@ -158,6 +157,7 @@ async function invokeChatAbort(
 afterEach(() => {
   vi.restoreAllMocks();
   piEmbeddedMocks.abortEmbeddedPiRun.mockClear().mockReturnValue(true);
+  resetAgentRunContextForTest();
 });
 
 describe("chat abort transcript persistence", () => {
@@ -206,6 +206,59 @@ describe("chat abort transcript persistence", () => {
       runId,
       stopReason: "stop",
       idempotencyKey: `${runId}:assistant`,
+      openclawAbort: {
+        aborted: true,
+        origin: "rpc",
+        runId,
+      },
+    });
+  });
+
+  it("persists run-context abort partials before broadcasting aborted", async () => {
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-run-context-",
+    );
+    const runId = "idem-run-context-abort";
+    registerAgentRunContext(runId, {
+      sessionKey: "main",
+      sessionId,
+      queuedChatItemId: "queued-1",
+    });
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map(),
+      chatRunBuffers: new Map([[runId, "Last visible partial"]]),
+      dedupe: {
+        get: vi.fn().mockReturnValue(undefined),
+      },
+      broadcast: vi.fn(),
+      nodeSendToSession: vi.fn(),
+      logGateway: { warn: vi.fn() },
+    });
+
+    await chatHandlers["chat.abort"]({
+      params: { sessionKey: "main", runId },
+      respond: respond as never,
+      context: context as never,
+      req: {} as never,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const [ok, payload] = respond.mock.calls.at(-1) ?? [];
+    expect(ok).toBe(true);
+    expect(payload).toMatchObject({ aborted: true, runIds: [runId] });
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const persisted = lines
+      .map((line) => line.message)
+      .find((message) => message?.idempotencyKey === `${runId}:assistant`);
+
+    expect(piEmbeddedMocks.abortEmbeddedPiRun).toHaveBeenCalledWith(sessionId);
+    expect(persisted).toMatchObject({
+      runId,
+      idempotencyKey: `${runId}:assistant`,
+      content: [{ type: "text", text: "Last visible partial" }],
       openclawAbort: {
         aborted: true,
         origin: "rpc",
@@ -388,5 +441,103 @@ describe("chat abort transcript persistence", () => {
       .map((line) => line.message)
       .find((message) => message?.idempotencyKey === `${runId}:assistant`);
     expect(persisted).toBeUndefined();
+  });
+
+  it("does not persist a boundary assistant row when the mixed tool-use message already contains that text", async () => {
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-boundary-dedupe-",
+    );
+    const runId = "idem-abort-run-boundary-dedupe";
+    await appendTranscriptMessage(transcriptPath, "assistant-prefix", null, {
+      role: "assistant",
+      runId,
+      timestamp: 1,
+      content: [
+        {
+          type: "text",
+          text: "I'm ready to help! Let me check the current session context and memory files.\n\n",
+        },
+        { type: "toolCall", id: "call_1", name: "memory_get", arguments: { path: "MEMORY.md" } },
+      ],
+    });
+    await appendTranscriptMessage(transcriptPath, "tool-result", "assistant-prefix", {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "memory_get",
+      timestamp: 2,
+      content: [{ type: "text", text: '{"text":""}' }],
+      runId,
+    });
+
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", sessionId)]]),
+      chatRunBuffers: new Map([
+        [runId, "I'm ready to help! Let me check the current session context and memory files."],
+      ]),
+      chatCommittedVisibleText: new Map([
+        [runId, "I'm ready to help! Let me check the current session context and memory files."],
+      ]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbort(context, { sessionKey: "main", runId }, respond);
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const boundaryPersisted = lines
+      .map((line) => line.message)
+      .find((message) => message?.idempotencyKey === `${runId}:assistant-boundary`);
+    expect(boundaryPersisted).toBeUndefined();
+  });
+
+  it("persists only the abort suffix after a tool split using committed visible text", async () => {
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-suffix-split-",
+    );
+    const runId = "idem-abort-run-suffix-split";
+    await appendTranscriptMessage(transcriptPath, "assistant-prefix", null, {
+      role: "assistant",
+      runId,
+      timestamp: 1,
+      content: [
+        {
+          type: "text",
+          text: "I'm ready to help! Let me check what files are available in the workspace and then",
+        },
+        { type: "toolCall", id: "call_1", name: "read", arguments: { path: "SOUL.md" } },
+      ],
+    });
+
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", sessionId)]]),
+      chatRunBuffers: new Map([
+        [
+          runId,
+          "I'm ready to help! Let me check what files are available in the workspace and then respond.",
+        ],
+      ]),
+      chatCommittedVisibleText: new Map([
+        [
+          runId,
+          "I'm ready to help! Let me check what files are available in the workspace and then",
+        ],
+      ]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbort(context, { sessionKey: "main", runId }, respond);
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const persisted = lines
+      .map((line) => line.message)
+      .find((message) => message?.idempotencyKey === `${runId}:assistant`);
+    expect(persisted).toMatchObject({
+      content: [{ type: "text", text: "respond." }],
+      openclawAbort: {
+        aborted: true,
+        runId,
+      },
+    });
   });
 });

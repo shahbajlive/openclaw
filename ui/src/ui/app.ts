@@ -98,6 +98,7 @@ import type {
   StatusSummary,
   NostrProfile,
 } from "./types.ts";
+import type { ChatLiveActivity } from "./types/chat-types.ts";
 import { type ChatAttachment, type ChatQueueItem, type CronFormState } from "./ui-types.ts";
 import { generateUUID } from "./uuid.ts";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form.ts";
@@ -175,14 +176,10 @@ export class OpenClawApp extends LitElement {
   @state() chatMentionSelectedIndex = 0;
   @state() chatMessages: unknown[] = [];
   @state() chatToolMessages: unknown[] = [];
+  @state() chatLiveActivities: ChatLiveActivity[] = [];
   @state() chatStream: string | null = this.initialChatRuntime?.stream ?? null;
-  @state() chatRunPhase:
-    | "processing"
-    | "thinking"
-    | "typing"
-    | "tool_running"
-    | "finalizing"
-    | null = this.initialChatRuntime?.phase ?? null;
+  @state() chatRunPhase: "processing" | "thinking" | "typing" | "tool_running" | null =
+    this.initialChatRuntime?.phase ?? null;
   @state() chatStreamStartedAt: number | null = this.initialChatRuntime?.streamStartedAt ?? null;
   chatStreamCommittedPrefixLength = this.initialChatRuntime?.streamCommittedPrefixLength ?? 0;
   @state() chatRunId: string | null = this.initialChatRuntime?.runId ?? null;

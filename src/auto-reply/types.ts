@@ -68,6 +68,8 @@ export type GetReplyOptions = {
   timeoutOverrideSeconds?: number;
   /** Force queue behavior for this specific inbound turn without persisting session defaults. */
   forceQueueMode?: "steer" | "followup" | "collect" | "steer-backlog" | "interrupt" | "queue";
+  /** Override the persisted display role for the generated prompt message. */
+  persistedDisplayRole?: "system";
 };
 
 export type ReplyPayload = {

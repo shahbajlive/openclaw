@@ -62,7 +62,7 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
 }
 
 describe("chat view", () => {
-  it("renders system messages on the right with a system avatar", () => {
+  it("renders system messages in a dedicated system lane with a system avatar", () => {
     const container = document.createElement("div");
     render(
       renderChat(
@@ -79,10 +79,10 @@ describe("chat view", () => {
       container,
     );
 
-    const group = container.querySelector(".chat-group.user");
+    const group = container.querySelector(".chat-group.system");
     expect(group).not.toBeNull();
     expect(group?.querySelector(".chat-sender-name")?.textContent).toContain("System");
-    expect(group?.querySelector(".chat-avatar.user")?.textContent).toContain("S");
+    expect(group?.querySelector(".chat-avatar.system")?.textContent).toContain("S");
   });
 
   it("renders compacting indicator as a badge", () => {
@@ -399,7 +399,7 @@ describe("chat view", () => {
     expect(container.querySelector(".chat-group-status")?.textContent).toContain("Thinking...");
   });
 
-  it("orders the active processing bubble by timestamp with transcript history", () => {
+  it("keeps the active processing bubble at the visible tail with transcript history", () => {
     const container = document.createElement("div");
     render(
       renderChat(
@@ -435,8 +435,8 @@ describe("chat view", () => {
     expect(groups).toHaveLength(4);
     expect(groups[0]?.textContent ?? "").toContain("/reset");
     expect(groups[1]?.textContent ?? "").toContain("Bootstrap prompt");
-    expect(groups[2]?.textContent ?? "").toContain("Thinking...");
-    expect(groups[3]?.textContent ?? "").toContain("Later history row");
+    expect(groups[2]?.textContent ?? "").toContain("Later history row");
+    expect(groups[3]?.querySelector(".chat-reading-indicator")).not.toBeNull();
   });
 
   it("does not repeat the assistant avatar when active assistant work continues after an assistant group", () => {
@@ -666,6 +666,96 @@ describe("chat view", () => {
 
     expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
     expect(container.querySelector(".chat-group--continuation")).not.toBeNull();
+  });
+
+  it("keeps tool-first active processing below the tool card even when the run started earlier", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          chatRunId: "run-tool-live-1",
+          messages: [
+            {
+              role: "user",
+              timestamp: ts,
+              content: [{ type: "text", text: "Read the workspace files." }],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              runId: "run-tool-live-1",
+              timestamp: ts + 1000,
+              toolCallId: "tool-live-1",
+              content: [
+                { type: "toolcall", name: "read", arguments: { path: "SOUL.md" } },
+                { type: "toolresult", name: "read", text: "content" },
+              ],
+            },
+          ],
+          activeRun: true,
+          runPhase: "tool_running",
+          stream: null,
+          streamStartedAt: ts + 100,
+        }),
+      ),
+      container,
+    );
+
+    const assistantGroups = Array.from(container.querySelectorAll(".chat-group.assistant"));
+    expect(assistantGroups).toHaveLength(1);
+    const toolCard = container.querySelector(".chat-tool-card");
+    const processingDots = container.querySelector(".chat-reading-indicator");
+    expect(toolCard).not.toBeNull();
+    expect(processingDots).not.toBeNull();
+    expect(
+      toolCard?.compareDocumentPosition(processingDots as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
+  });
+
+  it("keeps live stream text below the latest tool card when text arrives after tool work starts", () => {
+    const container = document.createElement("div");
+    const ts = Date.now();
+    render(
+      renderChat(
+        createProps({
+          chatRunId: "run-tool-stream-1",
+          messages: [
+            {
+              role: "user",
+              timestamp: ts,
+              content: [{ type: "text", text: "Check the docs and summarize." }],
+            },
+          ],
+          toolMessages: [
+            {
+              role: "assistant",
+              runId: "run-tool-stream-1",
+              timestamp: ts + 1000,
+              toolCallId: "tool-stream-1",
+              content: [
+                { type: "toolcall", name: "read", arguments: { path: "README.md" } },
+                { type: "toolresult", name: "read", text: "summary source" },
+              ],
+            },
+          ],
+          stream: "Here is the summary.",
+          streamStartedAt: ts + 100,
+        }),
+      ),
+      container,
+    );
+
+    const assistantGroups = Array.from(container.querySelectorAll(".chat-group.assistant"));
+    expect(assistantGroups).toHaveLength(1);
+    const assistantGroupText = assistantGroups[0]?.textContent ?? "";
+    const readIndex = assistantGroupText.indexOf("Read");
+    const summaryIndex = assistantGroupText.indexOf("Here is the summary.");
+    expect(readIndex).toBeGreaterThanOrEqual(0);
+    expect(summaryIndex).toBeGreaterThan(readIndex);
+    expect(container.querySelectorAll(".chat-avatar.assistant")).toHaveLength(1);
   });
 
   it("keeps abort partial assistant text inside the same tool thread for a run", () => {

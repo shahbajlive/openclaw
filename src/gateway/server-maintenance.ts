@@ -30,7 +30,7 @@ export function startGatewayMaintenanceTimers(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   chatRunState: {
     abortedRuns: Map<string, number>;
-    phases: Map<string, "processing" | "thinking" | "typing" | "tool_running" | "finalizing">;
+    phases: Map<string, "processing" | "thinking" | "typing" | "tool_running">;
   };
   chatRunBuffers: Map<string, string>;
   chatDeltaSentAt: Map<string, number>;

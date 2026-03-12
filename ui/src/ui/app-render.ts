@@ -1086,6 +1086,7 @@ export function renderApp(state: AppViewState) {
                   state.chatMentionEnd = null;
                   state.chatMentionSelectedIndex = 0;
                   state.chatAttachments = [];
+                  state.chatLiveActivities = [];
                   state.chatStream = null;
                   state.chatStreamStartedAt = null;
                   state.chatRunId = null;
@@ -1110,6 +1111,7 @@ export function renderApp(state: AppViewState) {
                 assistantAvatarUrl: chatAvatarUrl,
                 messages: state.chatMessages,
                 toolMessages: state.chatToolMessages,
+                liveActivities: state.chatLiveActivities,
                 stream: state.chatStream,
                 streamStartedAt: state.chatStreamStartedAt,
                 runPhase: state.chatRunPhase,

@@ -30,15 +30,16 @@ describe("gateway ws log helpers", () => {
     const summary = summarizeAgentEventForWsLog({
       runId: "12345678-1234-1234-1234-123456789abc",
       sessionKey: "agent:main:main",
-      stream: "assistant",
+      eventType: "activity.output",
+      kind: "assistant_message",
       seq: 2,
-      data: { text: "hello world", mediaUrls: ["a", "b"] },
+      output: { text: "hello world", mediaUrls: ["a", "b"] },
     });
     expect(summary).toMatchObject({
       agent: "main",
       run: "12345678…9abc",
       session: "main",
-      stream: "assistant",
+      stream: "assistant_message",
       aseq: 2,
       text: "hello world",
       media: 2,
@@ -46,12 +47,14 @@ describe("gateway ws log helpers", () => {
 
     const tool = summarizeAgentEventForWsLog({
       runId: "run-1",
-      stream: "tool",
-      data: { phase: "start", name: "fetch", toolCallId: "call-1" },
+      eventType: "activity.started",
+      kind: "tool_call",
+      activityId: "call-1",
+      input: { name: "fetch" },
     });
     expect(tool).toMatchObject({
-      stream: "tool",
-      tool: "start:fetch",
+      stream: "tool_call",
+      tool: "activity.started:fetch",
       call: "call-1",
     });
   });

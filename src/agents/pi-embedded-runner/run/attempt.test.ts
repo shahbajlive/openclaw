@@ -146,6 +146,46 @@ describe("applyPersistedDisplayRole", () => {
     expect((agentMessages[1] as { role?: string }).role).toBe("system");
     expect(rewriteFile).toHaveBeenCalledOnce();
   });
+
+  it("rewrites text-block bootstrap prompts to system role", () => {
+    const rewriteFile = vi.fn();
+    const sessionManager = {
+      fileEntries: [
+        { type: "session" },
+        { type: "message", message: { role: "user", content: "/reset" } },
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "A new session was started via /new or /reset." }],
+          },
+        },
+      ],
+      _rewriteFile: rewriteFile,
+    } as unknown as import("@mariozechner/pi-coding-agent").SessionManager;
+    const agentMessages = [
+      { role: "user", content: "/reset" },
+      { role: "user", content: "A new session was started via /new or /reset." },
+    ] as unknown as import("@mariozechner/pi-agent-core").AgentMessage[];
+
+    const changed = applyPersistedDisplayRole({
+      sessionManager,
+      agentMessages,
+      prompt: "A new session was started via /new or /reset.",
+      role: "system",
+    });
+
+    expect(changed).toBe(true);
+    expect(
+      (
+        sessionManager as unknown as {
+          fileEntries: Array<{ type?: string; message?: { role?: string } }>;
+        }
+      ).fileEntries[2]?.message?.role,
+    ).toBe("system");
+    expect((agentMessages[1] as { role?: string }).role).toBe("system");
+    expect(rewriteFile).toHaveBeenCalledOnce();
+  });
 });
 
 describe("composeSystemPromptWithHookContext", () => {

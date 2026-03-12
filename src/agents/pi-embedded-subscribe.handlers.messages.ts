@@ -1,7 +1,12 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
-import { emitAgentEvent } from "../infra/agent-events.js";
+import {
+  createActivityRef,
+  emitActivityCompleted,
+  emitActivityOutput,
+  emitActivityStarted,
+} from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
 import {
   isMessagingToolDuplicateNormalized,
@@ -32,6 +37,23 @@ const stripTrailingDirective = (text: string): string => {
   }
   return text.slice(0, openIndex);
 };
+
+function assistantActivity(runId: string) {
+  return createActivityRef({
+    activityId: `${runId}:assistant`,
+    kind: "assistant_message",
+    origin: { type: "self" },
+  });
+}
+
+function reasoningActivity(runId: string) {
+  return createActivityRef({
+    activityId: `${runId}:reasoning`,
+    kind: "reasoning",
+    parentActivityId: `${runId}:assistant`,
+    origin: { type: "self" },
+  });
+}
 
 function emitReasoningEnd(ctx: EmbeddedPiSubscribeContext) {
   if (!ctx.state.reasoningStreamOpen) {
@@ -71,10 +93,10 @@ export function handleMessageStart(
   // may deliver late text_end updates after message_end, which would otherwise
   // re-trigger block replies.
   ctx.resetAssistantMessageState(ctx.state.assistantTexts.length);
-  emitAgentEvent({
+  emitActivityStarted({
     runId: ctx.params.runId,
-    stream: "assistant",
-    data: { phase: "start" },
+    sessionKey: ctx.params.sessionKey,
+    activity: assistantActivity(ctx.params.runId),
   });
   void ctx.params.onAgentEvent?.({
     stream: "assistant",
@@ -103,15 +125,32 @@ export function handleMessageUpdate(
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
 
   if (evtType === "thinking_start" || evtType === "thinking_delta" || evtType === "thinking_end") {
-    emitAgentEvent({
-      runId: ctx.params.runId,
-      stream: "reasoning",
-      data: {
-        phase: evtType === "thinking_end" ? "end" : "delta",
-        delta: typeof assistantRecord?.delta === "string" ? assistantRecord.delta : undefined,
-        content: typeof assistantRecord?.content === "string" ? assistantRecord.content : undefined,
-      },
-    });
+    if (evtType === "thinking_start") {
+      emitActivityStarted({
+        runId: ctx.params.runId,
+        sessionKey: ctx.params.sessionKey,
+        activity: reasoningActivity(ctx.params.runId),
+      });
+    }
+    if (evtType === "thinking_end") {
+      emitActivityCompleted({
+        runId: ctx.params.runId,
+        sessionKey: ctx.params.sessionKey,
+        activity: reasoningActivity(ctx.params.runId),
+        outcome: "completed",
+      });
+    } else {
+      emitActivityOutput({
+        runId: ctx.params.runId,
+        sessionKey: ctx.params.sessionKey,
+        activity: reasoningActivity(ctx.params.runId),
+        output: {
+          delta: typeof assistantRecord?.delta === "string" ? assistantRecord.delta : undefined,
+          content:
+            typeof assistantRecord?.content === "string" ? assistantRecord.content : undefined,
+        },
+      });
+    }
     void ctx.params.onAgentEvent?.({
       stream: "reasoning",
       data: {
@@ -186,6 +225,15 @@ export function handleMessageUpdate(
   }
 
   if (chunk) {
+    emitActivityOutput({
+      runId: ctx.params.runId,
+      sessionKey: ctx.params.sessionKey,
+      activity: assistantActivity(ctx.params.runId),
+      output: {
+        text: ctx.state.deltaBuffer + chunk,
+        delta: chunk,
+      },
+    });
     ctx.state.deltaBuffer += chunk;
     if (ctx.blockChunker) {
       ctx.blockChunker.append(chunk);
@@ -239,10 +287,11 @@ export function handleMessageUpdate(
     ctx.state.lastStreamedAssistantCleaned = cleanedText;
 
     if (shouldEmit) {
-      emitAgentEvent({
+      emitActivityOutput({
         runId: ctx.params.runId,
-        stream: "assistant",
-        data: {
+        sessionKey: ctx.params.sessionKey,
+        activity: assistantActivity(ctx.params.runId),
+        output: {
           text: cleanedText,
           delta: deltaText,
           mediaUrls: hasMedia ? mediaUrls : undefined,
@@ -283,10 +332,11 @@ export function handleMessageEnd(
   if (msg?.role !== "assistant") {
     return;
   }
-  emitAgentEvent({
+  emitActivityCompleted({
     runId: ctx.params.runId,
-    stream: "assistant",
-    data: { phase: "end" },
+    sessionKey: ctx.params.sessionKey,
+    activity: assistantActivity(ctx.params.runId),
+    outcome: "completed",
   });
   void ctx.params.onAgentEvent?.({
     stream: "assistant",
@@ -336,10 +386,11 @@ export function handleMessageEnd(
   }
 
   if (!ctx.state.emittedAssistantUpdate && (cleanedText || hasMedia)) {
-    emitAgentEvent({
+    emitActivityOutput({
       runId: ctx.params.runId,
-      stream: "assistant",
-      data: {
+      sessionKey: ctx.params.sessionKey,
+      activity: assistantActivity(ctx.params.runId),
+      output: {
         text: cleanedText,
         delta: cleanedText,
         mediaUrls: hasMedia ? mediaUrls : undefined,

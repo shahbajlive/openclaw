@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { extractText } from "../chat/message-extract.ts";
 import {
   enqueueChatMessage,
   handleChatEvent,
@@ -32,6 +33,18 @@ function createState(overrides: Partial<ChatState> = {}): ChatState {
     sessionKey: "main",
     ...overrides,
   };
+}
+
+function summarizeTranscript(messages: unknown[]): string[] {
+  return messages.map((message) => {
+    const role =
+      message &&
+      typeof message === "object" &&
+      typeof (message as { role?: unknown }).role === "string"
+        ? String((message as { role: string }).role)
+        : "unknown";
+    return `${role}:${extractText(message) ?? ""}`;
+  });
 }
 
 describe("handleChatEvent", () => {
@@ -89,7 +102,7 @@ describe("handleChatEvent", () => {
     expect(state.chatStream).toBe("Hello");
   });
 
-  it("ignores NO_REPLY delta updates", () => {
+  it("appends delta text exactly as provided by the gateway", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -104,7 +117,7 @@ describe("handleChatEvent", () => {
 
     expect(handleChatEvent(state, payload)).toBe("delta");
     expect(state.chatRunPhase).toBe("typing");
-    expect(state.chatStream).toBe("Hello");
+    expect(state.chatStream).toBe("HelloNO_REPLY");
   });
 
   it("updates the active run phase from explicit phase events", () => {
@@ -134,7 +147,7 @@ describe("handleChatEvent", () => {
     );
   });
 
-  it("coalesces duplicate assistant finals without idempotency keys", () => {
+  it("keeps separate assistant finals when the backend does not provide stable identity", () => {
     const state = createState({
       chatMessages: [
         {
@@ -158,11 +171,11 @@ describe("handleChatEvent", () => {
       }),
     ).toBe("final");
 
-    expect(state.chatMessages).toHaveLength(1);
-    expect((state.chatMessages[0] as { timestamp?: number }).timestamp).toBe(1_005);
+    expect(state.chatMessages).toHaveLength(2);
+    expect((state.chatMessages[1] as { timestamp?: number }).timestamp).toBe(1_005);
   });
 
-  it("supports thinking and finalizing phases from backend events", () => {
+  it("supports thinking phase from backend events", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -178,19 +191,9 @@ describe("handleChatEvent", () => {
       }),
     ).toBe("phase");
     expect(state.chatRunPhase).toBe("thinking");
-
-    expect(
-      handleChatEvent(state, {
-        runId: "run-1",
-        sessionKey: "main",
-        state: "phase",
-        phase: "finalizing",
-      }),
-    ).toBe("phase");
-    expect(state.chatRunPhase).toBe("finalizing");
   });
 
-  it("rehydrates non-typing active-run text as a committed assistant bubble", async () => {
+  it("treats non-typing active-run text as ephemeral status only", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [],
       toolInvocations: [],
@@ -211,14 +214,33 @@ describe("handleChatEvent", () => {
     expect(state.chatRunId).toBe("run-1");
     expect(state.chatRunPhase).toBe("tool_running");
     expect(state.chatStream).toBeNull();
-    expect(state.chatMessages).toContainEqual(
-      expect.objectContaining({
-        role: "assistant",
-        content: [{ type: "text", text: "I'm ready to help!" }],
-        timestamp: 100,
+    expect(state.chatStreamStartedAt).toBe(100);
+    expect(state.chatMessages).toEqual([]);
+  });
+
+  it("refreshes the active timestamp when a run changes phase", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatRunPhase: "processing",
+      chatStreamStartedAt: 1_000,
+    });
+
+    expect(
+      handleChatEvent(state, {
         runId: "run-1",
+        sessionKey: "main",
+        state: "phase",
+        phase: "tool_running",
       }),
-    );
+    ).toBe("phase");
+    expect(state.chatRunPhase).toBe("tool_running");
+    expect(state.chatStreamStartedAt).toBe(5_000);
+
+    vi.useRealTimers();
   });
 
   it("appends streamed suffix deltas to the visible assistant text", () => {
@@ -239,7 +261,7 @@ describe("handleChatEvent", () => {
     expect(state.chatStream).toBe("Hello world");
   });
 
-  it("ignores duplicate streamed suffix deltas", () => {
+  it("keeps repeated streamed suffixes when the gateway sends them", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -255,7 +277,89 @@ describe("handleChatEvent", () => {
       }),
     ).toBe("delta");
 
-    expect(state.chatStream).toBe("Hello world");
+    expect(state.chatStream).toBe("Hello world world");
+  });
+
+  it("keeps the committed live stream when final arrives without a new terminal row", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatRunPhase: "typing",
+      chatStream: "I'm ready to help!",
+      chatStreamStartedAt: 100,
+      chatStreamCommittedPrefixLength: 0,
+    });
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-1",
+        sessionKey: "main",
+        state: "phase",
+        phase: "tool_running",
+      }),
+    ).toBe("phase");
+
+    expect(state.chatMessages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "I'm ready to help!" }],
+        timestamp: 100,
+        runId: "run-1",
+      },
+    ]);
+    expect(state.chatStreamCommittedPrefixLength).toBe("I'm ready to help!".length);
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-1",
+        sessionKey: "main",
+        state: "final",
+      }),
+    ).toBe("final");
+
+    expect(
+      state.chatMessages.filter(
+        (message) =>
+          extractText(message) === "I'm ready to help!" &&
+          (message as { role?: string }).role === "assistant",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("commits the current typing stream exactly as held when leaving typing", () => {
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatRunPhase: "typing",
+      chatMessages: [
+        {
+          role: "assistant",
+          runId: "run-1",
+          content: [
+            { type: "text", text: "I'm ready to help! Let me check the relevant files and get" },
+          ],
+          timestamp: 1,
+        },
+      ],
+      chatStream: "I'm ready to help! Let me check the relevant files and get started.",
+      chatStreamStartedAt: 100,
+      chatStreamCommittedPrefixLength: "I'm ready to help! Let me check the relevant files and get"
+        .length,
+    });
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-1",
+        sessionKey: "main",
+        state: "phase",
+        phase: "processing",
+      }),
+    ).toBe("phase");
+
+    expect(state.chatMessages.map((message) => extractText(message))).toEqual([
+      "I'm ready to help! Let me check the relevant files and get",
+      "I'm ready to help! Let me check the relevant files and get started.",
+    ]);
   });
 
   it("appends final payload from another run without clearing active stream", () => {
@@ -282,7 +386,7 @@ describe("handleChatEvent", () => {
     expect(state.chatMessages[0]).toEqual(payload.message);
   });
 
-  it("drops NO_REPLY final payload from another run without clearing active stream", () => {
+  it("renders assistant finals from another run exactly as sent", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-user",
@@ -299,11 +403,11 @@ describe("handleChatEvent", () => {
       },
     };
 
-    expect(handleChatEvent(state, payload)).toBe("final");
+    expect(handleChatEvent(state, payload)).toBe(null);
     expect(state.chatRunId).toBe("run-user");
     expect(state.chatStream).toBe("Working...");
     expect(state.chatStreamStartedAt).toBe(123);
-    expect(state.chatMessages).toEqual([]);
+    expect(state.chatMessages).toEqual([payload.message]);
   });
 
   it("returns final for another run when payload has no message", () => {
@@ -353,7 +457,7 @@ describe("handleChatEvent", () => {
     });
   });
 
-  it("persists only the uncommitted final suffix after a tool split", () => {
+  it("persists the canonical terminal assistant row returned by the gateway", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -374,19 +478,15 @@ describe("handleChatEvent", () => {
       state: "final",
       message: {
         role: "assistant",
-        content: [{ type: "text", text: "Before tool call\nAfter tool call" }],
+        content: [{ type: "text", text: "\nAfter tool call" }],
         timestamp: 300,
+        runId: "run-1",
       },
     };
 
     expect(handleChatEvent(state, payload)).toBe("final");
     expect(state.chatMessages).toHaveLength(2);
-    expect(state.chatMessages[1]).toEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "\nAfter tool call" }],
-      timestamp: 300,
-      runId: "run-1",
-    });
+    expect(state.chatMessages[1]).toEqual(payload.message);
   });
 
   it("does not persist empty or whitespace-only stream on final", () => {
@@ -591,7 +691,7 @@ describe("handleChatEvent", () => {
     expect(state.chatMessages).toEqual([existingMessage]);
   });
 
-  it("drops NO_REPLY final payload from another run", () => {
+  it("keeps another-run assistant finals exactly as returned by the gateway", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-user",
@@ -608,13 +708,13 @@ describe("handleChatEvent", () => {
       },
     };
 
-    expect(handleChatEvent(state, payload)).toBe("final");
-    expect(state.chatMessages).toEqual([]);
+    expect(handleChatEvent(state, payload)).toBe(null);
+    expect(state.chatMessages).toEqual([payload.message]);
     expect(state.chatRunId).toBe("run-user");
     expect(state.chatStream).toBe("Working...");
   });
 
-  it("drops NO_REPLY final payload from own run", () => {
+  it("keeps own-run assistant finals exactly as returned by the gateway", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -632,12 +732,12 @@ describe("handleChatEvent", () => {
     };
 
     expect(handleChatEvent(state, payload)).toBe("final");
-    expect(state.chatMessages).toEqual([]);
+    expect(state.chatMessages).toEqual([payload.message]);
     expect(state.chatRunId).toBe(null);
     expect(state.chatStream).toBe(null);
   });
 
-  it("does not persist NO_REPLY stream text on final without message", () => {
+  it("persists final fallback stream text exactly as buffered", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -651,10 +751,15 @@ describe("handleChatEvent", () => {
     };
 
     expect(handleChatEvent(state, payload)).toBe("final");
-    expect(state.chatMessages).toEqual([]);
+    expect(state.chatMessages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "NO_REPLY" }],
+      }),
+    ]);
   });
 
-  it("does not persist NO_REPLY stream text on abort", () => {
+  it("persists abort fallback stream text exactly as buffered", () => {
     const state = createState({
       sessionKey: "main",
       chatRunId: "run-1",
@@ -669,7 +774,12 @@ describe("handleChatEvent", () => {
     } as unknown as ChatEventPayload;
 
     expect(handleChatEvent(state, payload)).toBe("aborted");
-    expect(state.chatMessages).toEqual([]);
+    expect(state.chatMessages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "NO_REPLY" }],
+      }),
+    ]);
   });
 
   it("keeps user messages containing NO_REPLY text", () => {
@@ -719,7 +829,7 @@ describe("handleChatEvent", () => {
 });
 
 describe("loadChatHistory", () => {
-  it("filters NO_REPLY assistant messages from history", async () => {
+  it("keeps history rows exactly as returned by the gateway", async () => {
     const messages = [
       { role: "user", content: [{ type: "text", text: "Hello" }] },
       { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
@@ -736,9 +846,7 @@ describe("loadChatHistory", () => {
 
     await loadChatHistory(state);
 
-    expect(state.chatMessages).toHaveLength(2);
-    expect(state.chatMessages[0]).toEqual(messages[0]);
-    expect(state.chatMessages[1]).toEqual(messages[2]);
+    expect(state.chatMessages).toEqual(messages);
     expect(state.chatThinkingLevel).toBe("low");
     expect(state.chatLoading).toBe(false);
   });
@@ -793,10 +901,10 @@ describe("event-first history hydration", () => {
     expect(state.chatRunId).toBe("run-1");
     expect(state.chatRunPhase).toBe("thinking");
     expect(state.chatStream).toBeNull();
-    expect(state.chatStreamStartedAt).toBeNull();
+    expect(state.chatStreamStartedAt).toBe(1234);
   });
 
-  it("preserves queued live tool rows when chat.history hydrates stale tool invocations", async () => {
+  it("trusts chat.history as the source of tool chronology during hydration", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [],
       toolInvocations: [],
@@ -821,7 +929,7 @@ describe("event-first history hydration", () => {
 
     await loadChatHistory(state);
 
-    expect(state.chatToolMessages).toEqual([liveToolMessage]);
+    expect(state.chatToolMessages).toEqual([]);
   });
 
   it("hydrates queued items into queue state without adding transcript rows", async () => {
@@ -887,7 +995,7 @@ describe("event-first history hydration", () => {
     expect(state.chatResetInFlight).toBe(false);
   });
 
-  it("filters queued user rows out of transcript hydration when the same item is still queued", async () => {
+  it("keeps transcript rows exactly as returned by chat.history", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [
         {
@@ -919,6 +1027,12 @@ describe("event-first history hydration", () => {
         role: "assistant",
         content: [{ type: "text", text: "I'm Developer Lead..." }],
       }),
+      expect.objectContaining({
+        role: "user",
+        content: [{ type: "text", text: "retry" }],
+        idempotencyKey: "queued-1",
+        queued: true,
+      }),
     ]);
     expect(state.chatQueue).toEqual([
       expect.objectContaining({ id: "queued-1", text: "retry", source: "backend" }),
@@ -948,16 +1062,23 @@ describe("event-first history hydration", () => {
     expect(state.chatRunId).toBe("run-reset");
   });
 
-  it("shows bare /reset bootstrap prompt from activeRun metadata on refresh", async () => {
+  it("keeps bare /reset bootstrap prompt from canonical history rows on refresh", async () => {
     const effectiveUserMessage =
       "A new session was started via /new or /reset. Execute your Session Startup sequence now.";
     const request = vi.fn().mockResolvedValue({
-      messages: [{ role: "user", content: [{ type: "text", text: "/reset" }], timestamp: 10 }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "/reset" }], timestamp: 10 },
+        {
+          role: "system",
+          content: [{ type: "text", text: effectiveUserMessage }],
+          timestamp: 20,
+          idempotencyKey: "run-reset:effective-user-message",
+        },
+      ],
       toolInvocations: [],
       activeRun: {
         runId: "run-reset",
         streamText: "",
-        effectiveUserMessage,
         startedAtMs: 20,
       },
     });
@@ -972,22 +1093,162 @@ describe("event-first history hydration", () => {
     const bootstrap = state.chatMessages[1] as {
       role?: string;
       content?: Array<{ text?: string }>;
+      idempotencyKey?: string;
     };
     expect(bootstrap.role).toBe("system");
     expect(bootstrap.content?.[0]?.text).toBe(effectiveUserMessage);
+    expect(bootstrap.idempotencyKey).toBe("run-reset:effective-user-message");
+  });
+
+  it("does not append an active-run assistant snapshot when history already has the same text", async () => {
+    const request = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "I'm ready to help! Let me check the relevant files." }],
+          timestamp: 10,
+          runId: "run-reset",
+        },
+      ],
+      toolInvocations: [],
+      activeRun: {
+        runId: "run-reset",
+        streamText: "I'm ready to help! Let me check the relevant files.",
+        startedAtMs: 10,
+        phase: "tool_running",
+      },
+    });
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    await loadChatHistory(state);
+
+    expect(
+      state.chatMessages.filter(
+        (message) =>
+          extractText(message) === "I'm ready to help! Let me check the relevant files." &&
+          (message as { role?: string }).role === "assistant",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("preserves reset/bootstrap and split assistant chronology as plain text before and after refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("1970-01-01T00:00:00.015Z"));
+    const effectiveUserMessage =
+      "A new session was started via /new or /reset. Execute your Session Startup sequence now.";
+    const state = createState({
+      connected: true,
+      client: {
+        request: vi.fn().mockResolvedValue({
+          runId: "run-reset",
+          status: "started",
+          effectiveUserMessage,
+        }),
+      } as unknown as ChatState["client"],
+    });
+
+    await sendChatMessage(state, "/reset");
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-reset",
+        sessionKey: "main",
+        state: "delta",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "I'm ready to help!" }],
+          timestamp: 30,
+        },
+      }),
+    ).toBe("delta");
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-reset",
+        sessionKey: "main",
+        state: "phase",
+        phase: "tool_running",
+      }),
+    ).toBe("phase");
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-reset",
+        sessionKey: "main",
+        state: "aborted",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "persona." }],
+          timestamp: 40,
+          idempotencyKey: "run-reset:assistant",
+        },
+      }),
+    ).toBe("aborted");
+
+    const liveSummary = summarizeTranscript(state.chatMessages);
+    expect(liveSummary).toEqual([
+      "user:/reset",
+      `system:${effectiveUserMessage}`,
+      "assistant:I'm ready to help!",
+      "assistant:persona.",
+    ]);
+
+    const refreshedState = createState({
+      connected: true,
+      client: {
+        request: vi.fn().mockResolvedValue({
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "/reset" }],
+              timestamp: 10,
+            },
+            {
+              role: "system",
+              content: [{ type: "text", text: effectiveUserMessage }],
+              timestamp: 20,
+              idempotencyKey: "run-reset:effective-user-message",
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "I'm ready to help!" }],
+              timestamp: 30,
+              runId: "run-reset",
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: " persona." }],
+              timestamp: 40,
+              runId: "run-reset",
+              idempotencyKey: "run-reset:assistant",
+            },
+          ],
+          toolInvocations: [],
+          queuedMessages: [],
+          activeRun: null,
+        }),
+      } as unknown as ChatState["client"],
+    });
+
+    await loadChatHistory(refreshedState);
+
+    expect(summarizeTranscript(refreshedState.chatMessages)).toEqual(liveSummary);
+    vi.useRealTimers();
   });
 });
 
 describe("sendChatMessage", () => {
-  it("keeps optimistic /reset row visible even if backend returns effectiveUserMessage metadata", async () => {
-    const effectiveUserMessage =
-      "A new session was started via /new or /reset. Execute your Session Startup sequence now.";
+  it("shows bare /reset bootstrap text immediately using the history dedupe key", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-11T18:04:00.000Z"));
     const request = vi.fn().mockResolvedValue({
       runId: "run-1",
       status: "started",
-      effectiveUserMessage,
+      effectiveUserMessage:
+        "A new session was started via /new or /reset. Execute your Session Startup sequence now.",
     });
     const state = createState({
       connected: true,
@@ -1007,14 +1268,14 @@ describe("sendChatMessage", () => {
     expect((userMessage as { idempotencyKey?: string }).idempotencyKey).toBe(runId);
     expect(state.chatRunId).toBe("run-1");
     expect(state.chatMessages).toHaveLength(2);
-    const bootstrap = state.chatMessages[1] as {
-      role?: string;
-      content?: Array<{ text?: string }>;
-    };
-    expect(bootstrap.role).toBe("system");
-    expect(bootstrap.content?.[0]?.text).toBe(effectiveUserMessage);
-    expect((bootstrap as { timestamp?: number }).timestamp).toBe(
-      (state.chatMessages[0] as { timestamp?: number }).timestamp,
+    expect(state.chatMessages[1]).toEqual(
+      expect.objectContaining({
+        role: "system",
+        idempotencyKey: "run-1:effective-user-message",
+      }),
+    );
+    expect(extractText(state.chatMessages[1])).toContain(
+      "A new session was started via /new or /reset.",
     );
     vi.useRealTimers();
   });
@@ -1333,7 +1594,7 @@ describe("queue-driven runtime ownership", () => {
 });
 
 describe("loadChatHistory", () => {
-  it("filters assistant NO_REPLY messages and keeps user NO_REPLY messages", async () => {
+  it("keeps assistant and user rows exactly as returned by chat.history", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [
         { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
@@ -1354,6 +1615,7 @@ describe("loadChatHistory", () => {
       limit: 200,
     });
     expect(state.chatMessages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
       { role: "assistant", content: [{ type: "text", text: "visible answer" }] },
       { role: "user", content: [{ type: "text", text: "NO_REPLY" }] },
     ]);

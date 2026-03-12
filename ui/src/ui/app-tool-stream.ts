@@ -1,5 +1,6 @@
 import { buildToolDedupeKeys } from "./chat/tool-identity.ts";
 import { truncateText } from "./format.ts";
+import type { ChatLiveActivity, ChatLiveActor } from "./types/chat-types.ts";
 
 const TOOL_STREAM_LIMIT = 50;
 const TOOL_STREAM_THROTTLE_MS = 24;
@@ -8,11 +9,22 @@ const TOOL_STREAM_TERMINAL_GRACE_MS = 3_000;
 
 export type AgentEventPayload = {
   runId: string;
-  seq: number;
-  stream: string;
-  ts: number;
+  seq?: number;
+  stream?: string;
+  ts?: number;
   sessionKey?: string;
-  data: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  eventType?: string;
+  activityId?: string;
+  parentActivityId?: string;
+  kind?: string;
+  output?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  patch?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  outcome?: string;
+  origin?: Record<string, unknown>;
+  target?: Record<string, unknown>;
 };
 
 export type ToolStreamEntry = {
@@ -39,31 +51,9 @@ type ToolStreamHost = {
   toolStreamById: Map<string, ToolStreamEntry>;
   toolStreamOrder: string[];
   chatToolMessages: Record<string, unknown>[];
+  chatLiveActivities?: ChatLiveActivity[];
   toolStreamSyncTimer: number | null;
 };
-
-function commitVisibleStreamBeforeTool(host: ToolStreamHost, timestamp: number) {
-  const currentStream = typeof host.chatStream === "string" ? host.chatStream : "";
-  if (!currentStream.trim()) {
-    return;
-  }
-  const startedAt =
-    typeof host.chatStreamStartedAt === "number" ? host.chatStreamStartedAt : timestamp;
-  const existingMessages = Array.isArray(host.chatMessages) ? host.chatMessages : [];
-  host.chatMessages = [
-    ...existingMessages,
-    {
-      role: "assistant",
-      content: [{ type: "text", text: currentStream }],
-      timestamp: startedAt,
-      ...(host.chatRunId ? { runId: host.chatRunId } : {}),
-    },
-  ];
-  const committed = Math.max(0, host.chatStreamCommittedPrefixLength ?? 0);
-  host.chatStreamCommittedPrefixLength = committed + currentStream.length;
-  host.chatStream = "";
-  host.chatStreamStartedAt = timestamp;
-}
 
 function toTrimmedString(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -309,6 +299,7 @@ export function resetToolStream(host: ToolStreamHost) {
   host.toolStreamById.clear();
   host.toolStreamOrder = [];
   host.chatToolMessages = [];
+  host.chatLiveActivities = [];
   host.chatLastTerminalRunId = null;
   host.chatLastTerminalAt = null;
   flushToolStreamSync(host);
@@ -485,9 +476,188 @@ function hasCommonKey(left: string[], right: string[]): boolean {
   return left.some((key) => rightSet.has(key));
 }
 
+function titleCaseWords(value: string): string {
+  return value
+    .split(/[-_:\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function humanizeAgentId(value: string): string {
+  return titleCaseWords(value);
+}
+
+function normalizeAccent(value: unknown): string | null {
+  const text = toTrimmedString(value);
+  if (!text) {
+    return null;
+  }
+  return /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(text) ? text : null;
+}
+
+function resolveActorFromEvent(payload: AgentEventPayload): ChatLiveActor {
+  const origin = payload.origin ?? {};
+  const target = payload.target ?? {};
+  const originType = toTrimmedString(origin.type) ?? "self";
+  const targetAgentId = toTrimmedString(target.agentId);
+  const originAgentId = toTrimmedString(origin.agentId);
+  const agentId =
+    originType === "peer_agent"
+      ? (originAgentId ?? targetAgentId ?? "peer-agent")
+      : (targetAgentId ?? originAgentId ?? "assistant");
+  const isPeer = originType === "peer_agent" || payload.kind === "peer_agent_call";
+  const label = isPeer ? humanizeAgentId(agentId) : "Assistant";
+  return {
+    role: isPeer ? "peer" : "assistant",
+    actorKey: `${isPeer ? "peer" : "assistant"}:${agentId}`,
+    label,
+    avatar: toTrimmedString(origin.avatar) ?? toTrimmedString(target.avatar),
+    accent: normalizeAccent(origin.accent) ?? normalizeAccent(target.accent),
+  };
+}
+
+function resolveStatusLabel(payload: AgentEventPayload): string | null {
+  const eventType = payload.eventType ?? "";
+  switch (payload.kind) {
+    case "reasoning":
+      return "Thinking";
+    case "tool_call":
+      return "Using tool";
+    case "peer_agent_call":
+      return eventType === "activity.completed" ? null : "Contacting agent";
+    case "subagent_call":
+      return eventType === "activity.completed" ? null : "Waiting on agent";
+    case "assistant_message":
+      return "Typing";
+    default:
+      return null;
+  }
+}
+
+function upsertLiveActivity(host: ToolStreamHost, next: ChatLiveActivity) {
+  const existing = host.chatLiveActivities ?? [];
+  const idx = existing.findIndex((entry) => entry.activityId === next.activityId);
+  if (idx < 0) {
+    host.chatLiveActivities = [...existing, next];
+    return;
+  }
+  host.chatLiveActivities = existing.map((entry, index) =>
+    index === idx
+      ? {
+          ...entry,
+          ...next,
+          actor: next.actor ?? entry.actor,
+          text: next.text ?? entry.text,
+          statusLabel: next.statusLabel ?? entry.statusLabel,
+        }
+      : entry,
+  );
+}
+
+function removeLiveActivity(host: ToolStreamHost, activityId: string) {
+  const existing = host.chatLiveActivities ?? [];
+  host.chatLiveActivities = existing.filter(
+    (entry) => entry.activityId !== activityId && entry.parentActivityId !== activityId,
+  );
+}
+
+function clearLiveActivitiesForRun(host: ToolStreamHost, runId: string) {
+  const existing = host.chatLiveActivities ?? [];
+  host.chatLiveActivities = existing.filter((entry) => entry.runId !== runId);
+}
+
+function handleCanonicalLiveActivity(host: ToolStreamHost, payload: AgentEventPayload): boolean {
+  const eventType = payload.eventType ?? "";
+  if (!eventType.startsWith("activity.") && !eventType.startsWith("run.")) {
+    return false;
+  }
+  if (payload.sessionKey && payload.sessionKey !== host.sessionKey) {
+    return true;
+  }
+  if (eventType === "run.completed") {
+    clearLiveActivitiesForRun(host, payload.runId);
+    return true;
+  }
+  if (!eventType.startsWith("activity.") || !payload.activityId) {
+    return true;
+  }
+  const kind = payload.kind ?? "";
+  const activityId = payload.activityId;
+  const actor = resolveActorFromEvent(payload);
+  const data = payload.output ?? payload.input ?? payload.patch ?? payload.result ?? {};
+  const statusLabel = resolveStatusLabel(payload);
+  const text =
+    kind === "assistant_message"
+      ? (toTrimmedString(data.text) ?? toTrimmedString(data.delta) ?? undefined)
+      : undefined;
+  if (eventType === "activity.completed") {
+    removeLiveActivity(host, activityId);
+    return true;
+  }
+  if (
+    kind !== "assistant_message" &&
+    kind !== "reasoning" &&
+    kind !== "tool_call" &&
+    kind !== "peer_agent_call" &&
+    kind !== "subagent_call"
+  ) {
+    return true;
+  }
+  upsertLiveActivity(host, {
+    activityId,
+    runId: payload.runId,
+    parentActivityId: payload.parentActivityId ?? null,
+    kind,
+    actor,
+    startedAt: typeof payload.ts === "number" ? payload.ts : Date.now(),
+    updatedAt: Date.now(),
+    text,
+    statusLabel,
+    completed: false,
+  });
+  return true;
+}
+
 export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPayload) {
   if (!payload) {
     return;
+  }
+
+  if (handleCanonicalLiveActivity(host, payload)) {
+    if (payload.eventType && payload.kind !== "tool_call") {
+      return;
+    }
+  }
+
+  const canonicalEventType = payload.eventType ?? "";
+  const canonicalKind = payload.kind ?? "";
+  if (!payload.stream && canonicalKind === "tool_call" && canonicalEventType) {
+    const legacyPhase =
+      canonicalEventType === "activity.started"
+        ? "start"
+        : canonicalEventType === "activity.updated"
+          ? "update"
+          : canonicalEventType === "activity.completed"
+            ? "result"
+            : "";
+    payload = {
+      ...payload,
+      stream: "tool",
+      ts: payload.ts ?? Date.now(),
+      data: {
+        phase: legacyPhase,
+        toolCallId: payload.activityId,
+        name:
+          toTrimmedString(payload.input?.name) ??
+          toTrimmedString(payload.patch?.name) ??
+          toTrimmedString(payload.result?.name) ??
+          "tool",
+        args: payload.input?.args,
+        partialResult: payload.patch?.partialResult,
+        result: payload.result?.result,
+      },
+    };
   }
 
   // Handle compaction events
@@ -534,9 +704,6 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
 
   const now = Date.now();
   const eventTimestamp = typeof payload.ts === "number" ? payload.ts : now;
-  if (host.chatRunId && phase && payload.runId === host.chatRunId) {
-    commitVisibleStreamBeforeTool(host, eventTimestamp);
-  }
   const incomingKeys = buildToolDedupeKeys({
     toolCallId,
     runId: payload.runId,

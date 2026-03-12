@@ -275,7 +275,7 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
-  it("commits visible assistant stream before a live tool event", () => {
+  it("does not commit visible assistant stream when a live tool event arrives", () => {
     vi.useFakeTimers();
     const now = Date.now();
     const host = createHost({
@@ -305,17 +305,10 @@ describe("app-tool-stream fallback lifecycle handling", () => {
       },
     });
 
-    expect(host.chatMessages).toEqual([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Before tool call" }],
-        timestamp: now - 100,
-        runId: "run-split",
-      },
-    ]);
-    expect(host.chatStream).toBe("");
-    expect(host.chatStreamCommittedPrefixLength).toBe("Before tool call".length);
-    expect(host.chatStreamStartedAt).toBe(now);
+    expect(host.chatMessages).toEqual([]);
+    expect(host.chatStream).toBe("Before tool call");
+    expect(host.chatStreamCommittedPrefixLength).toBe(0);
+    expect(host.chatStreamStartedAt).toBe(now - 100);
     vi.useRealTimers();
   });
 
